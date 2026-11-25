@@ -7,3 +7,7 @@ export * from "./spend/store";
 export * from "./provider/types";
 export { FakeProvider, scripted, textResponse, type FakeHandler } from "./provider/fake";
 export * from "./metered";
+export * from "./spend/redis-store";
+export { connectRedis } from "./spend/redis-client";
+export * from "./provider/ember";
+export * from "./runtime";

@@ -11,14 +11,21 @@
   },
   "scripts": {
     "test": "vitest run",
+    "test:redis": "TEST_REDIS_URL=redis://127.0.0.1:6379/15 vitest run",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "redis:up": "docker compose up -d --wait",
+    "redis:down": "docker compose down",
+    "doctor": "node --env-file-if-exists=.env.local --import tsx scripts/doctor.ts",
+    "spend": "node --env-file-if-exists=.env.local --import tsx scripts/spend.ts"
   },
   "dependencies": {
+    "ioredis": "^6.1.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.6.7",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.1.1"
   }
