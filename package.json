@@ -1,0 +1,25 @@
+{
+  "name": "twenty-alibis",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A bilingual murder mystery where every suspect is a Muse Ember agent and code owns the truth.",
+  "license": "MIT",
+  "author": "Doran Gao",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.7",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1"
+  }
+}

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+.DS_Store
+
+# Secrets and local settings never go in the repo
+.env
+.env.*
+!.env.example
+*.local.*
+.vercel/
+
+# Raw usage traces stay local; only the sanitized summary is published
+traces/
+*.trace.jsonl
