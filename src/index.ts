@@ -11,3 +11,6 @@ export * from "./spend/redis-store";
 export { connectRedis } from "./spend/redis-client";
 export * from "./provider/ember";
 export * from "./runtime";
+export * from "./case/access";
+export * from "./agents/render";
+export * from "./agents/suspect-prompt";

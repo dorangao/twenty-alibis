@@ -1,3 +1,4 @@
+import { isOpen, type Held } from "../case/access";
 import type { Case } from "../case/schema";
 import type { ChatMessage, ToolSpec } from "../provider/types";
 import { renderAssertion } from "./render";
@@ -59,9 +60,18 @@ export function suspectSystemMessages(c: Case, suspectId: string): ChatMessage[]
   ];
 }
 
-/** The topics this suspect can be asked about, as the tool describes them to the model. */
-export function recallTool(c: Case, suspectId: string): ToolSpec {
-  const topics = c.actions.topics.filter((t) => t.suspect === suspectId);
+/**
+ * This suspect's topics that are open to the player right now. A topic that still needs
+ * something the player does not hold is not listed and not served: its label and its
+ * testimony stay out of the model's sight until the player has unlocked it.
+ */
+function openTopics(c: Case, suspectId: string, held: Held) {
+  return c.actions.topics.filter((t) => t.suspect === suspectId && isOpen(t, held));
+}
+
+/** The topics this suspect can be asked about now, as the tool describes them to the model. */
+export function recallTool(c: Case, suspectId: string, held: Held): ToolSpec {
+  const topics = openTopics(c, suspectId, held);
   return {
     name: "recall",
     description:
@@ -81,9 +91,12 @@ export function recallTool(c: Case, suspectId: string): ToolSpec {
  * What `recall` returns: the statements this suspect makes on that topic, each with its id
  * and its wording in both languages. It does not say whether a statement is true. The
  * suspect is never told that it is lying; it is only told what it says.
+ *
+ * A topic that is locked gives exactly the same empty result as one that does not exist or
+ * belongs to someone else, so the reply cannot be used to tell them apart.
  */
-export function recallResult(c: Case, suspectId: string, topicId: string): string {
-  const topic = c.actions.topics.find((t) => t.id === topicId && t.suspect === suspectId);
+export function recallResult(c: Case, suspectId: string, topicId: string, held: Held): string {
+  const topic = openTopics(c, suspectId, held).find((t) => t.id === topicId);
   const statements = (topic?.yields ?? []).flatMap((id) => {
     const assertion = c.assertions.find((a) => a.id === id);
     return assertion ? [{ id, en: renderAssertion(c, suspectId, assertion, "en"), zh: renderAssertion(c, suspectId, assertion, "zh") }] : [];

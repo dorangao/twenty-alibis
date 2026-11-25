@@ -1,3 +1,4 @@
+import { isOpen } from "./access";
 import type { Case, Proposition } from "./schema";
 import { contradicts } from "./truth";
 import { validateCase, type ValidationResult } from "./validate";
@@ -208,7 +209,7 @@ export function solve(c: Case): SolveResult {
     return next;
   };
   const usable = (act: Act, held: Set<string>, mask: bigint) =>
-    !(mask & act.bit) && act.requires.every((r) => held.has(r)) && !act.yields.every((y) => held.has(y));
+    !(mask & act.bit) && isOpen(act, held) && !act.yields.every((y) => held.has(y));
 
   /**
    * One legal session of at most `limit` actions that meets every goal, or null if there is
@@ -261,7 +262,7 @@ export function solve(c: Case): SolveResult {
   for (let progressed = true, mask = 0n; progressed; ) {
     progressed = false;
     for (const act of acts) {
-      if (mask & act.bit || !act.requires.every((r) => everything.has(r))) continue;
+      if (mask & act.bit || !isOpen(act, everything)) continue;
       mask |= act.bit;
       everything = take(everything, act);
       everythingCount++;
