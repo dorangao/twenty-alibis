@@ -38,6 +38,7 @@ export interface EmberProviderOptions {
  */
 export class EmberProvider implements Provider {
   readonly name = "ember";
+  readonly billable = true;
   private readonly url: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;

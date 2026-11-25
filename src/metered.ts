@@ -1,4 +1,4 @@
-import { MODEL, TIER_LIMIT_TOKENS, costNano, worstCaseNano } from "./spend/pricing";
+import { MODEL, TIER_LIMIT_TOKENS, absoluteWorstNano, costNano, worstCaseNano } from "./spend/pricing";
 import type { SpendStore } from "./spend/store";
 import {
   NotDispatchedError,
@@ -10,11 +10,18 @@ import {
   type ToolSpec,
 } from "./provider/types";
 
-/**
- * The encoded body may not be larger than this. It keeps every request far below the
- * 200K-token line where the price triples. This is a margin, not a proof: see `bound` below.
- */
+/** The encoded body may not be larger than this. */
 export const MAX_PAYLOAD_BYTES = 50_000;
+/** A measured tokens-per-byte figure is doubled before it is trusted. */
+export const BOUND_SAFETY_FACTOR = 2;
+
+/**
+ * A measured upper bound on how many input tokens one byte of body becomes, taken from real
+ * usage figures. Until one exists, nothing is assumed about the size of a request.
+ */
+export interface InputBound {
+  tokensPerByte: number;
+}
 /** No role may ask for more output than this in one request. */
 export const MAX_OUTPUT_TOKENS_CEILING = 32_000;
 /** Reasoning efforts allowed unless the caller of createMetered() widens the list. */
@@ -47,6 +54,7 @@ export type RefusalReason =
   | "kill-switch"
   | "envelope-exhausted"
   | "envelope-suspended"
+  | "paid-not-enabled"
   | "duplicate-attempt"
   | "store-unavailable"
   | "not-dispatched";
@@ -88,6 +96,11 @@ export interface TraceEvent {
    */
   outcome: "settled" | "settle-pending" | "retained" | "not-sent" | `refused:${RefusalReason}`;
   holdNano: number;
+  /**
+   * What the hold was sized for. "context-window": the most any request can cost at all.
+   * "low-tier": a measured bound showed this body stays under the line where the price triples.
+   */
+  holdBasis?: "context-window" | "low-tier";
   costNano: number;
   inputTokens?: number;
   cachedTokens?: number;
@@ -112,6 +125,12 @@ export interface MeteredDeps {
   killSwitch?: () => boolean | Promise<boolean>;
   /** Defaults to minimal and low. Anything else must be allowed here on purpose. */
   allowedEfforts?: readonly ReasoningEffort[];
+  /**
+   * A measured bound on input size. Without it, every request is held at the most a request
+   * can ever cost. With it, a body that the bound keeps in the low price tier gets the
+   * smaller low-tier hold.
+   */
+  inputBound?: InputBound;
   /** A failing trace sink never changes what is sent or charged. */
   trace?: (event: TraceEvent) => void;
   now?: () => Date;
@@ -127,16 +146,19 @@ const utf8Length = (text: string) => new TextEncoder().encode(text).length;
  *      body text, and check that. From here on only that text and those copied numbers are
  *      used, so a caller that changes its objects later changes nothing.
  *   2. Refuse if the kill switch is on.
- *   3. Reserve the worst case. Refuse if the envelope cannot cover it or is suspended.
+ *   3. Reserve the worst case. Refuse if the envelope cannot cover it, is suspended, or has
+ *      no operator authorization for a request that spends real money.
  *   4. Check the kill switch again. A request that waited on the store must not slip past a
  *      switch that was thrown meanwhile.
  *   5. Send the body once.
  *   6. Settle with the real cost. If the reply has no usable usage block, or anything failed
  *      after sending began, the full hold stays charged for good.
  *
- * `bound`: the hold assumes the input is under 200K tokens. That cannot be proven before
- * sending, so it is checked after: if a reply reports more input tokens than the guard
- * assumed possible, or a cost above the hold, the envelope is suspended at once.
+ * How large the hold is: with no measured input bound, it is the most any request can cost
+ * (a full context window at the high price), which needs no assumption at all. With a
+ * measured bound that keeps this body in the low price tier, it is the low-tier worst case.
+ * Either way the reply is checked: more input than was assumed, or a cost above the hold,
+ * suspends the envelope at once.
  */
 export function createMetered(deps: MeteredDeps) {
   const now = deps.now ?? (() => new Date());
@@ -184,7 +206,14 @@ export function createMetered(deps: MeteredDeps) {
     if (!validLimit) return refuse("bad-output-limit");
     if (!allowedEfforts.includes(reasoningEffort)) return refuse("effort-not-allowed");
     if (payloadBytes > MAX_PAYLOAD_BYTES) return refuse("payload-too-large");
-    const holdNano = worstCaseNano(maxOutputTokens);
+
+    // How many input tokens can this body be? Only a measured bound may answer that.
+    const bound = deps.inputBound;
+    const usableBound = bound !== undefined && Number.isFinite(bound.tokensPerByte) && bound.tokensPerByte > 0;
+    const assumedInputTokens = usableBound ? Math.ceil(payloadBytes * bound.tokensPerByte * BOUND_SAFETY_FACTOR) : null;
+    const lowTier = assumedInputTokens !== null && assumedInputTokens <= TIER_LIMIT_TOKENS;
+    const holdBasis = lowTier ? ("low-tier" as const) : ("context-window" as const);
+    const holdNano = lowTier ? worstCaseNano(maxOutputTokens) : absoluteWorstNano(maxOutputTokens);
 
     const switchIsOn = async (): Promise<boolean> => {
       if (!deps.killSwitch) return false;
@@ -201,11 +230,21 @@ export function createMetered(deps: MeteredDeps) {
     // ---- 3. Reserve. If the store cannot answer, nothing is sent. ----
     let reserved;
     try {
-      reserved = await deps.store.reserve({ envelope: deps.envelope, attemptId, amountNano: holdNano, limitNano: deps.limitNano });
+      reserved = await deps.store.reserve({
+        envelope: deps.envelope,
+        attemptId,
+        amountNano: holdNano,
+        limitNano: deps.limitNano,
+        billable: deps.provider.billable === true,
+      });
     } catch {
       return refuse("store-unavailable");
     }
-    if (!reserved.ok) return refuse(reserved.reason === "suspended" ? "envelope-suspended" : "envelope-exhausted");
+    if (!reserved.ok) {
+      if (reserved.reason === "suspended") return refuse("envelope-suspended");
+      if (reserved.reason === "paid-not-enabled") return refuse("paid-not-enabled");
+      return refuse("envelope-exhausted");
+    }
     if (reserved.duplicate) return refuse("duplicate-attempt");
 
     /** Nothing has left this machine, so the hold can be settled at zero. If that fails, the hold stays. */
@@ -216,7 +255,7 @@ export function createMetered(deps: MeteredDeps) {
       } catch {
         // Still reserved in the store, which is the safe side.
       }
-      emit({ outcome: "not-sent", holdNano, costNano: 0, ...(committedNano !== undefined ? { committedNano } : {}) });
+      emit({ outcome: "not-sent", holdNano, holdBasis, costNano: 0, ...(committedNano !== undefined ? { committedNano } : {}) });
       return { ok: false, attemptId, sent: false, reason };
     };
     /** Sending began. Whatever happened after, the full hold stays. */
@@ -227,7 +266,7 @@ export function createMetered(deps: MeteredDeps) {
       } catch {
         // Still reserved in the store, so the hold is kept either way.
       }
-      emit({ outcome: "retained", holdNano, costNano: holdNano, ...(committedNano !== undefined ? { committedNano } : {}) });
+      emit({ outcome: "retained", holdNano, holdBasis, costNano: holdNano, ...(committedNano !== undefined ? { committedNano } : {}) });
       return { ok: false, attemptId, sent: true, reason: "outcome-unknown", error };
     };
 
@@ -253,8 +292,9 @@ export function createMetered(deps: MeteredDeps) {
 
     // Did the guard's own assumptions hold? If not, stop the envelope before anything else goes out.
     const breaches: string[] = [];
-    if (response.usage.inputTokens > TIER_LIMIT_TOKENS) {
-      breaches.push(`${response.usage.inputTokens} input tokens is above the ${TIER_LIMIT_TOKENS} the hold assumed`);
+    if (lowTier && response.usage.inputTokens > assumedInputTokens) {
+      // The measured bound was wrong for this body. Every hold sized with it is suspect.
+      breaches.push(`${response.usage.inputTokens} input tokens is above the ${assumedInputTokens} the measured bound allowed`);
     }
     if (cost > holdNano) breaches.push(`cost ${cost} is above the hold ${holdNano}`);
 
@@ -278,6 +318,7 @@ export function createMetered(deps: MeteredDeps) {
     emit({
       outcome: settled ? "settled" : "settle-pending",
       holdNano,
+      holdBasis,
       costNano: cost,
       inputTokens: response.usage.inputTokens,
       cachedTokens: response.usage.cachedTokens,

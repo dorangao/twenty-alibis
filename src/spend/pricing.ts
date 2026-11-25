@@ -56,6 +56,22 @@ export function worstCaseNano(maxOutputTokens: number): number {
   return TIER_LIMIT_TOKENS * LOW_TIER.input + maxOutputTokens * LOW_TIER.output;
 }
 
+/** The model's whole context window. No request can carry more input than this. */
+export const CONTEXT_WINDOW_TOKENS = 1_048_576;
+
+/**
+ * The most any single request can cost, whatever its size turns out to be: a full context
+ * window of uncached input at the high-tier price, plus the whole output limit at the
+ * high-tier price. This needs no assumption about how many tokens a body becomes, so it is
+ * the hold used until a measured bound proves a request stays in the low tier.
+ */
+export function absoluteWorstNano(maxOutputTokens: number): number {
+  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens <= 0) {
+    throw new RangeError("maxOutputTokens must be a positive integer");
+  }
+  return CONTEXT_WINDOW_TOKENS * HIGH_TIER.input + maxOutputTokens * HIGH_TIER.output;
+}
+
 export function usdToNano(usd: number): number {
   return Math.round(usd * NANO_PER_USD);
 }

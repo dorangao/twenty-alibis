@@ -6,6 +6,10 @@ import { worstCaseNano } from "../src/spend/pricing";
 import { MemorySpendStore } from "../src/spend/store";
 import { readSpendConfig, resolveApiKey } from "../src/runtime";
 
+// Most tests here are about something other than hold size, so they run with a measured
+// input bound in place and get the low-tier hold. Hold selection has its own tests.
+const CALIBRATED = { inputBound: { tokensPerByte: 100 } };
+
 /**
  * The real provider is tested against a stand-in for `fetch`. No test in this file, or in
  * this repository, sends a request to the Meta Model API.
@@ -202,13 +206,23 @@ describe("EmberProvider", () => {
 
 describe("EmberProvider behind the spend guard", () => {
   const hold = worstCaseNano(150);
-  const run = async (reply: () => Response) => {
+  const run = async (reply: () => Response, authorize = true) => {
     const store = new MemorySpendStore();
+    if (authorize) await store.allowPaid({ envelope: "e", note: "test fixture" });
     const { ember, calls } = provider(reply);
-    const metered = createMetered({ provider: ember, store, envelope: "e", limitNano: 10 * hold });
+    const metered = createMetered({ ...CALIBRATED, provider: ember, store, envelope: "e", limitNano: 10 * hold });
     const result = await metered({ step: "t", promptId: "p", attemptId: "turn-1", messages: request.messages, maxOutputTokens: 150 });
     return { result, totals: await store.totals("e"), calls };
   };
+
+  it("is billable, and sends nothing until an operator has authorized paid requests", async () => {
+    const { ember } = provider(() => json(okBody));
+    expect(ember.billable).toBe(true);
+    const { result, totals, calls } = await run(() => json(okBody), false);
+    expect(result).toMatchObject({ ok: false, sent: false, reason: "paid-not-enabled" });
+    expect(calls).toHaveLength(0);
+    expect(totals).toMatchObject({ committedNano: 0, attempts: 0 });
+  });
 
   it("settles a normal reply at its real cost", async () => {
     const { result, totals } = await run(() => json(okBody));

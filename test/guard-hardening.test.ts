@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { createMetered, type MeteredDeps, type MeteredRequest, type TraceEvent } from "../src/metered";
 import { FakeProvider, scripted, textResponse } from "../src/provider/fake";
-import { TIER_LIMIT_TOKENS, usdToNano, worstCaseNano } from "../src/spend/pricing";
+import { TIER_LIMIT_TOKENS, absoluteWorstNano, usdToNano, worstCaseNano } from "../src/spend/pricing";
 import { MemorySpendStore, type SpendStore } from "../src/spend/store";
+
+// Most tests here are about something other than hold size, so they run with a measured
+// input bound in place and get the low-tier hold. Hold selection has its own tests.
+const CALIBRATED = { inputBound: { tokensPerByte: 100 } };
 
 /**
  * Behaviours added after Codex's review of the spend guard. Each one closes a way a request
@@ -21,7 +25,7 @@ const request = (attemptId: string, over: Partial<MeteredRequest> = {}): Metered
 function setup(provider: FakeProvider, over: Partial<MeteredDeps> = {}) {
   const store = (over.store as MemorySpendStore | undefined) ?? new MemorySpendStore();
   const trace: TraceEvent[] = [];
-  const metered = createMetered({ provider, store, envelope: "e", limitNano: usdToNano(1), trace: (e) => trace.push(e), ...over });
+  const metered = createMetered({ ...CALIBRATED, provider, store, envelope: "e", limitNano: usdToNano(1), trace: (e) => trace.push(e), ...over });
   return { metered, store, trace };
 }
 /** A store whose `reserve` waits until the test lets it through. */
@@ -130,7 +134,7 @@ describe("the kill switch is checked again right before sending", () => {
     const provider = scripted([textResponse("ok", usage)]);
     const { store, wrapped, release } = slowReserve();
     let stopped = false;
-    const metered = createMetered({ provider, store: wrapped, envelope: "e", limitNano: usdToNano(1), killSwitch: () => stopped });
+    const metered = createMetered({ ...CALIBRATED, provider, store: wrapped, envelope: "e", limitNano: usdToNano(1), killSwitch: () => stopped });
 
     const pending = metered(request("turn-1")); // passes the first check, then waits on the store
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -170,7 +174,7 @@ describe("the kill switch is checked again right before sending", () => {
       totals: (envelope) => store.totals(envelope),
     };
     let reads = 0;
-    const metered = createMetered({ provider, store: failingSettle, envelope: "e", limitNano: usdToNano(1), killSwitch: () => ++reads === 2 });
+    const metered = createMetered({ ...CALIBRATED, provider, store: failingSettle, envelope: "e", limitNano: usdToNano(1), killSwitch: () => ++reads === 2 });
     expect(await metered(request("turn-1"))).toMatchObject({ ok: false, sent: false, reason: "kill-switch" });
     expect(provider.dispatched).toBe(0);
     expect((await store.totals("e")).heldNano).toBe(hold);
@@ -239,7 +243,7 @@ describe("a settlement the store did not confirm is not reported as settled", ()
       totals: (envelope) => store.totals(envelope),
     };
     const trace: TraceEvent[] = [];
-    const metered = createMetered({ provider, store: flaky, envelope: "e", limitNano: usdToNano(1), trace: (e) => trace.push(e) });
+    const metered = createMetered({ ...CALIBRATED, provider, store: flaky, envelope: "e", limitNano: usdToNano(1), trace: (e) => trace.push(e) });
 
     const result = await metered(request("turn-1"));
     expect(result).toMatchObject({ ok: true, settled: false, costNano: 93_700 });
@@ -266,5 +270,132 @@ describe("the trace is a record, not a control", () => {
     expect(await metered(request("turn-1"))).toMatchObject({ ok: false, reason: "duplicate-attempt" });
     expect(provider.dispatched).toBe(1);
     expect((await store.totals("e")).settledNano).toBe(93_700);
+  });
+});
+
+describe("a request that spends real money needs an operator's authorization", () => {
+  // A fake provider marked billable stands in for the real one. Nothing is spent.
+  const billable = () => new FakeProvider(() => textResponse("ok", usage), { billable: true });
+
+  it("is refused before anything is reserved or sent when the envelope has no authorization", async () => {
+    const provider = billable();
+    const { metered, store, trace } = setup(provider, { killSwitch: () => false });
+    expect(await metered(request("turn-1"))).toMatchObject({ ok: false, sent: false, reason: "paid-not-enabled" });
+    expect(provider.dispatched).toBe(0);
+    expect(await store.totals("e")).toMatchObject({ committedNano: 0, attempts: 0, paidAllowed: null });
+    expect(trace[0]).toMatchObject({ outcome: "refused:paid-not-enabled" });
+  });
+
+  it("is not unlocked by having a key, by the kill switch being off, or by a larger limit", async () => {
+    const provider = billable();
+    const { metered } = setup(provider, { limitNano: usdToNano(10), killSwitch: () => false, allowedEfforts: ["minimal", "low", "max"] });
+    for (const id of ["a", "b", "c"]) {
+      expect(await metered(request(id))).toMatchObject({ sent: false, reason: "paid-not-enabled" });
+    }
+    expect(provider.dispatched).toBe(0);
+  });
+
+  it("is sent once an operator has authorized paid requests, and refused again after that is revoked", async () => {
+    const provider = billable();
+    const { metered, store } = setup(provider);
+    await store.allowPaid({ envelope: "e", note: "Doran, Nov 25: smoke test of ten requests" });
+    expect((await store.totals("e")).paidAllowed).toBe("Doran, Nov 25: smoke test of ten requests");
+    expect((await metered(request("turn-1"))).ok).toBe(true);
+    await store.revokePaid("e");
+    expect(await metered(request("turn-2"))).toMatchObject({ sent: false, reason: "paid-not-enabled" });
+    expect(provider.dispatched).toBe(1);
+  });
+
+  it("an authorization needs a note, and covers only its own envelope", async () => {
+    const store = new MemorySpendStore();
+    await expect(store.allowPaid({ envelope: "e", note: "  " })).rejects.toThrow();
+    await store.allowPaid({ envelope: "other", note: "someone else's budget" });
+    const provider = billable();
+    const { metered } = setup(provider, { store });
+    expect(await metered(request("turn-1"))).toMatchObject({ sent: false, reason: "paid-not-enabled" });
+  });
+
+  it("does not affect a provider that spends nothing", async () => {
+    const provider = scripted([textResponse("ok", usage)]);
+    const { metered } = setup(provider);
+    expect(provider.billable).toBe(false);
+    expect((await metered(request("turn-1"))).ok).toBe(true);
+  });
+});
+
+describe("how much is held", () => {
+  const most = absoluteWorstNano(100);
+  const uncalibrated = (provider: FakeProvider, over: Partial<MeteredDeps> = {}) => {
+    const store = new MemorySpendStore();
+    const trace: TraceEvent[] = [];
+    // No inputBound here: nothing is assumed about how many tokens a body becomes.
+    const metered = createMetered({ provider, store, envelope: "e", limitNano: usdToNano(1), trace: (e) => trace.push(e), ...over });
+    return { metered, store, trace };
+  };
+
+  it("without a measured bound, holds the most any request can cost: a full context window at the high price", async () => {
+    expect(most).toBe(1_048_576 * 300 + 100 * 1_500); // about $0.3147
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const provider = new FakeProvider(async () => {
+      await gate;
+      return textResponse("ok", usage);
+    });
+    const { metered, store, trace } = uncalibrated(provider);
+    const pending = metered(request("turn-1"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((await store.totals("e")).heldNano).toBe(most);
+    release();
+    expect((await pending).ok).toBe(true);
+    expect(trace[0]).toMatchObject({ holdNano: most, holdBasis: "context-window", costNano: 93_700 });
+  });
+
+  it("without a measured bound, even a high-tier reply stays inside its hold", async () => {
+    // 300,000 input tokens: three times the price. Still under the context-window hold.
+    const provider = scripted([textResponse("ok", { inputTokens: 300_000, cachedTokens: 0, outputTokens: 100 })]);
+    const { metered, store } = uncalibrated(provider);
+    expect(await metered(request("turn-1"))).toMatchObject({ ok: true, breached: false });
+    const totals = await store.totals("e");
+    expect(totals.settledNano).toBe(300_000 * 300 + 100 * 1_500);
+    expect(totals.settledNano).toBeLessThan(most);
+    expect(totals.suspended).toBeNull();
+  });
+
+  it("without a measured bound, refuses when the envelope cannot cover that hold", async () => {
+    const provider = scripted([textResponse("ok", usage)]);
+    const { metered } = uncalibrated(provider, { limitNano: most - 1 });
+    expect(await metered(request("turn-1"))).toMatchObject({ sent: false, reason: "envelope-exhausted" });
+    expect(provider.dispatched).toBe(0);
+  });
+
+  it("with a measured bound that keeps the body in the low tier, holds the low-tier worst case", async () => {
+    const provider = scripted([textResponse("ok", usage)]);
+    const { metered, trace } = uncalibrated(provider, { inputBound: { tokensPerByte: 0.5 } });
+    expect((await metered(request("turn-1"))).ok).toBe(true);
+    expect(trace[0]).toMatchObject({ holdNano: hold, holdBasis: "low-tier" });
+  });
+
+  it("with a measured bound that cannot keep the body in the low tier, goes back to the full hold", async () => {
+    const provider = scripted([textResponse("ok", usage)]);
+    const { metered, trace } = uncalibrated(provider, { inputBound: { tokensPerByte: 10_000 } });
+    expect((await metered(request("turn-1"))).ok).toBe(true);
+    expect(trace[0]).toMatchObject({ holdNano: most, holdBasis: "context-window" });
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])("ignores a bound that is not a positive number (%s)", async (tokensPerByte) => {
+    const provider = scripted([textResponse("ok", usage)]);
+    const { metered, trace } = uncalibrated(provider, { inputBound: { tokensPerByte } });
+    await metered(request("turn-1"));
+    expect(trace[0]!.holdBasis).toBe("context-window");
+  });
+
+  it("suspends the envelope when a reply shows the measured bound was wrong", async () => {
+    // The bound says this small body is at most a few hundred tokens. The reply says 50,000.
+    const provider = scripted([textResponse("ok", { inputTokens: 50_000, cachedTokens: 0, outputTokens: 10 }), textResponse("ok", usage)]);
+    const { metered, store, trace } = uncalibrated(provider, { inputBound: { tokensPerByte: 0.5 } });
+    expect(await metered(request("turn-1"))).toMatchObject({ ok: true, breached: true });
+    expect(trace[0]!.breach).toMatch(/above the \d+ the measured bound allowed/);
+    expect((await store.totals("e")).suspended).not.toBeNull();
+    expect(await metered(request("turn-2"))).toMatchObject({ sent: false, reason: "envelope-suspended" });
   });
 });

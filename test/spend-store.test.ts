@@ -8,6 +8,10 @@ import { connectRedis } from "../src/spend/redis-client";
 import { EnvelopeCorruptError, EnvelopeNotInitializedError, RedisSpendStore } from "../src/spend/redis-store";
 import { MemorySpendStore, type SpendStore } from "../src/spend/store";
 
+// Most tests here are about something other than hold size, so they run with a measured
+// input bound in place and get the low-tier hold. Hold selection has its own tests.
+const CALIBRATED = { inputBound: { tokensPerByte: 100 } };
+
 /**
  * One set of behaviours that every spend store must have. It runs against the in-memory
  * store always, and against a real Redis when TEST_REDIS_URL is set (locally:
@@ -161,7 +165,7 @@ function contract(name: string, setup: () => Promise<Context>) {
       const envelope = await fresh();
       const hold = worstCaseNano(100);
       const provider = new FakeProvider(() => textResponse("ok", { inputTokens: 3_500, cachedTokens: 2_800, outputTokens: 250 }));
-      const metered = createMetered({ provider, store: ctx.store, envelope, limitNano: hold + 206_200 });
+      const metered = createMetered({ ...CALIBRATED, provider, store: ctx.store, envelope, limitNano: hold + 206_200 });
       const request = (attemptId: string) => ({ step: "t", promptId: "p", attemptId, messages: [{ role: "user" as const, content: "hi" }], maxOutputTokens: 100 });
       expect((await metered(request("one"))).ok).toBe(true); // settles at 206,200
       expect((await metered(request("two"))).ok).toBe(true); // exactly enough room for one more hold
@@ -328,5 +332,61 @@ describe.skipIf(!redisUrl)("Redis spend store", () => {
       Array.from({ length: 40 }, (_, i) => (i % 2 ? store : other).reserve({ envelope, attemptId: `a${i}`, amountNano: 300, limitNano: 1_000 })),
     );
     expect(results.filter((r) => r.ok)).toHaveLength(3);
+  });
+});
+
+describe.skipIf(!redisUrl)("Redis spend store: paid authorization and the measured bound", () => {
+  let store: RedisSpendStore;
+  const fresh = async () => {
+    const envelope = `env-${randomUUID()}`;
+    await store.init({ envelope, limitNano: 10_000 });
+    return envelope;
+  };
+  beforeAll(async () => {
+    store = new RedisSpendStore((await connectRedis(redisUrl!)).runner, { prefix });
+  });
+
+  it("refuses a billable request until paid requests are authorized, in the same atomic step", async () => {
+    const envelope = await fresh();
+    expect(await store.reserve({ envelope, attemptId: "a", amountNano: 1, limitNano: 10_000, billable: true })).toMatchObject({ ok: false, reason: "paid-not-enabled" });
+    // A request that spends nothing is not affected.
+    expect((await store.reserve({ envelope, attemptId: "free", amountNano: 1, limitNano: 10_000 })).ok).toBe(true);
+
+    await expect(store.allowPaid({ envelope, note: "" })).rejects.toThrow();
+    expect((await store.allowPaid({ envelope, note: "Doran, Nov 25" })).paidAllowed).toBe("Doran, Nov 25");
+    expect((await store.reserve({ envelope, attemptId: "a", amountNano: 1, limitNano: 10_000, billable: true })).ok).toBe(true);
+
+    expect((await store.revokePaid(envelope)).paidAllowed).toBeNull();
+    expect(await store.reserve({ envelope, attemptId: "b", amountNano: 1, limitNano: 10_000, billable: true })).toMatchObject({ ok: false, reason: "paid-not-enabled" });
+  });
+
+  it("lets only as many simultaneous billable callers in as the limit covers, once authorized", async () => {
+    const envelope = await fresh();
+    await store.allowPaid({ envelope, note: "test" });
+    const results = await Promise.all(
+      Array.from({ length: 30 }, (_, i) => store.reserve({ envelope, attemptId: `a${i}`, amountNano: 3_000, limitNano: 10_000, billable: true })),
+    );
+    expect(results.filter((r) => r.ok)).toHaveLength(3);
+  });
+
+  it("keeps a suspension stronger than an authorization", async () => {
+    const envelope = await fresh();
+    await store.allowPaid({ envelope, note: "test" });
+    await store.suspend({ envelope, reason: "stop" });
+    expect(await store.reserve({ envelope, attemptId: "a", amountNano: 1, limitNano: 10_000, billable: true })).toMatchObject({ ok: false, reason: "suspended" });
+  });
+
+  it("records, returns and clears a measured input bound with its note", async () => {
+    const envelope = await fresh();
+    expect(await store.inputBound(envelope)).toBeNull();
+    await expect(store.setInputBound({ envelope, tokensPerByte: 0, note: "x" })).rejects.toThrow();
+    await expect(store.setInputBound({ envelope, tokensPerByte: 0.4, note: " " })).rejects.toThrow();
+    await store.setInputBound({ envelope, tokensPerByte: 0.4, note: "ten requests on Nov 25 | worst of ten" });
+    expect(await store.inputBound(envelope)).toEqual({ tokensPerByte: 0.4, note: "ten requests on Nov 25 / worst of ten" });
+    await store.clearInputBound(envelope);
+    expect(await store.inputBound(envelope)).toBeNull();
+    // Neither field disturbs the counters.
+    expect(await store.totals(envelope)).toMatchObject({ committedNano: 0, attempts: 0, suspended: null, paidAllowed: null });
+    expect((await store.audit(envelope)).consistent).toBe(true);
   });
 });

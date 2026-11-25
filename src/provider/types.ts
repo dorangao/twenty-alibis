@@ -57,6 +57,11 @@ export interface ProviderResponse {
  */
 export interface Provider {
   readonly name: string;
+  /**
+   * True when `send` spends real money. A billable provider is refused unless the envelope
+   * carries an operator's explicit authorization for paid requests. Having a key is not enough.
+   */
+  readonly billable: boolean;
   encode(request: ProviderRequest): string;
   send(body: string): Promise<ProviderResponse>;
 }

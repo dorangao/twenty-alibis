@@ -22,13 +22,15 @@ export interface EnvelopeTotals {
   attempts: number;
   /** Why the envelope admits nothing, or null when it is open. Only an operator clears it. */
   suspended: string | null;
+  /** The operator's note authorizing paid requests from this envelope, or null when none are allowed. */
+  paidAllowed: string | null;
 }
 
 export type ReserveResult =
   | { ok: true; duplicate: false; totals: EnvelopeTotals }
   /** This attempt id was already admitted. The caller must not send it again. */
   | { ok: true; duplicate: true; state: AttemptState; totals: EnvelopeTotals }
-  | { ok: false; reason: "limit" | "suspended"; totals: EnvelopeTotals };
+  | { ok: false; reason: "limit" | "suspended" | "paid-not-enabled"; totals: EnvelopeTotals };
 
 export interface SettleResult {
   /** False when the attempt was already settled; the totals did not change. */
@@ -42,12 +44,24 @@ export interface SettleResult {
   totals: EnvelopeTotals;
 }
 
+export interface ReserveArgs {
+  envelope: string;
+  attemptId: string;
+  amountNano: number;
+  limitNano: number;
+  /**
+   * True when the request would spend real money. It is then admitted only if an operator
+   * has authorized paid requests on this envelope. The check is part of the same atomic step.
+   */
+  billable?: boolean;
+}
+
 export interface SpendStore {
   /**
    * Atomically: if committed + amount <= limit, record the hold and admit the attempt.
    * Check and write happen as one step, so concurrent callers cannot both squeeze in.
    */
-  reserve(args: { envelope: string; attemptId: string; amountNano: number; limitNano: number }): Promise<ReserveResult>;
+  reserve(args: ReserveArgs): Promise<ReserveResult>;
   /** Replace an attempt's hold with its real cost. Only the first settlement counts. */
   settle(args: { envelope: string; attemptId: string; actualNano: number }): Promise<SettleResult>;
   /** Mark an attempt's outcome as unknown. Its full hold stays charged. */
@@ -75,6 +89,7 @@ const assertAmount = (n: number, name: string) => {
 export class MemorySpendStore implements SpendStore {
   private readonly envelopes = new Map<string, Map<string, Attempt>>();
   private readonly suspensions = new Map<string, string>();
+  private readonly paid = new Map<string, string>();
 
   private attemptsOf(envelope: string): Map<string, Attempt> {
     let attempts = this.envelopes.get(envelope);
@@ -83,7 +98,7 @@ export class MemorySpendStore implements SpendStore {
   }
 
   private sum(envelope: string): EnvelopeTotals {
-    const t: EnvelopeTotals = { settledNano: 0, heldNano: 0, retainedNano: 0, committedNano: 0, attempts: 0, suspended: this.suspensions.get(envelope) ?? null };
+    const t: EnvelopeTotals = { settledNano: 0, heldNano: 0, retainedNano: 0, committedNano: 0, attempts: 0, suspended: this.suspensions.get(envelope) ?? null, paidAllowed: this.paid.get(envelope) ?? null };
     for (const a of this.attemptsOf(envelope).values()) {
       t.attempts++;
       if (a.state === "settled") t.settledNano += a.chargedNano;
@@ -94,7 +109,7 @@ export class MemorySpendStore implements SpendStore {
     return t;
   }
 
-  async reserve(args: { envelope: string; attemptId: string; amountNano: number; limitNano: number }): Promise<ReserveResult> {
+  async reserve(args: ReserveArgs): Promise<ReserveResult> {
     assertAmount(args.amountNano, "amountNano");
     assertAmount(args.limitNano, "limitNano");
     const attempts = this.attemptsOf(args.envelope);
@@ -103,6 +118,7 @@ export class MemorySpendStore implements SpendStore {
 
     const before = this.sum(args.envelope);
     if (before.suspended !== null) return { ok: false, reason: "suspended", totals: before };
+    if (args.billable && before.paidAllowed === null) return { ok: false, reason: "paid-not-enabled", totals: before };
     if (before.committedNano + args.amountNano > args.limitNano) {
       return { ok: false, reason: "limit", totals: before };
     }
@@ -137,6 +153,19 @@ export class MemorySpendStore implements SpendStore {
     // The first reason is the one worth keeping.
     if (!this.suspensions.has(args.envelope)) this.suspensions.set(args.envelope, args.reason || "suspended");
     return this.sum(args.envelope);
+  }
+
+  /** Operator action: allow requests that spend real money. The note says on whose word. */
+  async allowPaid(args: { envelope: string; note: string }): Promise<EnvelopeTotals> {
+    if (!args.note.trim()) throw new Error("allowing paid requests needs a note saying who authorized it");
+    this.paid.set(args.envelope, args.note.trim());
+    return this.sum(args.envelope);
+  }
+
+  /** Operator action: stop allowing paid requests. */
+  async revokePaid(envelope: string): Promise<EnvelopeTotals> {
+    this.paid.delete(envelope);
+    return this.sum(envelope);
   }
 
   /** Operator action: admit requests again. */

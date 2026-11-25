@@ -59,7 +59,11 @@ export async function createRuntime(env: Env = process.env): Promise<{
 
   const redis = await connectRedis(config.redisUrl);
   const store = new RedisSpendStore(redis.runner);
+  // A measured input bound, if an operator has recorded one. Without it every request is
+  // held at the most a request can cost.
+  const inputBound = await store.inputBound(config.envelope);
   const metered = createMetered({
+    ...(inputBound ? { inputBound: { tokensPerByte: inputBound.tokensPerByte } } : {}),
     provider: new EmberProvider({ apiKey: apiKey.key }),
     store,
     envelope: config.envelope,

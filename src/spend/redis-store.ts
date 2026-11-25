@@ -1,4 +1,4 @@
-import type { AttemptState, EnvelopeTotals, ReserveResult, SettleResult, SpendStore } from "./store";
+import type { AttemptState, EnvelopeTotals, ReserveArgs, ReserveResult, SettleResult, SpendStore } from "./store";
 
 /**
  * The one Redis capability this store needs: run a script atomically.
@@ -46,8 +46,8 @@ local function health()
   return 'ok'
 end
 local function reply(status, extra)
-  local v = redis.call('HMGET', K, 'settled', 'held', 'retained', 'attempts', 'suspended', 'limit')
-  return { status, extra or '', v[1], v[2], v[3], v[4], v[5] or '', v[6] }
+  local v = redis.call('HMGET', K, 'settled', 'held', 'retained', 'attempts', 'suspended', 'limit', 'paid', 'bound')
+  return { status, extra or '', v[1], v[2], v[3], v[4], v[5] or '', v[6], v[7] or '', v[8] or '' }
 end
 local function attempt(id)
   local raw = redis.call('HGET', K, 'a:' .. id)
@@ -67,13 +67,14 @@ redis.call('HSET', K, 'limit', ARGV[1], 'carried', ARGV[2], 'created', ARGV[3],
 return reply('created')
 `;
 
-// ARGV: attempt id, amount, limit
+// ARGV: attempt id, amount, limit, billable ('1' or '0')
 const RESERVE = `${PREAMBLE}
 local h = health()
 if h ~= 'ok' then return { h } end
 local state = attempt(ARGV[1])
 if state then return reply('duplicate', state) end
 if redis.call('HEXISTS', K, 'suspended') == 1 then return reply('suspended') end
+if ARGV[4] == '1' and redis.call('HEXISTS', K, 'paid') == 0 then return reply('paid-not-enabled') end
 local v = redis.call('HMGET', K, 'limit', 'settled', 'held', 'retained')
 local limit = math.min(tonumber(ARGV[3]), tonumber(v[1]))
 if tonumber(v[2]) + tonumber(v[3]) + tonumber(v[4]) + tonumber(ARGV[2]) > limit then return reply('limit') end
@@ -119,6 +120,14 @@ const SUSPEND = `${PREAMBLE}
 local h = health()
 if h ~= 'ok' then return { h } end
 redis.call('HSETNX', K, 'suspended', ARGV[1])
+return reply('ok')
+`;
+
+// ARGV: field, value ('' deletes the field)
+const SET_FIELD = `${PREAMBLE}
+local h = health()
+if h ~= 'ok' then return { h } end
+if ARGV[2] == '' then redis.call('HDEL', K, ARGV[1]) else redis.call('HSET', K, ARGV[1], ARGV[2]) end
 return reply('ok')
 `;
 
@@ -199,7 +208,7 @@ export class RedisSpendStore implements SpendStore {
   }
 
   private async run(envelope: string, script: string, args: string[]) {
-    const [status, extra, settled, held, retained, attempts, suspended, limit] = await this.raw(envelope, script, args);
+    const [status, extra, settled, held, retained, attempts, suspended, limit, paid, bound] = await this.raw(envelope, script, args);
     const settledNano = Number(settled);
     const heldNano = Number(held);
     const retainedNano = Number(retained);
@@ -212,8 +221,9 @@ export class RedisSpendStore implements SpendStore {
       committedNano: settledNano + heldNano + retainedNano,
       attempts: Number(attempts),
       suspended: suspended ? suspended : null,
+      paidAllowed: paid ? paid : null,
     };
-    return { status: status!, extra: extra ?? "", totals, limitNano: Number(limit) };
+    return { status: status!, extra: extra ?? "", totals, limitNano: Number(limit), bound: bound ?? "" };
   }
 
   /**
@@ -229,15 +239,17 @@ export class RedisSpendStore implements SpendStore {
     return { created: status === "created", limitNano, totals };
   }
 
-  async reserve(args: { envelope: string; attemptId: string; amountNano: number; limitNano: number }): Promise<ReserveResult> {
+  async reserve(args: ReserveArgs): Promise<ReserveResult> {
     const { status, extra, totals } = await this.run(args.envelope, RESERVE, [
       cleanId(args.attemptId),
       wholeNano(args.amountNano, "amountNano"),
       wholeNano(args.limitNano, "limitNano"),
+      args.billable ? "1" : "0",
     ]);
     if (status === "ok") return { ok: true, duplicate: false, totals };
     if (status === "duplicate") return { ok: true, duplicate: true, state: extra as AttemptState, totals };
-    return { ok: false, reason: status === "suspended" ? "suspended" : "limit", totals };
+    if (status === "suspended" || status === "paid-not-enabled") return { ok: false, reason: status, totals };
+    return { ok: false, reason: "limit", totals };
   }
 
   async settle(args: { envelope: string; attemptId: string; actualNano: number }): Promise<SettleResult> {
@@ -251,6 +263,47 @@ export class RedisSpendStore implements SpendStore {
 
   async suspend(args: { envelope: string; reason: string }): Promise<EnvelopeTotals> {
     return (await this.run(args.envelope, SUSPEND, [(args.reason || "suspended").slice(0, 500)])).totals;
+  }
+
+  /**
+   * Operator action: allow requests that spend real money from this envelope. Without this,
+   * a billable provider is refused however the process is configured. The note records on
+   * whose word it was allowed.
+   */
+  async allowPaid(args: { envelope: string; note: string }): Promise<EnvelopeTotals> {
+    const note = args.note.trim().slice(0, 500);
+    if (!note) throw new Error("allowing paid requests needs a note saying who authorized it");
+    return (await this.run(args.envelope, SET_FIELD, ["paid", note])).totals;
+  }
+
+  /** Operator action: stop allowing paid requests. */
+  async revokePaid(envelope: string): Promise<EnvelopeTotals> {
+    return (await this.run(envelope, SET_FIELD, ["paid", ""])).totals;
+  }
+
+  /**
+   * Operator action: record a measured upper bound on input tokens per body byte, taken from
+   * real usage figures. The guard doubles it before trusting it.
+   */
+  async setInputBound(args: { envelope: string; tokensPerByte: number; note: string }): Promise<void> {
+    if (!Number.isFinite(args.tokensPerByte) || args.tokensPerByte <= 0) throw new RangeError("tokensPerByte must be a positive number");
+    const note = args.note.trim().replaceAll("|", "/").slice(0, 300);
+    if (!note) throw new Error("a measured bound needs a note saying what it was measured from");
+    await this.run(args.envelope, SET_FIELD, ["bound", `${args.tokensPerByte}|${note}`]);
+  }
+
+  /** Operator action: forget the measured bound. Holds go back to the most a request can cost. */
+  async clearInputBound(envelope: string): Promise<void> {
+    await this.run(envelope, SET_FIELD, ["bound", ""]);
+  }
+
+  /** The measured bound on record, or null. */
+  async inputBound(envelope: string): Promise<{ tokensPerByte: number; note: string } | null> {
+    const { bound } = await this.run(envelope, TOTALS, []);
+    if (!bound) return null;
+    const [ratio, ...note] = bound.split("|");
+    const tokensPerByte = Number(ratio);
+    return Number.isFinite(tokensPerByte) && tokensPerByte > 0 ? { tokensPerByte, note: note.join("|") } : null;
   }
 
   /** Operator action: admit requests again after a suspension has been looked into. */

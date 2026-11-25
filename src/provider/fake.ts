@@ -14,7 +14,15 @@ export class FakeProvider implements Provider {
   /** The exact body text of each send. */
   readonly bodies: string[] = [];
 
-  constructor(private readonly handler: FakeHandler) {}
+  /** False by default. A test sets it to true to exercise the paid-request gate without spending anything. */
+  readonly billable: boolean;
+
+  constructor(
+    private readonly handler: FakeHandler,
+    options: { billable?: boolean } = {},
+  ) {
+    this.billable = options.billable ?? false;
+  }
 
   get dispatched(): number {
     return this.bodies.length;

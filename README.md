@@ -87,9 +87,17 @@ npm run doctor
 ### What the guard does with a request · 一次请求的经过
 
 1. It copies the request and encodes it to the exact text that will be sent. Only that text is used from then on.
-2. It reserves the worst case in Redis: a full low-price-tier input plus the whole output limit. If the budget cannot cover that, or the budget is suspended, nothing is sent.
+2. It reserves the worst case in Redis. If the budget cannot cover that, or the budget is suspended, nothing is sent.
 3. It checks the kill switch a second time, then sends the text once. No retry, no redirect.
 4. It settles with the real cost from the reply.
+
+**Real model calls are closed by default.** Having a key is not enough: a request that spends money is refused unless a person has authorized paid requests on that budget, and that authorization lives in Redis next to the counter.
+
+```bash
+npm run spend -- allow-paid "who said so, and for what"
+```
+
+**How much is reserved.** Until real usage has been measured, the guard assumes nothing about how many tokens a request becomes. It reserves the most any request can cost: a full context window at the higher price, about $0.31. Once a tokens-per-byte figure has been measured from real replies and recorded (`npm run spend -- calibrate`), requests that it keeps under the price line reserve about $0.02 instead. The guard doubles the measured figure before trusting it, and a reply that exceeds it suspends the budget.
 
 If a reply never arrives, arrives without usable usage figures, or is an HTTP error of any kind, the **full reservation stays charged**. The request reached the API, and nothing on this side proves it was free. Such holds are closed by hand against the dashboard:
 
