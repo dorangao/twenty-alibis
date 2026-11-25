@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createMetered, MAX_PAYLOAD_BYTES, type MeteredRequest, type TraceEvent } from "../src/metered";
 import { FakeProvider, scripted, textResponse } from "../src/provider/fake";
 import { NotDispatchedError, type ProviderResponse } from "../src/provider/types";
 import { costNano, usdToNano, worstCaseNano } from "../src/spend/pricing";
 import { MemorySpendStore, type SpendStore } from "../src/spend/store";
 
-const usage = { inputTokens: 3_500, cachedTokens: 2_800, outputTokens: 250 };
+const usage = { inputTokens: 3_500, cachedTokens: 2_800, outputTokens: 25 };
 const request = (over: Partial<MeteredRequest> = {}): MeteredRequest => ({
   step: "test.step",
   promptId: "test-prompt-v1",
@@ -24,7 +24,7 @@ function setup(provider: FakeProvider, limitNano: number, store: SpendStore = ne
 describe("pricing", () => {
   it("prices a typical request in whole nanodollars", () => {
     // 700 uncached x 100 + 2,800 cached x 4 + 250 output x 500
-    expect(costNano(usage)).toBe(70_000 + 11_200 + 125_000);
+    expect(costNano({ ...usage, outputTokens: 250 })).toBe(70_000 + 11_200 + 125_000);
   });
 
   it("switches the whole request to the high tier above 200K input tokens", () => {
@@ -50,9 +50,9 @@ describe("metered()", () => {
     const { metered, store, trace } = setup(scripted([textResponse("In the foyer.", usage)]), usdToNano(1));
     const result = await metered(request());
     expect(result.ok).toBe(true);
-    expect(await store.totals("test")).toMatchObject({ settledNano: 206_200, heldNano: 0, retainedNano: 0, committedNano: 206_200 });
+    expect(await store.totals("test")).toMatchObject({ settledNano: 93_700, heldNano: 0, retainedNano: 0, committedNano: 93_700 });
     expect(trace).toHaveLength(1);
-    expect(trace[0]).toMatchObject({ outcome: "settled", costNano: 206_200, holdNano: hold, model: "muse-ember-1.0", reasoningEffort: "low" });
+    expect(trace[0]).toMatchObject({ outcome: "settled", costNano: 93_700, holdNano: hold, model: "muse-ember-1.0", reasoningEffort: "low" });
   });
 
   it("defaults to low reasoning effort and always sends an output limit", async () => {
@@ -152,7 +152,55 @@ describe("metered()", () => {
     expect((await metered(request({ attemptId: "turn-7" }))).ok).toBe(true);
     expect(await metered(request({ attemptId: "turn-7" }))).toMatchObject({ ok: false, sent: false, reason: "duplicate-attempt" });
     expect(provider.dispatched).toBe(1);
-    expect((await store.totals("test")).settledNano).toBe(206_200);
+    expect((await store.totals("test")).settledNano).toBe(93_700);
+  });
+
+  it.each(["before commit", "after commit"] as const)(
+    "protects an admitted request when settlement fails %s",
+    async (failure) => {
+      const store = new MemorySpendStore();
+      const settle = store.settle.bind(store);
+      vi.spyOn(store, "settle").mockImplementationOnce(async (args) => {
+        if (failure === "after commit") await settle(args);
+        throw new Error("settlement acknowledgement unavailable");
+      });
+      const provider = scripted([textResponse("ok", usage)]);
+      const cost = costNano(usage);
+      const { metered } = setup(provider, hold + cost, store);
+
+      await metered(request({ attemptId: "first" }));
+      const totals = await store.totals("test");
+      if (failure === "before commit") {
+        expect(totals).toMatchObject({ heldNano: hold, settledNano: 0, committedNano: hold });
+      } else {
+        expect(totals).toMatchObject({ heldNano: 0, settledNano: cost, committedNano: cost });
+      }
+      expect(await metered(request({ attemptId: "first" }))).toMatchObject({ sent: false, reason: "duplicate-attempt" });
+      const next = await metered(request({ attemptId: "next" }));
+      if (failure === "before commit") {
+        expect(next).toMatchObject({ sent: false, reason: "envelope-exhausted" });
+        expect(provider.dispatched).toBe(1);
+      } else {
+        expect(next.ok).toBe(true);
+        expect(provider.dispatched).toBe(2);
+      }
+
+      // Reconcile using the known cost, including when the acknowledgement alone was lost.
+      const reconciled = await store.settle({ envelope: "test", attemptId: "first", actualNano: cost });
+      expect(reconciled.applied).toBe(failure === "before commit");
+      expect(reconciled.totals).toMatchObject({ heldNano: 0, committedNano: provider.dispatched * cost });
+    },
+  );
+
+  it("admits a shared attempt id once when workers race with capacity for both", async () => {
+    const store = new MemorySpendStore();
+    const provider = scripted([textResponse("ok", usage)]);
+    const workers = [setup(provider, 2 * hold, store), setup(provider, 2 * hold, store)];
+    const results = await Promise.all(workers.map(({ metered }) => metered(request({ attemptId: "same-turn" }))));
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.filter((r) => !r.ok && !r.sent && r.reason === "duplicate-attempt")).toHaveLength(1);
+    expect(provider.dispatched).toBe(1);
+    expect(await store.totals("test")).toMatchObject({ attempts: 1, committedNano: costNano(usage) });
   });
 
   it("a hold left by a process that died still counts after a restart", async () => {
@@ -185,6 +233,61 @@ describe("metered()", () => {
     expect(await broken(request())).toMatchObject({ ok: false, sent: false, reason: "kill-switch" });
     expect(provider.dispatched).toBe(0);
     expect((await store.totals("test")).attempts).toBe(0);
+  });
+
+  it("stops later calls in a gossip wave while an earlier call is in flight", async () => {
+    let stopped = false;
+    let signalDispatch!: () => void;
+    let finishResponse!: () => void;
+    const dispatched = new Promise<void>((resolve) => (signalDispatch = resolve));
+    const responseReady = new Promise<void>((resolve) => (finishResponse = resolve));
+    const provider = new FakeProvider(async () => {
+      signalDispatch();
+      await responseReady;
+      return textResponse("ok", usage);
+    });
+    const store = new MemorySpendStore();
+    const metered = createMetered({ provider, store, envelope: "wave", limitNano: 4 * hold, killSwitch: () => stopped });
+    const first = metered(request({ step: "gossip", attemptId: "first" }));
+    await dispatched;
+    stopped = true;
+
+    const rest = await Promise.all(["second", "third", "fourth"].map((attemptId) => metered(request({ step: "gossip", attemptId }))));
+    for (const result of rest) expect(result).toMatchObject({ sent: false, reason: "kill-switch" });
+    expect(provider.dispatched).toBe(1);
+    expect(await store.totals("wave")).toMatchObject({ heldNano: hold, attempts: 1 });
+
+    finishResponse();
+    expect((await first).ok).toBe(true);
+    expect((await store.totals("wave")).committedNano).toBe(costNano(usage));
+  });
+
+  it("isolates interleaved waves with shared attempt ids and different envelope limits", async () => {
+    const store = new MemorySpendStore();
+    const lanes = [1, 2, 3, 4, 2, 1].map((capacity, index) => {
+      const envelope = `group-${index}`;
+      const provider = scripted([textResponse("usage unavailable")]);
+      const metered = createMetered({ provider, store, envelope, limitNano: capacity * hold });
+      return { envelope, capacity, provider, metered };
+    });
+    const wave = (attemptId: string) => Promise.all(lanes.map(({ metered }) => metered(request({ attemptId }))));
+    const first = await wave("shared");
+    for (const result of first) expect(result).toMatchObject({ sent: true, reason: "outcome-unknown" });
+
+    const rest = await Promise.all(["a", "b", "c", "d"].map(wave));
+    for (const [index, { envelope, capacity, provider }] of lanes.entries()) {
+      const results = rest.map((round) => round[index]!);
+      expect(results.filter((r) => !r.ok && r.reason === "outcome-unknown")).toHaveLength(capacity - 1);
+      expect(results.filter((r) => !r.ok && r.reason === "envelope-exhausted")).toHaveLength(5 - capacity);
+      expect(await store.totals(envelope)).toMatchObject({ attempts: capacity, committedNano: capacity * hold, retainedNano: capacity * hold });
+      expect(provider.dispatched).toBe(capacity);
+    }
+
+    // Only this envelope receives confirmation that its first attempt cost zero.
+    await store.settle({ envelope: lanes[0]!.envelope, attemptId: "shared", actualNano: 0 });
+    const after = await wave("next");
+    expect(after[0]).toMatchObject({ sent: true, reason: "outcome-unknown" });
+    for (const result of after.slice(1)) expect(result).toMatchObject({ sent: false, reason: "envelope-exhausted" });
   });
 
   it("refuses a body that is too large, and a missing or oversized output limit", async () => {
@@ -221,9 +324,105 @@ describe("metered()", () => {
     expect(await metered(request())).toMatchObject({ ok: false, sent: false, reason: "store-unavailable" });
     expect(provider.dispatched).toBe(0);
   });
+
+  it("does not send when the reservation commits but its acknowledgement is lost", async () => {
+    const store = new MemorySpendStore();
+    const reserve = store.reserve.bind(store);
+    vi.spyOn(store, "reserve").mockImplementationOnce(async (args) => {
+      await reserve(args);
+      throw new Error("lost reservation acknowledgement");
+    });
+    const provider = scripted([textResponse("ok", usage)]);
+    const { metered } = setup(provider, hold, store);
+    expect(await metered(request({ attemptId: "original" }))).toMatchObject({ sent: false, reason: "store-unavailable" });
+    expect(await metered(request({ attemptId: "original" }))).toMatchObject({ sent: false, reason: "duplicate-attempt" });
+    expect(await metered(request({ attemptId: "other" }))).toMatchObject({ sent: false, reason: "envelope-exhausted" });
+    expect(provider.dispatched).toBe(0);
+    expect(await store.totals("test")).toMatchObject({ attempts: 1, heldNano: hold, committedNano: hold });
+  });
+
+  it("still reserves full capacity when an unknown outcome cannot be recorded", async () => {
+    const store = new MemorySpendStore();
+    vi.spyOn(store, "retain").mockRejectedValueOnce(new Error("store unreachable"));
+    const provider = scripted([textResponse("usage unavailable")]);
+    const { metered } = setup(provider, hold, store);
+    expect(await metered(request({ attemptId: "original" }))).toMatchObject({ sent: true, reason: "outcome-unknown" });
+    expect(await metered(request({ attemptId: "original" }))).toMatchObject({ sent: false, reason: "duplicate-attempt" });
+    expect(await metered(request({ attemptId: "other" }))).toMatchObject({ sent: false, reason: "envelope-exhausted" });
+    expect(provider.dispatched).toBe(1);
+    expect(await store.totals("test")).toMatchObject({ attempts: 1, heldNano: hold, committedNano: hold });
+  });
 });
 
 describe("the spend store", () => {
+  it.each([17, 211, 4093])("matches a bounded-charge ledger after each operation (seed %i)", async (seed) => {
+    const store = new MemorySpendStore();
+    const envelope = "model";
+    const limitNano = 90;
+    let available = limitNano;
+    let sequence = seed;
+    const draw = (size: number) => {
+      sequence = (Math.imul(sequence, 1664525) + 1013904223) >>> 0;
+      return Math.floor((sequence / 0x1_0000_0000) * size);
+    };
+    type Account = { kind: "hold" | "unknown" | "paid"; charge: number };
+    const accounts = new Map<string, Account>();
+    const subtotal = (kind: Account["kind"]) =>
+      [...accounts.values()].reduce((sum, entry) => sum + (entry.kind === kind ? entry.charge : 0), 0);
+
+    for (let step = 0; step < 240; step++) {
+      const attemptId = `attempt-${draw(24)}`;
+      const target = { envelope, attemptId };
+      const entry = accounts.get(attemptId);
+      const operation = (["reserve", "reserve", "settle", "retain"] as const)[draw(4)];
+      const where = `step ${step}: ${operation} ${attemptId}`;
+      if (operation === "reserve") {
+        const amountNano = 1 + draw(28);
+        const result = await store.reserve({ ...target, amountNano, limitNano });
+        if (entry) {
+          expect(result, where).toMatchObject({ ok: true, duplicate: true });
+        } else if (amountNano > available) {
+          expect(result, where).toMatchObject({ ok: false, reason: "limit" });
+        } else {
+          expect(result, where).toMatchObject({ ok: true, duplicate: false });
+          available -= amountNano;
+          accounts.set(attemptId, { kind: "hold", charge: amountNano });
+        }
+      } else if (operation === "settle") {
+        // The model assumes the reservation really bounds the charge.
+        const actualNano = draw((entry?.charge ?? 0) + 1);
+        const settlement = store.settle({ ...target, actualNano });
+        if (entry) {
+          const firstSettlement = entry.kind !== "paid";
+          expect(await settlement, where).toMatchObject({ applied: firstSettlement, overHold: false });
+          if (firstSettlement) {
+            available += entry.charge - actualNano;
+            accounts.set(attemptId, { kind: "paid", charge: actualNano });
+          }
+        } else {
+          await expect(settlement, where).rejects.toThrow();
+        }
+      } else {
+        const retention = store.retain(target);
+        if (entry) {
+          await retention;
+          if (entry.kind === "hold") entry.kind = "unknown";
+        } else {
+          await expect(retention, where).rejects.toThrow();
+        }
+      }
+      const actual = await store.totals(envelope);
+      expect(actual, where).toEqual({
+        settledNano: subtotal("paid"),
+        heldNano: subtotal("hold"),
+        retainedNano: subtotal("unknown"),
+        committedNano: limitNano - available,
+        attempts: accounts.size,
+      });
+      expect(actual.committedNano, where).toBeLessThanOrEqual(limitNano);
+    }
+  });
+
   it("counts a settlement once", async () => {
     const store = new MemorySpendStore();
     await store.reserve({ envelope: "e", attemptId: "a", amountNano: 1_000, limitNano: 10_000 });
