@@ -205,3 +205,91 @@ describe("the validator", () => {
     expect(codes(d)).toContain("lie-never-stated");
   });
 });
+
+describe("alternatives are never multiplied out or cut off", () => {
+  // Four motives, three separate denial records for each (81 combinations), and only the
+  // third copy of each is in the briefing. Found by Codex's review of the session search.
+  function fourMotives(reverseEvidence: boolean): Case {
+    const c = clone(archivePass);
+    c.sessionCap = 2;
+    c.motives.push(
+      { id: "mo-rival", text: { en: "A professional rivalry.", zh: "职业上的竞争。" } },
+      { id: "mo-secret", text: { en: "A secret the victim knew.", zh: "死者知道的一个秘密。" } },
+    );
+    c.suspects.find((s) => s.id === "s-ben")!.motives = [];
+    c.evidence.find((e) => e.id === "e-letters")!.proves = ["a-ada-debt"];
+    c.evidence.find((e) => e.id === "e-attendance-log")!.proves = ["a-ada-archive-2100"];
+    for (const m of c.motives) {
+      for (const copy of [1, 2, 3]) {
+        const assertion = `a-ben-no-${m.id}-${copy}`;
+        const evidence = `e-ben-no-${m.id}-${copy}`;
+        c.assertions.push({ id: assertion, prop: { kind: "motive", subject: "s-ben", motive: m.id, value: false } });
+        c.evidence.push({ id: evidence, kind: "record", authoritative: true, proves: [assertion], text: { en: "A sworn statement.", zh: "一份宣誓声明。" } });
+        if (copy === 3) c.briefing.evidence.push(evidence);
+      }
+    }
+    if (reverseEvidence) c.evidence.reverse();
+    return c;
+  }
+
+  it.each([false, true])("gives the same verdict when the evidence list is reversed (%s)", (reversed) => {
+    const check = checkCase(fourMotives(reversed));
+    expect(check.reasons).toEqual([]);
+    expect(check.accepted).toBe(true);
+    expect(check.solve?.survivors).toEqual(["s-ada"]);
+    expect(check.solve?.proof?.actions).toEqual([{ type: "inspection", id: "i-attendance-log" }]);
+    // The proof cites the denial records the player actually holds: the third copies.
+    expect(check.solve?.proof?.evidence).toEqual(expect.arrayContaining(c3(fourMotives(reversed))));
+  });
+  const c3 = (c: Case) => c.motives.map((m) => `e-ben-no-${m.id}-3`);
+
+  it("still refuses when one motive has no denial in reach", () => {
+    const c = fourMotives(false);
+    c.briefing.evidence = c.briefing.evidence.filter((e) => e !== "e-ben-no-mo-secret-3");
+    const check = checkCase(c);
+    expect(check.accepted).toBe(false);
+    expect(check.solve?.survivors).toEqual(["s-ada", "s-ben"]);
+  });
+});
+
+describe("twenty suspects", () => {
+  // The archive case grown to 20 suspects: 18 diners, each cleared by a record of their own.
+  function twenty(sessionCap: number): Case {
+    const c = clone(archivePass);
+    c.sessionCap = sessionCap;
+    const template = c.suspects.find((s) => s.id === "s-clara")!;
+    c.suspects = c.suspects.filter((s) => s.id === "s-ada" || s.id === "s-ben");
+    c.assertions = c.assertions.filter((a) => a.prop.subject === "s-ada" || a.prop.subject === "s-ben");
+    c.evidence = c.evidence.filter((e) => e.id !== "e-dinner-photo");
+    c.briefing.evidence = c.briefing.evidence.filter((e) => e !== "e-dinner-photo");
+    for (let i = 1; i <= 18; i++) {
+      const id = `s-diner-${i}`;
+      c.suspects.push({ ...clone({ ...archivePass, suspects: [template] }).suspects[0]!, id, name: { en: `Diner ${i}`, zh: `客人${i}` } });
+      c.assertions.push({ id: `a-diner-${i}`, prop: { kind: "at", subject: id, slot: "21:00", location: "l-dining" } });
+      c.evidence.push({ id: `e-seat-${i}`, kind: "record", authoritative: true, proves: [`a-diner-${i}`], text: { en: `Seat card ${i}.`, zh: `座位卡${i}。` } });
+      c.actions.inspections.push({ id: `i-seat-${i}`, label: { en: `Check seat ${i}`, zh: `查看${i}号座位` }, yields: [`e-seat-${i}`] });
+    }
+    return c;
+  }
+
+  it("accepts a case that needs nineteen inspections, quickly", () => {
+    const started = performance.now();
+    const check = checkCase(twenty(40));
+    expect(check.reasons).toEqual([]);
+    expect(check.solve?.proof?.actions).toHaveLength(19);
+    expect(check.solve?.exhaustive).toBe(true);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it("refuses when the session is too short, and says its survivor list is only a sample", () => {
+    const check = checkCase(twenty(10));
+    expect(check.accepted).toBe(false);
+    // The verdict is exact: no unlimited-length search was needed to refuse it.
+    expect(check.solve?.exhaustive).toBe(true);
+    expect(check.solve?.survivorSetsComplete).toBe(false);
+    expect(check.solve?.survivorSets.length).toBeLessThanOrEqual(50);
+    // Every listed set is one a real ten-action session leaves: Ada plus ten uncleared people.
+    for (const set of check.solve!.survivorSets) expect(set).toHaveLength(10);
+    expect(check.reasons.join("\n")).toMatch(/needs (19|more than 10) actions/);
+  });
+});

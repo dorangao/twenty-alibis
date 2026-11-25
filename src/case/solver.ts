@@ -22,10 +22,12 @@ export interface SolveResult {
   /** The suspects left open by the best notebook a player can build in one session. */
   survivors: string[];
   /**
-   * Every smallest set of open suspects that some one-session notebook can reach. Usually one
-   * set. More than one means different sessions clear different people and none clears them all.
+   * The smallest sets of open suspects that one-session notebooks can reach. Usually one set.
+   * More than one means different sessions clear different people and none clears them all.
    */
   survivorSets: string[][];
+  /** False when `survivorSets` is only a sample: the search was cut short, or the list was too long. */
+  survivorSetsComplete: boolean;
   /** Suspects with opportunity, means and motive all proven in that notebook. */
   proven: string[];
   /** One session that proves the case: its actions in a legal order, and the evidence it rests on. */
@@ -52,8 +54,16 @@ interface Act {
   requires: string[];
 }
 
-/** A goal is met when the notebook holds every item of at least one of its options. */
-type Goal = string[][];
+/**
+ * A goal is a list of options. An option is a list of groups, and a group is a list of
+ * interchangeable items. The goal is met when, for at least one option, the notebook holds
+ * some item from every group. Groups keep "any one of these records" as a choice for the
+ * search to make, so the alternatives are never multiplied out.
+ */
+type Option = string[][];
+type Goal = Option[];
+/** The most survivor sets a result lists. */
+const MAX_SURVIVOR_SETS = 50;
 
 class WorkLimitReached extends Error {}
 class Budget {
@@ -128,35 +138,45 @@ export function solve(c: Case): SolveResult {
   const lacksMotive = (id: string, motive: string) => (p: Proposition) =>
     p.subject === id && p.kind === "motive" && p.motive === motive && !p.value;
 
-  const single = (items: string[]): Goal => items.map((e) => [e]);
-  /** Ruled out by being elsewhere, by lacking the means, or by a denial of every listed motive. */
-  const exclusionGoal = (id: string): Goal => {
-    const options: Goal = [...single(evidenceFor(offScene(id))), ...single(evidenceFor(hasMeans(id, false)))];
-    let denials: string[][] = [[]];
-    for (const m of c.motives) {
-      const records = evidenceFor(lacksMotive(id, m.id));
-      denials = denials.flatMap((chosen) => records.map((r) => [...chosen, r])).slice(0, 64);
-    }
-    return [...options, ...denials.filter((d) => d.length > 0).map((d) => [...new Set(d)])];
-  };
+  /** Any one of these records settles it. No records means the goal cannot be met. */
+  const anyOf = (items: string[]): Goal => (items.length > 0 ? [[items]] : []);
+  // Worked out once per suspect; the search asks about them at every state.
+  const suspectGoals = new Map(
+    c.suspects.map((s) => {
+      // Ruled out by being elsewhere, by lacking the means, or by a denial of every listed motive.
+      const denials = c.motives.map((m) => evidenceFor(lacksMotive(s.id, m.id)));
+      const exclusion: Goal = [
+        ...anyOf([...evidenceFor(offScene(s.id)), ...evidenceFor(hasMeans(s.id, false))]),
+        ...(denials.every((records) => records.length > 0) ? [denials] : []),
+      ];
+      const positive = [anyOf(evidenceFor(atScene(s.id))), anyOf(evidenceFor(hasMeans(s.id, true))), anyOf(evidenceFor(hasSomeMotive(s.id)))];
+      return [s.id, { exclusion, positive }] as const;
+    }),
+  );
+  const exclusionGoal = (id: string): Goal => suspectGoals.get(id)!.exclusion;
   const accusationGoals = (id: string): Goal[] => [
-    single(evidenceFor(atScene(id))),
-    single(evidenceFor(hasMeans(id, true))),
-    single(evidenceFor(hasSomeMotive(id))),
+    ...suspectGoals.get(id)!.positive,
     ...c.suspects.filter((s) => s.id !== id).map((s) => exclusionGoal(s.id)),
   ];
 
-  const met = (goal: Goal, held: Set<string>) => goal.find((option) => option.every((item) => held.has(item)));
+  /** The items that meet a goal in this notebook: one per group of the first option that holds. */
+  const met = (goal: Goal, held: Set<string>): string[] | undefined => {
+    for (const option of goal) {
+      const picks = option.map((group) => group.find((item) => held.has(item)));
+      if (picks.every((item) => item !== undefined)) return picks as string[];
+    }
+    return undefined;
+  };
 
   /** What a notebook shows: who is still open, and who is fully proven. */
   const assess = (held: Set<string>) => {
     const survivors: string[] = [];
     const proven: string[] = [];
     for (const s of c.suspects) {
-      if (met(exclusionGoal(s.id), held)) continue;
+      const goals = suspectGoals.get(s.id)!;
+      if (met(goals.exclusion, held)) continue;
       survivors.push(s.id);
-      const positive = [atScene(s.id), hasMeans(s.id, true), hasSomeMotive(s.id)];
-      if (positive.every((test) => evidenceFor(test).some((e) => held.has(e)))) proven.push(s.id);
+      if (goals.positive.every((goal) => met(goal, held))) proven.push(s.id);
     }
     return { survivors, proven };
   };
@@ -168,7 +188,7 @@ export function solve(c: Case): SolveResult {
   const relevantTo = (goal: Goal): Act[] => {
     let list = relevantCache.get(goal);
     if (list) return list;
-    const wanted = new Set<string>(goal.flat());
+    const wanted = new Set<string>(goal.flat(2));
     const found = new Set<Act>();
     for (const item of wanted) {
       for (const act of providers.get(item) ?? []) {
@@ -282,6 +302,7 @@ export function solve(c: Case): SolveResult {
 
   // --- 2. Who is still open after the best single session. ---
   let survivorSets: string[][];
+  let survivorSetsComplete = true;
   let proven: string[];
   if (accused) {
     survivorSets = [[accused]];
@@ -312,8 +333,19 @@ export function solve(c: Case): SolveResult {
       if (depth === cap) return;
       for (const act of helpful) if (usable(act, held, mask)) walk(take(held, act), mask | act.bit, depth + 1);
     };
-    guarded(() => walk(new Set(briefing), 0n, 0), undefined);
+    try {
+      walk(new Set(briefing), 0n, 0);
+    } catch (error) {
+      if (!(error instanceof WorkLimitReached)) throw error;
+      // Too many sessions to look at them all. What was seen is real, but it is only a sample.
+      // The case is refused either way, so the verdict itself stays exact.
+      survivorSetsComplete = false;
+    }
     survivorSets = [...best.values()];
+    if (survivorSets.length > MAX_SURVIVOR_SETS) {
+      survivorSets = survivorSets.slice(0, MAX_SURVIVOR_SETS);
+      survivorSetsComplete = false;
+    }
     proven = provenInBest;
   }
   const survivors = survivorSets[0] ?? [];
@@ -325,8 +357,9 @@ export function solve(c: Case): SolveResult {
     for (const lie of s.lies) {
       const prop = assertion.get(lie)?.prop;
       const rebuttals = prop ? evidenceFor((p) => contradicts(p, prop)) : [];
-      const goal: Goal = rebuttals.map((e) => [said(s.id, lie), e]);
-      const session = goal.length > 0 && met(goal, everything) ? guarded(() => findSession([goal], cap, budget), null) : null;
+      // The liar is heard saying it, and any one record against it is in the same notebook.
+      const goal: Goal = rebuttals.length > 0 ? [[[said(s.id, lie)], rebuttals]] : [];
+      const session = met(goal, everything) ? guarded(() => findSession([goal], cap, budget), null) : null;
       if (session) {
         const statedBy = session.path.find((act) => act.suspect === s.id && act.yields.includes(lie))!.ref.id;
         const contradictedBy = rebuttals.find((e) => session.held.has(e))!;
@@ -339,7 +372,7 @@ export function solve(c: Case): SolveResult {
 
   // --- 4. The verdict, with reasons a writer can act on. ---
   for (const s of c.suspects) {
-    const here = evidenceFor(atScene(s.id)).some((e) => everything.has(e));
+    const here = met(suspectGoals.get(s.id)!.positive[0]!, everything);
     const elsewhere = evidenceFor(offScene(s.id)).some((e) => everything.has(e));
     if (here && elsewhere) reasons.push(`reachable evidence both places ${s.id} at the scene and somewhere else`);
   }
@@ -357,11 +390,8 @@ export function solve(c: Case): SolveResult {
     }
     if (unbounded.proven.length === 0) {
       const gaps = unbounded.survivors.map((id) => {
-        const missing = [
-          !evidenceFor(atScene(id)).some((e) => everything.has(e)) && "opportunity",
-          !evidenceFor(hasMeans(id, true)).some((e) => everything.has(e)) && "means",
-          !evidenceFor(hasSomeMotive(id)).some((e) => everything.has(e)) && "motive",
-        ].filter(Boolean);
+        const positive = suspectGoals.get(id)!.positive;
+        const missing = ["opportunity", "means", "motive"].filter((_name, i) => !met(positive[i]!, everything));
         return `${id} (unproven: ${missing.join(", ")})`;
       });
       reasons.push(`no suspect has opportunity, means and motive proven by reachable evidence: ${gaps.join("; ")}`);
@@ -370,6 +400,7 @@ export function solve(c: Case): SolveResult {
     }
     if (survivors.length > 1) {
       const others = survivorSets.length > 1 ? ` (another session leaves [${survivorSets[1]!.join(", ")}])` : "";
+      // A case over the cap may have far more sessions than can be listed.
       reasons.push(`[${survivors.join(", ")}] all still fit: no reachable evidence rules out ${survivors.length - 1} of them${others}`);
     } else if (survivors.length === 0) {
       reasons.push("reachable evidence rules out every suspect");
@@ -401,7 +432,7 @@ export function solve(c: Case): SolveResult {
     proof = { actions: proofSession.path.map((act) => act.ref), evidence: [...cited] };
   }
 
-  return { solvable: reasons.length === 0, survivors, survivorSets, proven, proof, caughtLies, uncaughtLies, reasons, exhaustive };
+  return { solvable: reasons.length === 0, survivors, survivorSets, survivorSetsComplete, proven, proof, caughtLies, uncaughtLies, reasons, exhaustive };
 }
 
 export interface CaseCheck {
