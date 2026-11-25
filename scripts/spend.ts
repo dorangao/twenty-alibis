@@ -8,8 +8,6 @@
  *   npm run spend -- settle <attemptId> --usd N  record the real cost of an attempt, from the dashboard
  *   npm run spend -- allow-paid "who said so"    let this envelope make requests that spend real money
  *   npm run spend -- revoke-paid                 stop that
- *   npm run spend -- calibrate --tokens-per-byte N --note "measured from ..."
- *                                                record a measured input bound (omit N to clear it)
  *   npm run spend -- suspend "why"               stop admitting requests, from any process
  *   npm run spend -- resume                      admit requests again
  *   npm run spend -- audit                       do the totals equal what the attempts add up to?
@@ -58,7 +56,7 @@ try {
       );
     }
   } else if (command === "status") {
-    const [totals, limit, bound] = [await store.totals(envelope), await store.limit(envelope), await store.inputBound(envelope)];
+    const [totals, limit] = [await store.totals(envelope), await store.limit(envelope)];
     say(`Envelope "${envelope}": committed ${usd(totals.committedNano)} of ${usd(limit)}`, `额度 "${envelope}"：已占用 ${usd(totals.committedNano)} / ${usd(limit)}`);
     say(
       `  settled ${usd(totals.settledNano)}, in flight ${usd(totals.heldNano)}, kept for unknown outcomes ${usd(totals.retainedNano)}, requests ${totals.attempts}`,
@@ -68,8 +66,6 @@ try {
     else say("  open", "正常");
     if (totals.paidAllowed) say(`  paid requests: authorized (${totals.paidAllowed})`, "付费请求：已授权");
     else say("  paid requests: not authorized", "付费请求：未授权");
-    if (bound) say(`  input bound: ${bound.tokensPerByte} tokens per byte (${bound.note})`, `输入上界：每字节 ${bound.tokensPerByte} 个 token`);
-    else say("  input bound: none measured", "输入上界：尚未测量");
   } else if (command === "attempts") {
     const only = rest[0];
     const list = (await store.attempts(envelope)).filter((a) => !only || a.state === only);
@@ -95,17 +91,6 @@ try {
   } else if (command === "revoke-paid") {
     await store.revokePaid(envelope);
     say(`Envelope "${envelope}" may no longer make requests that spend real money.`, `额度 "${envelope}" 已不能发起付费请求。`);
-  } else if (command === "calibrate") {
-    const ratio = flag("tokens-per-byte");
-    if (ratio === undefined) {
-      await store.clearInputBound(envelope);
-      say("Cleared the measured input bound. Each request now holds the most a request can cost.", "已清除输入上界。此后每次请求按单次请求的最高可能费用预留。");
-    } else {
-      const measuredFrom = flag("note");
-      if (!measuredFrom) fail('calibrate needs --note "what it was measured from"', "calibrate 需要 --note \"测量依据\"");
-      await store.setInputBound({ envelope, tokensPerByte: Number(ratio), note: measuredFrom! });
-      say(`Recorded an input bound of ${Number(ratio)} tokens per byte. The guard doubles it before use.`, `已记录输入上界：每字节 ${Number(ratio)} 个 token。使用时会加倍。`);
-    }
   } else if (command === "suspend") {
     const totals = await store.suspend({ envelope, reason: rest[0] ?? "suspended by an operator" });
     say(`Envelope "${envelope}" is suspended: ${totals.suspended}`, `额度 "${envelope}" 已停用。`);
@@ -124,8 +109,8 @@ try {
     }
   } else {
     say(
-      'usage: npm run spend -- init [--carried-usd N] | status | attempts [retained] | settle <id> --usd N | allow-paid "who" | revoke-paid | calibrate [--tokens-per-byte N --note "..."] | suspend "why" | resume | audit',
-      "用法见上：初始化、查看状态、列出请求、人工结算、授权或撤销付费请求、记录输入上界、停用、恢复、核对账目",
+      'usage: npm run spend -- init [--carried-usd N] | status | attempts [retained] | settle <id> --usd N | allow-paid "who" | revoke-paid | suspend "why" | resume | audit',
+      "用法见上：初始化、查看状态、列出请求、人工结算、授权或撤销付费请求、停用、恢复、核对账目",
     );
     process.exitCode = 1;
   }

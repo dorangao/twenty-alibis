@@ -164,10 +164,10 @@ function contract(name: string, setup: () => Promise<Context>) {
     it("works behind metered(): a refused request is never sent", async () => {
       const envelope = await fresh();
       const hold = worstCaseNano(100);
-      const provider = new FakeProvider(() => textResponse("ok", { inputTokens: 3_500, cachedTokens: 2_800, outputTokens: 250 }));
-      const metered = createMetered({ ...CALIBRATED, provider, store: ctx.store, envelope, limitNano: hold + 206_200 });
+      const provider = new FakeProvider(() => textResponse("ok", { inputTokens: 3_500, cachedTokens: 2_800, outputTokens: 25 }));
+      const metered = createMetered({ ...CALIBRATED, provider, store: ctx.store, envelope, limitNano: hold + 93_700 });
       const request = (attemptId: string) => ({ step: "t", promptId: "p", attemptId, messages: [{ role: "user" as const, content: "hi" }], maxOutputTokens: 100 });
-      expect((await metered(request("one"))).ok).toBe(true); // settles at 206,200
+      expect((await metered(request("one"))).ok).toBe(true); // settles at 93,700
       expect((await metered(request("two"))).ok).toBe(true); // exactly enough room for one more hold
       expect(await metered(request("three"))).toMatchObject({ ok: false, sent: false, reason: "envelope-exhausted" });
       // The same action delivered again is not sent again.
@@ -376,17 +376,16 @@ describe.skipIf(!redisUrl)("Redis spend store: paid authorization and the measur
     expect(await store.reserve({ envelope, attemptId: "a", amountNano: 1, limitNano: 10_000, billable: true })).toMatchObject({ ok: false, reason: "suspended" });
   });
 
-  it("records, returns and clears a measured input bound with its note", async () => {
+  it("ignores a ratio left in the record by an older version", async () => {
     const envelope = await fresh();
-    expect(await store.inputBound(envelope)).toBeNull();
-    await expect(store.setInputBound({ envelope, tokensPerByte: 0, note: "x" })).rejects.toThrow();
-    await expect(store.setInputBound({ envelope, tokensPerByte: 0.4, note: " " })).rejects.toThrow();
-    await store.setInputBound({ envelope, tokensPerByte: 0.4, note: "ten requests on Nov 25 | worst of ten" });
-    expect(await store.inputBound(envelope)).toEqual({ tokensPerByte: 0.4, note: "ten requests on Nov 25 / worst of ten" });
-    await store.clearInputBound(envelope);
-    expect(await store.inputBound(envelope)).toBeNull();
-    // Neither field disturbs the counters.
-    expect(await store.totals(envelope)).toMatchObject({ committedNano: 0, attempts: 0, suspended: null, paidAllowed: null });
+    const stale = new Redis(redisUrl!);
+    await stale.hset(store.keyOf(envelope), "bound", "0.0001|measured long ago");
+    stale.disconnect();
+    // The record is still healthy, and nothing about admission or totals changes.
+    await store.allowPaid({ envelope, note: "test" });
+    expect((await store.reserve({ envelope, attemptId: "a", amountNano: 9_000, limitNano: 10_000, billable: true })).ok).toBe(true);
+    expect(await store.reserve({ envelope, attemptId: "b", amountNano: 1_001, limitNano: 10_000, billable: true })).toMatchObject({ ok: false, reason: "limit" });
+    expect(await store.totals(envelope)).toMatchObject({ heldNano: 9_000, attempts: 1 });
     expect((await store.audit(envelope)).consistent).toBe(true);
   });
 });

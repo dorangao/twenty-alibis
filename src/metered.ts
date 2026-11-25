@@ -16,8 +16,10 @@ export const MAX_PAYLOAD_BYTES = 50_000;
 export const BOUND_SAFETY_FACTOR = 2;
 
 /**
- * A measured upper bound on how many input tokens one byte of body becomes, taken from real
- * usage figures. Until one exists, nothing is assumed about the size of a request.
+ * An upper bound on how many input tokens one byte of body becomes. It is honored only for a
+ * provider that spends nothing (tests and offline runs). A request that spends money always
+ * holds the full context-window worst case: a ratio measured on some requests is not a
+ * maximum for the next one, so it is never allowed to shrink a real hold.
  */
 export interface InputBound {
   tokensPerByte: number;
@@ -126,9 +128,9 @@ export interface MeteredDeps {
   /** Defaults to minimal and low. Anything else must be allowed here on purpose. */
   allowedEfforts?: readonly ReasoningEffort[];
   /**
-   * A measured bound on input size. Without it, every request is held at the most a request
-   * can ever cost. With it, a body that the bound keeps in the low price tier gets the
-   * smaller low-tier hold.
+   * For a provider that spends nothing only: lets a body that this bound keeps in the low
+   * price tier use the smaller low-tier hold. Ignored for a billable provider, which always
+   * holds the most a request can ever cost.
    */
   inputBound?: InputBound;
   /** A failing trace sink never changes what is sent or charged. */
@@ -154,11 +156,11 @@ const utf8Length = (text: string) => new TextEncoder().encode(text).length;
  *   6. Settle with the real cost. If the reply has no usable usage block, or anything failed
  *      after sending began, the full hold stays charged for good.
  *
- * How large the hold is: with no measured input bound, it is the most any request can cost
- * (a full context window at the high price), which needs no assumption at all. With a
- * measured bound that keeps this body in the low price tier, it is the low-tier worst case.
- * Either way the reply is checked: more input than was assumed, or a cost above the hold,
- * suspends the envelope at once.
+ * How large the hold is: for a request that spends money it is always the most any request
+ * can cost (a full context window at the high price plus the whole output limit at the high
+ * price). That needs no assumption about how many tokens a body becomes. Only a provider that
+ * spends nothing may use a smaller, low-tier hold. Either way the reply is checked: a cost
+ * above the hold suspends the envelope at once.
  */
 export function createMetered(deps: MeteredDeps) {
   const now = deps.now ?? (() => new Date());
@@ -207,8 +209,9 @@ export function createMetered(deps: MeteredDeps) {
     if (!allowedEfforts.includes(reasoningEffort)) return refuse("effort-not-allowed");
     if (payloadBytes > MAX_PAYLOAD_BYTES) return refuse("payload-too-large");
 
-    // How many input tokens can this body be? Only a measured bound may answer that.
-    const bound = deps.inputBound;
+    // A request that spends money never gets a hold smaller than the full context-window
+    // worst case, whatever ratio the caller supplies.
+    const bound = deps.provider.billable === true ? undefined : deps.inputBound;
     const usableBound = bound !== undefined && Number.isFinite(bound.tokensPerByte) && bound.tokensPerByte > 0;
     const assumedInputTokens = usableBound ? Math.ceil(payloadBytes * bound.tokensPerByte * BOUND_SAFETY_FACTOR) : null;
     const lowTier = assumedInputTokens !== null && assumedInputTokens <= TIER_LIMIT_TOKENS;
@@ -297,6 +300,11 @@ export function createMetered(deps: MeteredDeps) {
       breaches.push(`${response.usage.inputTokens} input tokens is above the ${assumedInputTokens} the measured bound allowed`);
     }
     if (cost > holdNano) breaches.push(`cost ${cost} is above the hold ${holdNano}`);
+    if (response.usage.outputTokens > maxOutputTokens) {
+      // The hold counts on the API honouring the output limit. If it billed more than the
+      // limit, that assumption is false even when this one reply still fits its hold.
+      breaches.push(`${response.usage.outputTokens} output tokens were billed, above the limit of ${maxOutputTokens}`);
+    }
 
     let committedNano: number | undefined;
     let settled = false;

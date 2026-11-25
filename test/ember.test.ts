@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createMetered } from "../src/metered";
 import { EMBER_BASE_URL, EmberHttpError, EmberProvider, fromWireBody, toWireBody } from "../src/provider/ember";
 import { NotDispatchedError, type ProviderRequest } from "../src/provider/types";
-import { worstCaseNano } from "../src/spend/pricing";
+import { absoluteWorstNano } from "../src/spend/pricing";
 import { MemorySpendStore } from "../src/spend/store";
 import { readSpendConfig, resolveApiKey } from "../src/runtime";
 
@@ -28,7 +28,7 @@ const okBody = {
   choices: [{ message: { role: "assistant", content: "In the foyer." }, finish_reason: "stop" }],
   usage: {
     prompt_tokens: 3_500,
-    completion_tokens: 250,
+    completion_tokens: 120,
     prompt_tokens_details: { cached_tokens: 2_800 },
     completion_tokens_details: { reasoning_tokens: 40 },
   },
@@ -118,7 +118,7 @@ describe("EmberProvider", () => {
       text: "In the foyer.",
       toolCalls: [],
       finishReason: "stop",
-      usage: { inputTokens: 3_500, cachedTokens: 2_800, outputTokens: 250, reasoningTokens: 40 },
+      usage: { inputTokens: 3_500, cachedTokens: 2_800, outputTokens: 120, reasoningTokens: 40 },
     });
   });
 
@@ -205,7 +205,8 @@ describe("EmberProvider", () => {
 });
 
 describe("EmberProvider behind the spend guard", () => {
-  const hold = worstCaseNano(150);
+  // Ember spends money, so its hold is always the full context-window worst case.
+  const hold = absoluteWorstNano(150);
   const run = async (reply: () => Response, authorize = true) => {
     const store = new MemorySpendStore();
     if (authorize) await store.allowPaid({ envelope: "e", note: "test fixture" });
@@ -227,7 +228,7 @@ describe("EmberProvider behind the spend guard", () => {
   it("settles a normal reply at its real cost", async () => {
     const { result, totals } = await run(() => json(okBody));
     expect(result).toMatchObject({ ok: true, settled: true, breached: false });
-    expect(totals).toMatchObject({ settledNano: 206_200, heldNano: 0, retainedNano: 0, suspended: null });
+    expect(totals).toMatchObject({ settledNano: 141_200, heldNano: 0, retainedNano: 0, suspended: null });
   });
 
   it("sends exactly the body it measured", async () => {
@@ -247,7 +248,8 @@ describe("EmberProvider behind the spend guard", () => {
   });
 
   it("suspends the envelope when the API reports more output than the limit allowed", async () => {
-    // 150 was the limit. A reply billed for far more means the hold did not bound the cost.
+    // 150 was the limit. A reply billed for far more means the API did not honour it,
+    // even though this one reply still fits inside the full-context hold.
     const { result, totals } = await run(() => json({ ...okBody, usage: { prompt_tokens: 3_500, completion_tokens: 100_000 } }));
     expect(result).toMatchObject({ ok: true, breached: true });
     expect(totals.settledNano).toBe(3_500 * 100 + 100_000 * 500);

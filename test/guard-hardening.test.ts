@@ -399,3 +399,47 @@ describe("how much is held", () => {
     expect(await metered(request("turn-2"))).toMatchObject({ sent: false, reason: "envelope-suspended" });
   });
 });
+
+describe("no ratio can shrink the hold on a request that spends money", () => {
+  const most = absoluteWorstNano(100);
+
+  it.each([0.0001, 0.5, 1, 100])("a paid-enabled billable provider holds the full context-window bound even with a ratio of %s", async (tokensPerByte) => {
+    const provider = new FakeProvider(() => textResponse("ok", usage), { billable: true });
+    const store = new MemorySpendStore();
+    await store.allowPaid({ envelope: "e", note: "test" });
+    const trace: TraceEvent[] = [];
+    // An old, low ratio is supplied. It would have selected the small hold for a provider that spends nothing.
+    const metered = createMetered({ provider, store, envelope: "e", limitNano: usdToNano(1), inputBound: { tokensPerByte }, trace: (e) => trace.push(e) });
+    expect((await metered(request("turn-1"))).ok).toBe(true);
+    expect(trace[0]).toMatchObject({ holdNano: most, holdBasis: "context-window" });
+  });
+
+  it("refuses a billable request the envelope cannot cover at the full bound, though the low-tier hold would fit", async () => {
+    const provider = new FakeProvider(() => textResponse("ok", usage), { billable: true });
+    const store = new MemorySpendStore();
+    await store.allowPaid({ envelope: "e", note: "test" });
+    const metered = createMetered({ provider, store, envelope: "e", limitNano: hold * 5, inputBound: { tokensPerByte: 0.0001 } });
+    expect(hold * 5).toBeLessThan(most);
+    expect(await metered(request("turn-1"))).toMatchObject({ ok: false, sent: false, reason: "envelope-exhausted" });
+    expect(provider.dispatched).toBe(0);
+  });
+
+  it("a billable reply with far more input than any ratio suggested stays inside its hold and does not suspend", async () => {
+    const provider = new FakeProvider(() => textResponse("ok", { inputTokens: 900_000, cachedTokens: 0, outputTokens: 100 }), { billable: true });
+    const store = new MemorySpendStore();
+    await store.allowPaid({ envelope: "e", note: "test" });
+    const metered = createMetered({ provider, store, envelope: "e", limitNano: usdToNano(1), inputBound: { tokensPerByte: 0.0001 } });
+    expect(await metered(request("turn-1"))).toMatchObject({ ok: true, settled: true, breached: false });
+    const totals = await store.totals("e");
+    expect(totals.settledNano).toBe(900_000 * 300 + 100 * 1_500);
+    expect(totals.settledNano).toBeLessThanOrEqual(most);
+    expect(totals.suspended).toBeNull();
+  });
+
+  it("the runtime that builds the real provider never reads or passes a ratio", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(new URL("../src/runtime.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/inputBound\s*[:(]/);
+    expect(source).not.toMatch(/tokensPerByte/);
+  });
+});

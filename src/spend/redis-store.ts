@@ -52,8 +52,8 @@ local function health()
   return 'ok'
 end
 local function reply(status, extra)
-  local v = redis.call('HMGET', K, 'settled', 'held', 'retained', 'attempts', 'suspended', 'limit', 'paid', 'bound')
-  return { status, extra or '', v[1], v[2], v[3], v[4], v[5] or '', v[6], v[7] or '', v[8] or '' }
+  local v = redis.call('HMGET', K, 'settled', 'held', 'retained', 'attempts', 'suspended', 'limit', 'paid')
+  return { status, extra or '', v[1], v[2], v[3], v[4], v[5] or '', v[6], v[7] or '' }
 end
 -- Returns state, hold, charged. Returns nil when there is no such attempt, and 'corrupt'
 -- when there is one but it cannot be read: a damaged attempt must never look absent.
@@ -231,7 +231,7 @@ export class RedisSpendStore implements SpendStore {
   }
 
   private async run(envelope: string, script: string, args: string[]) {
-    const [status, extra, settled, held, retained, attempts, suspended, limit, paid, bound] = await this.raw(envelope, script, args);
+    const [status, extra, settled, held, retained, attempts, suspended, limit, paid] = await this.raw(envelope, script, args);
     const settledNano = Number(settled);
     const heldNano = Number(held);
     const retainedNano = Number(retained);
@@ -246,7 +246,7 @@ export class RedisSpendStore implements SpendStore {
       suspended: suspended ? suspended : null,
       paidAllowed: paid ? paid : null,
     };
-    return { status: status!, extra: extra ?? "", totals, limitNano: Number(limit), bound: bound ?? "" };
+    return { status: status!, extra: extra ?? "", totals, limitNano: Number(limit) };
   }
 
   /**
@@ -304,31 +304,6 @@ export class RedisSpendStore implements SpendStore {
   /** Operator action: stop allowing paid requests. */
   async revokePaid(envelope: string): Promise<EnvelopeTotals> {
     return (await this.run(envelope, SET_FIELD, ["paid", ""])).totals;
-  }
-
-  /**
-   * Operator action: record a measured upper bound on input tokens per body byte, taken from
-   * real usage figures. The guard doubles it before trusting it.
-   */
-  async setInputBound(args: { envelope: string; tokensPerByte: number; note: string }): Promise<void> {
-    if (!Number.isFinite(args.tokensPerByte) || args.tokensPerByte <= 0) throw new RangeError("tokensPerByte must be a positive number");
-    const note = args.note.trim().replaceAll("|", "/").slice(0, 300);
-    if (!note) throw new Error("a measured bound needs a note saying what it was measured from");
-    await this.run(args.envelope, SET_FIELD, ["bound", `${args.tokensPerByte}|${note}`]);
-  }
-
-  /** Operator action: forget the measured bound. Holds go back to the most a request can cost. */
-  async clearInputBound(envelope: string): Promise<void> {
-    await this.run(envelope, SET_FIELD, ["bound", ""]);
-  }
-
-  /** The measured bound on record, or null. */
-  async inputBound(envelope: string): Promise<{ tokensPerByte: number; note: string } | null> {
-    const { bound } = await this.run(envelope, TOTALS, []);
-    if (!bound) return null;
-    const [ratio, ...note] = bound.split("|");
-    const tokensPerByte = Number(ratio);
-    return Number.isFinite(tokensPerByte) && tokensPerByte > 0 ? { tokensPerByte, note: note.join("|") } : null;
   }
 
   /** Operator action: admit requests again after a suspension has been looked into. */

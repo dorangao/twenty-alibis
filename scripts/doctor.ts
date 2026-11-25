@@ -37,7 +37,7 @@ try {
       ok(`Redis: ${await redis.ping()}`, "Redis：连接正常");
       const store = new RedisSpendStore(redis.runner);
       try {
-        const [totals, limit, bound] = [await store.totals(config.envelope), await store.limit(config.envelope), await store.inputBound(config.envelope)];
+        const [totals, limit] = [await store.totals(config.envelope), await store.limit(config.envelope)];
         ok(`envelope: initialized with a fixed limit of ${usd(limit)}`, `额度：已初始化，固定上限 ${usd(limit)}`);
         if (limit !== config.limitNano) {
           note(`SPEND_LIMIT_USD (${usd(config.limitNano)}) differs from the fixed limit; the lower one applies`, `SPEND_LIMIT_USD（${usd(config.limitNano)}）与固定上限不同，以较低者为准`);
@@ -49,11 +49,7 @@ try {
 
         if (totals.paidAllowed) ok(`paid requests: authorized (${totals.paidAllowed})`, "付费请求：已授权");
         else bad("paid requests: not authorized. Real model calls are refused until `npm run spend -- allow-paid \"who said so\"`", "付费请求：未授权。在运行 allow-paid 之前，真实模型调用一律拒绝");
-        if (bound) {
-          ok(`input bound: ${bound.tokensPerByte} tokens per byte, doubled before use (${bound.note})`, `输入上界：每字节 ${bound.tokensPerByte} 个 token，使用时加倍`);
-        } else {
-          note("input bound: none measured yet, so each request holds about $0.31 until it settles", "输入上界：尚未测量，每次请求在结算前预留约 $0.31");
-        }
+        note("each real request holds about $0.31 until it settles: the most a request can cost", "每次真实请求在结算前预留约 $0.31，即单次请求的最高可能费用");
 
         console.log();
         say(

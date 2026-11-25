@@ -97,7 +97,7 @@ npm run doctor
 npm run spend -- allow-paid "who said so, and for what"
 ```
 
-**How much is reserved.** Until real usage has been measured, the guard assumes nothing about how many tokens a request becomes. It reserves the most any request can cost: a full context window at the higher price, about $0.31. Once a tokens-per-byte figure has been measured from real replies and recorded (`npm run spend -- calibrate`), requests that it keeps under the price line reserve about $0.02 instead. The guard doubles the measured figure before trusting it, and a reply that exceeds it suspends the budget.
+**How much is reserved.** The guard assumes nothing about how many tokens a request becomes. For every request that spends money it reserves the most any request can cost: a full context window at the higher price plus the whole output limit, about $0.31. The difference comes back when the reply is settled. No measured ratio can shrink that reservation: a figure seen on some requests is not a maximum for the next one.
 
 If a reply never arrives, arrives without usable usage figures, or is an HTTP error of any kind, the **full reservation stays charged**. The request reached the API, and nothing on this side proves it was free. Such holds are closed by hand against the dashboard:
 
