@@ -88,6 +88,7 @@ export function toWireBody(request: ProviderRequest): Record<string, unknown> {
     max_completion_tokens: request.maxOutputTokens,
     reasoning_effort: request.reasoningEffort,
     stream: false,
+    ...(request.cacheKey ? { prompt_cache_key: request.cacheKey } : {}),
     ...(request.tools
       ? { tools: request.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } })) }
       : {}),

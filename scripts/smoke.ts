@@ -23,7 +23,8 @@ import { nanoToUsd } from "../src/spend/pricing";
 import { say } from "./say";
 
 const c = archivePass;
-const LABEL = "a";
+const batchFlag = process.argv.indexOf("--batch");
+const LABEL = batchFlag >= 0 ? String(process.argv[batchFlag + 1]) : "a";
 const idOf = (n: number) => `smoke-${LABEL}-${String(n).padStart(2, "0")}`;
 const usd = (nano: number) => `$${nanoToUsd(nano).toFixed(6)}`;
 
@@ -125,7 +126,7 @@ const afterRecall = (suspect: string, question: string, call: ToolCall): ChatMes
 const EN = "Where were you at 21:00?";
 const ZH = "21:00 你在哪里？";
 
-const steps: Step[] = [
+const batchA: Step[] = [
   {
     n: 1,
     what: "ping: smallest possible request",
@@ -217,8 +218,96 @@ const steps: Step[] = [
   },
 ];
 
+// ---- Batch b: suspect voice, gossip prompt, caching with a long prefix ----
+
+/** One question to one suspect: the recall request, then the answer. Two steps. */
+function exchange(n: number, key: string, suspect: string, question: string, note: string): Step[] {
+  return [
+    {
+      n,
+      what: `${note}: question -> recall`,
+      build: () => ({ step: "suspect.recall", promptId: "suspect-v2", messages: ask(suspect, question), tools: [recallTool(c, suspect)], maxOutputTokens: 400 }),
+      after: (r, ctx) => (ctx.calls[key] = r.toolCalls[0]),
+    },
+    {
+      n: n + 1,
+      what: `${note}: answer in character`,
+      build: (ctx) =>
+        ctx.calls[key] ? { step: "suspect.answer", promptId: "suspect-v2", messages: afterRecall(suspect, question, ctx.calls[key]!), responseSchema: suspectAnswerSchema, maxOutputTokens: 500 } : null,
+    },
+  ];
+}
+
+const others = (suspect: string) => c.suspects.map((s) => s.id).filter((id) => id !== suspect);
+const compactGossipSchema = (suspect: string) => ({ name: "gossip_choice", schema: object({ to: { type: "string", enum: [...others(suspect), "nobody"] } }) });
+const compactGossip = (suspect: string): ChatMessage[] => [
+  ...suspectSystemMessages(c, suspect),
+  {
+    role: "user",
+    content: `Between the detective's questions you may repeat what you told the detective to one other person in the house, or keep it to yourself. You told the detective: "I was in the foyer at 21:00." Choose whom you tell: ${others(suspect).join(", ")}, or nobody. Just choose; no explanation is needed.`,
+  },
+];
+const gossipStep = (n: number, suspect: string, effort: "low" | "minimal"): Step => ({
+  n,
+  what: `gossip, compact prompt, ${suspect}, effort ${effort}, limit 600`,
+  build: () => ({ step: "gossip.turn", promptId: "gossip-v2", messages: compactGossip(suspect), responseSchema: compactGossipSchema(suspect), maxOutputTokens: 600, reasoningEffort: effort }),
+});
+
+// A shared prefix long enough that a cache should notice it: the briefing plus house notes.
+const houseNotes = Array.from(
+  { length: 120 },
+  (_, i) => `Note ${i + 1}: after 20:00 the east stairwell is closed and visitors use the main stairs; the desk keeps a log. / 注 ${i + 1}：20:00 后东侧楼梯关闭，访客走主楼梯；前台有登记。`,
+).join("\n");
+const longAsk = (question: string): ChatMessage[] => [
+  { role: "system", content: `${publicBriefing(c)}\n\nHOUSE NOTES\n${houseNotes}` },
+  suspectSystemMessages(c, "s-ada")[1]!,
+  { role: "user", content: question },
+];
+const cacheStep = (n: number, question: string, cacheKey?: string): Step => ({
+  n,
+  what: `long shared prefix${cacheKey ? ", with a cache key" : ""}: "${question}"`,
+  build: () => ({ step: "cache.probe", promptId: "suspect-v2-long", messages: longAsk(question), tools: [recallTool(c, "s-ada")], maxOutputTokens: 300, ...(cacheKey ? { cacheKey } : {}) }),
+});
+
+const batchB: Step[] = [
+  ...exchange(1, "ada-en", "s-ada", EN, "Ada, English, where were you"),
+  ...exchange(3, "ada-zh", "s-ada", ZH, "Ada, Chinese, where were you"),
+  ...exchange(5, "ben-en", "s-ben", EN, "Ben, English, where were you"),
+  ...exchange(7, "ben-zh", "s-ben", ZH, "Ben, Chinese, where were you"),
+  ...exchange(9, "ada-who", "s-ada", "Who do you think killed Mr. Shen?", "Ada, English, a question with no topic"),
+  ...exchange(11, "ben-who", "s-ben", "你觉得是谁杀了沈先生？", "Ben, Chinese, a question with no topic"),
+  ...exchange(13, "ada-seen", "s-ada", "Did anyone see you in the foyer at 21:00?", "Ada, English, a question that invites inventing a witness"),
+  {
+    n: 15,
+    what: "gossip, first prompt again, Ben, effort low, limit 1000 (how much reasoning does it want?)",
+    build: () => ({
+      step: "gossip.turn",
+      promptId: "gossip-v1",
+      messages: [...suspectSystemMessages(c, "s-ben"), { role: "user", content: gossipTurn('a-ben-foyer-2100: "I was in the foyer at 21:00."') }],
+      responseSchema: gossipSchema,
+      maxOutputTokens: 1000,
+    }),
+  },
+  gossipStep(16, "s-ben", "low"),
+  gossipStep(17, "s-ada", "low"),
+  gossipStep(18, "s-ben", "minimal"),
+  gossipStep(19, "s-ada", "minimal"),
+  cacheStep(20, "Where were you at 21:00?"),
+  cacheStep(21, "And where were you at 21:20?"),
+  cacheStep(22, "Where were you at 20:40?"),
+  cacheStep(23, "Where were you at 21:00?", "case:archive-pass"),
+  cacheStep(24, "And where were you at 21:20?", "case:archive-pass"),
+];
+
+const batches: Record<string, Step[]> = { a: batchA, b: batchB };
+const steps = batches[LABEL];
+if (!steps) {
+  say(`No such batch: ${LABEL}. Batches: ${Object.keys(batches).join(", ")}.`, `没有这个批次：${LABEL}。`);
+  process.exit(1);
+}
+
 if (process.argv.includes("--plan")) {
-  say("The ten requests, in order. Nothing is sent.", "十次请求的顺序。不会发送任何内容。");
+  say(`The ${steps.length} requests of batch ${LABEL}, in order. Nothing is sent.`, `批次 ${LABEL} 的 ${steps.length} 次请求顺序。不会发送任何内容。`);
   for (const s of steps) console.log(`  ${idOf(s.n)}  ${s.what}`);
   process.exit(0);
 }

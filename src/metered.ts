@@ -46,6 +46,8 @@ export interface MeteredRequest {
   maxOutputTokens: number;
   /** Defaults to "low". The API's own default is "max". */
   reasoningEffort?: ReasoningEffort;
+  /** A label for requests that share a prompt prefix, e.g. the case id. No content. */
+  cacheKey?: string;
 }
 
 export type RefusalReason =
@@ -183,6 +185,7 @@ export function createMetered(deps: MeteredDeps) {
         reasoningEffort,
         ...(request.tools ? { tools: request.tools } : {}),
         ...(request.responseSchema ? { responseSchema: request.responseSchema } : {}),
+        ...(typeof request.cacheKey === "string" && request.cacheKey ? { cacheKey: request.cacheKey } : {}),
       });
       body = deps.provider.encode(snapshot);
     } catch {
