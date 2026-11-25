@@ -103,9 +103,16 @@ describe("a suspect turn: a line that fails is retried once, then replaced", () 
     expect(turn).toMatchObject({ line: GOOD, source: "model-retry", requests: 3, costNano: 3 * PRICE });
     expect(turn.rejections).toEqual([{ from: "answer", reason: "exclusive", detail: "Alone" }]);
     const retry = provider.requests[2]!;
-    expect(retry.messages.at(-1)).toMatchObject({ role: "user" });
-    expect(retry.messages.at(-1)!.content).toContain("[Note from the game, not from the detective]");
-    expect(retry.messages.at(-1)!.content).toContain("exclusive: Alone");
+    // The retry has the same shape as the answer request: the note rides inside the tool result.
+    expect(retry.messages.map((m) => m.role)).toEqual(provider.requests[1]!.messages.map((m) => m.role));
+    expect(retry.messages.at(-1)).toMatchObject({ role: "tool", toolCallId: "call_1" });
+    const result = JSON.parse(retry.messages.at(-1)!.content) as { topic: string; statements: { id: string }[]; note: string };
+    expect(result.topic).toBe("t-ada-2100");
+    expect(result.statements.map((s) => s.id)).toEqual(["a-ada-foyer-2100"]);
+    expect(result.note).toContain("[Note from the game, not from the detective]");
+    expect(result.note).toContain("exclusive: Alone");
+    // The first answer request carries no note.
+    expect(provider.requests[1]!.messages.at(-1)!.content).not.toContain("note");
     // The refused line itself is not sent back.
     expect(provider.bodies[2]).not.toContain("I was in the foyer at 21:00. Alone.");
   });

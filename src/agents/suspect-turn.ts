@@ -113,11 +113,11 @@ export interface SuspectTurnArgs {
 }
 
 /**
- * What the model is told before its one retry. It goes in a user message, marked as coming
- * from the game: that message shape is certain to be accepted by the API, and a rejected
- * request would keep its full hold.
+ * What the model is told before its one retry. It travels as a `note` field inside the tool
+ * result, so a retry request has exactly the shape of an ordinary answer request and the
+ * note cannot be taken for something the detective said.
  */
-const retryNote = (lang: Lang, rejection: Rejection): string =>
+export const retryNote = (lang: Lang, rejection: Rejection): string =>
   lang === "en"
     ? `[Note from the game, not from the detective] Your last line cannot be used (${rejection.reason}${rejection.detail ? `: ${rejection.detail}` : ""}). Answer again in English. Make the statements from recall and nothing more: name no other person, place, time or object, deny nothing, and say nothing about who else was there.`
     : `[游戏提示，不是侦探说的话] 你上一句不能用（${rejection.reason}${rejection.detail ? `：${rejection.detail}` : ""}）。请用简体中文重新回答。只说 recall 给出的陈述：不要提到其他人、地点、时间或物品，不要否认任何事，也不要说还有谁在或不在场。`;
@@ -236,19 +236,20 @@ export async function suspectTurn(args: SuspectTurnArgs): Promise<SuspectTurn> {
   }
 
   // ---- 3. The answer, and at most one retry. ----
-  const afterRecall: ChatMessage[] = [
+  const made = call;
+  const afterRecall = (toolResult: string): ChatMessage[] => [
     ...base,
-    { role: "assistant", content: "", toolCalls: [call] },
-    { role: "tool", toolCallId: call.id, content: recallText },
+    { role: "assistant", content: "", toolCalls: [made] },
+    { role: "tool", toolCallId: made.id, content: toolResult },
   ];
 
   for (const attempt of ["answer", "retry"] as const) {
     const last = rejections[rejections.length - 1];
-    const messages = attempt === "retry" && last ? [...afterRecall, { role: "user" as const, content: retryNote(language, last) }] : afterRecall;
+    const messages = afterRecall(attempt === "retry" && last ? JSON.stringify({ ...recalled, note: retryNote(language, last) }) : recallText);
     const response = await send(attempt, { step: `suspect.${attempt}`, messages, responseSchema: suspectAnswerSchema, maxOutputTokens: ANSWER_OUTPUT_TOKENS });
     if (!response) break;
     if (response.finishReason === "length") {
-      // The limit was spent on reasoning. Asking again would most likely end the same way.
+      // The limit was spent on reasoning or on text that never ended. Asking again would most likely end the same way.
       rejections.push({ from: attempt, reason: "truncated", detail: "" });
       break;
     }
