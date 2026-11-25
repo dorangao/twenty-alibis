@@ -390,3 +390,131 @@ describe.skipIf(!redisUrl)("Redis spend store: paid authorization and the measur
     expect((await store.audit(envelope)).consistent).toBe(true);
   });
 });
+
+// Added after the integration review: these run against both stores.
+function reviewContract(name: string, setup: () => Promise<Context>) {
+  describe(`spend store contract, settlement and damage: ${name}`, () => {
+    let ctx: Context;
+    const fresh = async () => {
+      const envelope = `env-${randomUUID()}`;
+      await ctx.prepare(envelope);
+      return envelope;
+    };
+    beforeAll(async () => {
+      ctx = await setup();
+    });
+
+    it("treats the same settlement again as a harmless replay", async () => {
+      const envelope = await fresh();
+      await ctx.store.reserve({ envelope, attemptId: "a", amountNano: 1_000, limitNano: 10_000 });
+      expect(await ctx.store.settle({ envelope, attemptId: "a", actualNano: 400 })).toMatchObject({ applied: true, chargedNano: 400, mismatch: false });
+      const replay = await ctx.store.settle({ envelope, attemptId: "a", actualNano: 400 });
+      expect(replay).toMatchObject({ applied: false, chargedNano: 400, mismatch: false });
+      expect(replay.totals).toMatchObject({ settledNano: 400, suspended: null });
+    });
+
+    it("keeps the first amount and suspends the envelope when a second settlement disagrees", async () => {
+      const envelope = await fresh();
+      await ctx.store.reserve({ envelope, attemptId: "a", amountNano: 1_000, limitNano: 10_000 });
+      await ctx.store.settle({ envelope, attemptId: "a", actualNano: 400 });
+      const second = await ctx.store.settle({ envelope, attemptId: "a", actualNano: 900 });
+      expect(second).toMatchObject({ applied: false, chargedNano: 400, mismatch: true });
+      expect(second.totals.settledNano).toBe(400);
+      expect(second.totals.suspended).toMatch(/attempt a is settled at 400 but a second settlement says 900/);
+      expect(await ctx.store.reserve({ envelope, attemptId: "b", amountNano: 1, limitNano: 10_000 })).toMatchObject({ ok: false, reason: "suspended" });
+    });
+
+    it("behind metered(): a reply that disagrees with an operator's settlement is not reported as settled", async () => {
+      const envelope = await fresh();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const provider = new FakeProvider(async () => {
+        await gate;
+        return textResponse("ok", { inputTokens: 3_500, cachedTokens: 2_800, outputTokens: 25 }); // 93,700
+      });
+      const metered = createMetered({ ...CALIBRATED, provider, store: ctx.store, envelope, limitNano: 1_000_000_000 });
+      const pending = metered({ step: "t", promptId: "p", attemptId: "turn-1", messages: [{ role: "user", content: "hi" }], maxOutputTokens: 100 });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // While the request is in flight, an operator closes it by hand at another amount.
+      await ctx.store.settle({ envelope, attemptId: "turn-1", actualNano: 50_000 });
+      release();
+
+      expect(await pending).toMatchObject({ ok: true, costNano: 93_700, settled: false, breached: true });
+      const totals = await ctx.store.totals(envelope);
+      expect(totals.settledNano).toBe(50_000);
+      expect(totals.suspended).not.toBeNull();
+      expect(provider.dispatched).toBe(1);
+    });
+  });
+}
+reviewContract("in memory", async () => ({ store: new MemorySpendStore(), prepare: async () => {} }));
+if (redisUrl) {
+  reviewContract("Redis", async () => {
+    const { runner } = await connectRedis(redisUrl);
+    const store = new RedisSpendStore(runner, { prefix });
+    return { store, prepare: async (envelope) => void (await store.init({ envelope, limitNano: 1_000_000_000_000 })) };
+  });
+}
+
+describe.skipIf(!redisUrl)("Redis spend store: only canonical numbers, and damage is never read as absence", () => {
+  let store: RedisSpendStore;
+  let admin: Redis;
+  const fresh = async () => {
+    const envelope = `env-${randomUUID()}`;
+    await store.init({ envelope, limitNano: 10_000 });
+    return envelope;
+  };
+  beforeAll(async () => {
+    store = new RedisSpendStore((await connectRedis(redisUrl!)).runner, { prefix });
+    admin = new Redis(redisUrl!);
+  });
+  afterAll(() => admin.disconnect());
+
+  // Each of these parses as a number in Lua, but Redis integer commands reject it or read it
+  // differently. If the script trusted it, a later command could fail after an earlier write.
+  it.each(["1.5", "1e3", " 12", "12 ", "+7", "-0", "007", "0x10", "", "9999999999999999"])("refuses a total stored as %j", async (value) => {
+    const envelope = await fresh();
+    await store.reserve({ envelope, attemptId: "a", amountNano: 100, limitNano: 10_000 });
+    await admin.hset(store.keyOf(envelope), "held", value);
+    for (const call of [
+      () => store.reserve({ envelope, attemptId: "b", amountNano: 1, limitNano: 10_000 }),
+      () => store.settle({ envelope, attemptId: "a", actualNano: 1 }),
+      () => store.retain({ envelope, attemptId: "a" }),
+      () => store.totals(envelope),
+    ]) {
+      await expect(call()).rejects.toBeInstanceOf(EnvelopeCorruptError);
+    }
+    // Nothing was written while refusing: the attempt and the damaged value are as they were.
+    expect(await admin.hget(store.keyOf(envelope), "a:a")).toBe("reserved|100|0");
+    expect(await admin.hget(store.keyOf(envelope), "held")).toBe(value);
+  });
+
+  it.each(["reserved|100", "reserved|1.5|0", "flying|100|0", "reserved|100|0|extra", "", "reserved|-1|0"])(
+    "refuses an attempt stored as %j, and does not treat its id as free",
+    async (value) => {
+      const envelope = await fresh();
+      await store.reserve({ envelope, attemptId: "a", amountNano: 100, limitNano: 10_000 });
+      await admin.hset(store.keyOf(envelope), "a:a", value);
+      // Reserving the same id again must not look like a new attempt.
+      await expect(store.reserve({ envelope, attemptId: "a", amountNano: 100, limitNano: 10_000 })).rejects.toBeInstanceOf(EnvelopeCorruptError);
+      await expect(store.settle({ envelope, attemptId: "a", actualNano: 1 })).rejects.toBeInstanceOf(EnvelopeCorruptError);
+      await expect(store.retain({ envelope, attemptId: "a" })).rejects.toBeInstanceOf(EnvelopeCorruptError);
+      // The totals were not touched, and the damaged record is kept for a person to look at.
+      expect(await admin.hget(store.keyOf(envelope), "held")).toBe("100");
+      expect(await admin.hget(store.keyOf(envelope), "a:a")).toBe(value);
+    },
+  );
+
+  it("audits attempts and totals from one snapshot, so traffic during an audit is not a discrepancy", async () => {
+    const envelope = await fresh();
+    let reserving = true;
+    let n = 0;
+    const traffic = (async () => {
+      while (reserving) await store.reserve({ envelope, attemptId: `t${n++}`, amountNano: 1, limitNano: 10_000 });
+    })();
+    for (let i = 0; i < 40; i++) expect((await store.audit(envelope)).consistent).toBe(true);
+    reserving = false;
+    await traffic;
+    expect(n).toBeGreaterThan(10);
+  });
+});

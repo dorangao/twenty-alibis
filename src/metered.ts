@@ -303,7 +303,13 @@ export function createMetered(deps: MeteredDeps) {
     try {
       const result = await deps.store.settle({ envelope: deps.envelope, attemptId, actualNano: cost });
       committedNano = result.totals.committedNano;
-      settled = true;
+      if (result.mismatch) {
+        // Someone settled this attempt at another amount while it was in flight. The store
+        // keeps that amount and has suspended the envelope; this cost is not confirmed.
+        breaches.push(`the store already holds ${result.chargedNano} for this attempt, but the reply costs ${cost}`);
+      } else {
+        settled = true;
+      }
       if (result.overHold && !breaches.some((b) => b.startsWith("cost"))) breaches.push(`cost ${cost} is above the hold ${holdNano}`);
     } catch {
       // The store still holds the worst case for this attempt. It is reconciled by id later.

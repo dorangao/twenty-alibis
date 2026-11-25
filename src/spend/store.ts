@@ -35,6 +35,14 @@ export type ReserveResult =
 export interface SettleResult {
   /** False when the attempt was already settled; the totals did not change. */
   applied: boolean;
+  /** What the store has on record for this attempt after the call. */
+  chargedNano: number;
+  /**
+   * True when the attempt was already settled at a different amount. The first amount stays,
+   * and the envelope is suspended in the same step: two sources disagree about what a request
+   * cost, and a person has to say which is right.
+   */
+  mismatch: boolean;
   /**
    * True when the real cost was above the hold. The real cost is still charged, and the
    * envelope is suspended in the same step: a hold that failed to bound a charge means the
@@ -131,7 +139,11 @@ export class MemorySpendStore implements SpendStore {
     const attempt = this.attemptsOf(args.envelope).get(args.attemptId);
     if (!attempt) throw new Error(`unknown attempt ${args.attemptId} in envelope ${args.envelope}`);
     if (attempt.state === "settled") {
-      return { applied: false, overHold: false, totals: this.sum(args.envelope) };
+      const mismatch = attempt.chargedNano !== args.actualNano;
+      if (mismatch && !this.suspensions.has(args.envelope)) {
+        this.suspensions.set(args.envelope, `attempt ${args.attemptId} is settled at ${attempt.chargedNano} but a second settlement says ${args.actualNano}`);
+      }
+      return { applied: false, chargedNano: attempt.chargedNano, mismatch, overHold: false, totals: this.sum(args.envelope) };
     }
     const overHold = args.actualNano > attempt.holdNano;
     attempt.state = "settled";
@@ -139,7 +151,7 @@ export class MemorySpendStore implements SpendStore {
     if (overHold && !this.suspensions.has(args.envelope)) {
       this.suspensions.set(args.envelope, `attempt ${args.attemptId} cost ${args.actualNano}, above its hold of ${attempt.holdNano}`);
     }
-    return { applied: true, overHold, totals: this.sum(args.envelope) };
+    return { applied: true, chargedNano: args.actualNano, mismatch: false, overHold, totals: this.sum(args.envelope) };
   }
 
   async retain(args: { envelope: string; attemptId: string }): Promise<EnvelopeTotals> {

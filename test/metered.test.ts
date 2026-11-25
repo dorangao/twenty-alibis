@@ -399,8 +399,10 @@ describe("the spend store", () => {
           accounts.set(attemptId, { kind: "hold", charge: amountNano });
         }
       } else if (operation === "settle") {
-        // The model assumes the reservation really bounds the charge.
-        const actualNano = draw((entry?.charge ?? 0) + 1);
+        // The model assumes the reservation really bounds the charge. A settlement that is
+        // repeated carries the same amount, as a replayed acknowledgement would; a repeat
+        // with a different amount is a mismatch and has its own tests.
+        const actualNano = entry?.kind === "paid" ? entry.charge : draw((entry?.charge ?? 0) + 1);
         const settlement = store.settle({ ...target, actualNano });
         if (entry) {
           const firstSettlement = entry.kind !== "paid";

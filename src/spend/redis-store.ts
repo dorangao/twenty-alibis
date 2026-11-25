@@ -37,11 +37,17 @@ export class EnvelopeCorruptError extends EnvelopeNotInitializedError {
  */
 const PREAMBLE = `
 local K = KEYS[1]
+-- A canonical whole number: digits only, no sign, no spaces, no exponent, no leading zero,
+-- and short enough to be exact. This is the same form Redis integer commands accept, so a
+-- value that passes here cannot make a later command in the script fail halfway.
+local function whole(v)
+  return type(v) == 'string' and #v <= 15 and (v == '0' or string.match(v, '^[1-9]%d*$') ~= nil)
+end
 local function health()
   if redis.call('EXISTS', K) == 0 then return 'missing' end
   local v = redis.call('HMGET', K, 'limit', 'settled', 'held', 'retained', 'attempts')
   for i = 1, 5 do
-    if not v[i] or not tonumber(v[i]) or tonumber(v[i]) < 0 then return 'corrupt' end
+    if not whole(v[i]) then return 'corrupt' end
   end
   return 'ok'
 end
@@ -49,11 +55,15 @@ local function reply(status, extra)
   local v = redis.call('HMGET', K, 'settled', 'held', 'retained', 'attempts', 'suspended', 'limit', 'paid', 'bound')
   return { status, extra or '', v[1], v[2], v[3], v[4], v[5] or '', v[6], v[7] or '', v[8] or '' }
 end
+-- Returns state, hold, charged. Returns nil when there is no such attempt, and 'corrupt'
+-- when there is one but it cannot be read: a damaged attempt must never look absent.
 local function attempt(id)
   local raw = redis.call('HGET', K, 'a:' .. id)
   if not raw then return nil end
-  local state, hold = string.match(raw, '^([^|]+)|([^|]+)|')
-  return state, hold
+  local state, hold, charged = string.match(raw, '^(%a+)|(%d+)|(%d+)$')
+  if not state or not whole(hold) or not whole(charged) then return 'corrupt' end
+  if state ~= 'reserved' and state ~= 'settled' and state ~= 'retained' then return 'corrupt' end
+  return state, hold, charged
 end
 `;
 
@@ -62,6 +72,7 @@ const INIT = `${PREAMBLE}
 local h = health()
 if h == 'ok' then return reply('exists') end
 if h == 'corrupt' then return { 'corrupt' } end
+if not whole(ARGV[1]) or not whole(ARGV[2]) then return { 'bad-argument' } end
 redis.call('HSET', K, 'limit', ARGV[1], 'carried', ARGV[2], 'created', ARGV[3],
   'settled', ARGV[2], 'held', '0', 'retained', '0', 'attempts', '0')
 return reply('created')
@@ -71,7 +82,9 @@ return reply('created')
 const RESERVE = `${PREAMBLE}
 local h = health()
 if h ~= 'ok' then return { h } end
+if not whole(ARGV[2]) or not whole(ARGV[3]) then return { 'bad-argument' } end
 local state = attempt(ARGV[1])
+if state == 'corrupt' then return { 'corrupt' } end
 if state then return reply('duplicate', state) end
 if redis.call('HEXISTS', K, 'suspended') == 1 then return reply('suspended') end
 if ARGV[4] == '1' and redis.call('HEXISTS', K, 'paid') == 0 then return reply('paid-not-enabled') end
@@ -88,9 +101,17 @@ return reply('ok')
 const SETTLE = `${PREAMBLE}
 local h = health()
 if h ~= 'ok' then return { h } end
-local state, hold = attempt(ARGV[1])
+if not whole(ARGV[2]) then return { 'bad-argument' } end
+local state, hold, charged = attempt(ARGV[1])
 if not state then return { 'unknown' } end
-if state == 'settled' then return reply('duplicate') end
+if state == 'corrupt' then return { 'corrupt' } end
+if state == 'settled' then
+  -- The same amount again is a harmless replay. A different amount means two sources
+  -- disagree about what this request cost: keep the first, and stop the envelope.
+  if charged == ARGV[2] then return reply('duplicate', charged) end
+  redis.call('HSETNX', K, 'suspended', 'attempt ' .. ARGV[1] .. ' is settled at ' .. charged .. ' but a second settlement says ' .. ARGV[2])
+  return reply('mismatch', charged)
+end
 redis.call('HINCRBY', K, state == 'reserved' and 'held' or 'retained', '-' .. hold)
 redis.call('HINCRBY', K, 'settled', ARGV[2])
 redis.call('HSET', K, 'a:' .. ARGV[1], 'settled|' .. hold .. '|' .. ARGV[2])
@@ -107,6 +128,7 @@ local h = health()
 if h ~= 'ok' then return { h } end
 local state, hold = attempt(ARGV[1])
 if not state then return { 'unknown' } end
+if state == 'corrupt' then return { 'corrupt' } end
 if state == 'reserved' then
   redis.call('HINCRBY', K, 'held', '-' .. hold)
   redis.call('HINCRBY', K, 'retained', hold)
@@ -203,6 +225,7 @@ export class RedisSpendStore implements SpendStore {
     const status = reply[0];
     if (status === "missing") throw new EnvelopeNotInitializedError(envelope);
     if (status === "corrupt") throw new EnvelopeCorruptError(envelope);
+    if (status === "bad-argument") throw new RangeError("amounts must be whole, non-negative nanodollars");
     if (status === "unknown") throw new Error(`unknown attempt in envelope ${envelope}`);
     return reply.map(String);
   }
@@ -254,7 +277,9 @@ export class RedisSpendStore implements SpendStore {
 
   async settle(args: { envelope: string; attemptId: string; actualNano: number }): Promise<SettleResult> {
     const { status, extra, totals } = await this.run(args.envelope, SETTLE, [cleanId(args.attemptId), wholeNano(args.actualNano, "actualNano")]);
-    return { applied: status === "ok", overHold: extra === "over", totals };
+    if (status === "ok") return { applied: true, chargedNano: args.actualNano, mismatch: false, overHold: extra === "over", totals };
+    // Already settled: `extra` is the amount on record.
+    return { applied: false, chargedNano: Number(extra), mismatch: status === "mismatch", overHold: false, totals };
   }
 
   async retain(args: { envelope: string; attemptId: string }): Promise<EnvelopeTotals> {
@@ -350,7 +375,18 @@ export class RedisSpendStore implements SpendStore {
       else if (state === "reserved") sum.heldNano += Number(hold);
       else sum.retainedNano += Number(hold);
     }
-    const totals = await this.totals(envelope);
+    // The totals are read from the same snapshot as the attempts, so a reservation that
+    // lands between two reads can never look like a discrepancy.
+    const number = (field: string) => Number(fields.get(field));
+    const totals: EnvelopeTotals = {
+      settledNano: number("settled"),
+      heldNano: number("held"),
+      retainedNano: number("retained"),
+      committedNano: number("settled") + number("held") + number("retained"),
+      attempts: number("attempts"),
+      suspended: fields.get("suspended") ?? null,
+      paidAllowed: fields.get("paid") ?? null,
+    };
     const consistent =
       sum.settledNano === totals.settledNano && sum.heldNano === totals.heldNano && sum.retainedNano === totals.retainedNano && sum.attempts === totals.attempts;
     return { consistent, totals, fromAttempts: sum };
