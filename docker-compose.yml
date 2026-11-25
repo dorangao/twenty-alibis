@@ -1,0 +1,25 @@
+# Local development only: the Redis that holds the spend counter.
+#
+#   npm run redis:up      start it
+#   npm run redis:down    stop it (data is kept)
+#
+# The counter must survive restarts, so every write is fsynced to the named volume.
+# `docker compose down -v` deletes that volume. The spend guard then refuses every
+# request until the envelope is initialized again (see `npm run spend:init`).
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--save", ""]
+    ports:
+      - "127.0.0.1:6379:6379" # this machine only
+    volumes:
+      - spend-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    restart: unless-stopped
+
+volumes:
+  spend-data:

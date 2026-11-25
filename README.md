@@ -4,7 +4,7 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 
 一款中英双语的推理游戏：每个嫌疑人都是一个 Muse Ember 智能体，而真相由代码掌握，不由模型决定。
 
-> **Status: early build.** The case format, the solver and the spend guard exist and are tested. The game itself is not playable yet.
+> **Status: early build.** The case format, the solver, the spend guard and the model client exist and are tested. The game itself is not playable yet.
 >
 > **状态：开发初期。** 案件格式、求解器和额度保护已完成并有测试，游戏本身尚不可玩。
 
@@ -34,6 +34,8 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 | A handwritten pair | [`src/case/fixtures/archive.ts`](src/case/fixtures/archive.ts) | One case that passes, and its twin with the same answer key that must be refused |
 | Spend guard | [`src/metered.ts`](src/metered.ts), [`src/spend/`](src/spend) | Reserve, send once, settle. A request with an unknown outcome stays fully charged |
 | Fake provider | [`src/provider/fake.ts`](src/provider/fake.ts) | Scripted model responses. Tests and CI use only this: no key, no network, no cost |
+| Redis spend store | [`src/spend/redis-store.ts`](src/spend/redis-store.ts) | The same guard, durable: each check-and-reserve is one atomic script, and the limit is fixed once set |
+| Ember provider | [`src/provider/ember.ts`](src/provider/ember.ts) | The only real model client: one stateless request, no retry, no streaming. Reached only through the spend guard |
 
 ### The pair that defines "solvable" · 定义"可解"的一对案件
 
@@ -55,6 +57,34 @@ npm run check
 ```
 
 `npm run check` runs the type check and all tests. Nothing in the test suite calls a model.
+
+### The durable spend counter · 持久化的额度计数
+
+The spend guard counts in Redis, so the count survives restarts and is shared by every process. For local work, Docker provides it:
+
+```bash
+npm run redis:up
+```
+
+```bash
+npm run test:redis
+```
+
+`npm run test:redis` runs the same suite plus the Redis store tests, in a separate database with its own key prefix.
+
+To prepare a real run, copy `.env.example` to `.env.local`, fill it in, then:
+
+```bash
+npm run spend -- init
+```
+
+```bash
+npm run doctor
+```
+
+`doctor` reports whether each setting is present and what the counter says. It makes no model request and never prints a secret. If the counter is ever lost (for example `docker compose down -v`), the guard refuses every request until the envelope is initialized again: a missing counter is not treated as zero.
+
+额度保护把计数存在 Redis 里，重启后不丢失，所有进程共用。本地用 Docker 启动。`doctor` 只报告各项设置是否存在以及当前计数，不发起任何模型请求，也不打印密钥。计数一旦丢失，在重新初始化之前所有请求都会被拒绝。
 
 ## Built during the Muse Ember Hackathon · 关于本项目
 
