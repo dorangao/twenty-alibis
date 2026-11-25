@@ -1,5 +1,6 @@
 import { isOpen } from "./access";
-import type { Case, Proposition } from "./schema";
+import { proofRules, type Goal } from "./proof";
+import type { Case } from "./schema";
 import { contradicts } from "./truth";
 import { validateCase, type ValidationResult } from "./validate";
 
@@ -55,14 +56,6 @@ interface Act {
   requires: string[];
 }
 
-/**
- * A goal is a list of options. An option is a list of groups, and a group is a list of
- * interchangeable items. The goal is met when, for at least one option, the notebook holds
- * some item from every group. Groups keep "any one of these records" as a choice for the
- * search to make, so the alternatives are never multiplied out.
- */
-type Option = string[][];
-type Goal = Option[];
 /** The most survivor sets a result lists. */
 const MAX_SURVIVOR_SETS = 50;
 
@@ -119,68 +112,8 @@ export function solve(c: Case): SolveResult {
   }
   const briefing = new Set(c.briefing.evidence);
 
-  // What each piece of authoritative evidence proves.
-  const proofs: { prop: Proposition; evidence: string }[] = [];
-  for (const e of c.evidence) {
-    if (!e.authoritative) continue;
-    for (const a of e.proves) proofs.push({ prop: assertion.get(a)!.prop, evidence: e.id });
-  }
-  const evidenceFor = (test: (p: Proposition) => boolean): string[] => [
-    ...new Set(proofs.filter((p) => test(p.prop)).map((p) => p.evidence)),
-  ];
-
-  const atScene = (id: string) => (p: Proposition) =>
-    p.subject === id && p.kind === "at" && p.slot === death.slot && p.location === death.location;
-  const offScene = (id: string) => (p: Proposition) =>
-    p.subject === id && p.kind === "at" && p.slot === death.slot && p.location !== death.location;
-  const hasMeans = (id: string, value: boolean) => (p: Proposition) =>
-    p.subject === id && p.kind === "means" && p.means === c.victim.means && p.value === value;
-  const hasSomeMotive = (id: string) => (p: Proposition) => p.subject === id && p.kind === "motive" && p.value;
-  const lacksMotive = (id: string, motive: string) => (p: Proposition) =>
-    p.subject === id && p.kind === "motive" && p.motive === motive && !p.value;
-
-  /** Any one of these records settles it. No records means the goal cannot be met. */
-  const anyOf = (items: string[]): Goal => (items.length > 0 ? [[items]] : []);
-  // Worked out once per suspect; the search asks about them at every state.
-  const suspectGoals = new Map(
-    c.suspects.map((s) => {
-      // Ruled out by being elsewhere, by lacking the means, or by a denial of every listed motive.
-      const denials = c.motives.map((m) => evidenceFor(lacksMotive(s.id, m.id)));
-      const exclusion: Goal = [
-        ...anyOf([...evidenceFor(offScene(s.id)), ...evidenceFor(hasMeans(s.id, false))]),
-        ...(denials.every((records) => records.length > 0) ? [denials] : []),
-      ];
-      const positive = [anyOf(evidenceFor(atScene(s.id))), anyOf(evidenceFor(hasMeans(s.id, true))), anyOf(evidenceFor(hasSomeMotive(s.id)))];
-      return [s.id, { exclusion, positive }] as const;
-    }),
-  );
-  const exclusionGoal = (id: string): Goal => suspectGoals.get(id)!.exclusion;
-  const accusationGoals = (id: string): Goal[] => [
-    ...suspectGoals.get(id)!.positive,
-    ...c.suspects.filter((s) => s.id !== id).map((s) => exclusionGoal(s.id)),
-  ];
-
-  /** The items that meet a goal in this notebook: one per group of the first option that holds. */
-  const met = (goal: Goal, held: Set<string>): string[] | undefined => {
-    for (const option of goal) {
-      const picks = option.map((group) => group.find((item) => held.has(item)));
-      if (picks.every((item) => item !== undefined)) return picks as string[];
-    }
-    return undefined;
-  };
-
-  /** What a notebook shows: who is still open, and who is fully proven. */
-  const assess = (held: Set<string>) => {
-    const survivors: string[] = [];
-    const proven: string[] = [];
-    for (const s of c.suspects) {
-      const goals = suspectGoals.get(s.id)!;
-      if (met(goals.exclusion, held)) continue;
-      survivors.push(s.id);
-      if (goals.positive.every((goal) => met(goal, held))) proven.push(s.id);
-    }
-    return { survivors, proven };
-  };
+  // What proves a suspect and what rules one out: the same rules the game uses to score an accusation.
+  const { evidenceFor, offScene, suspectGoals, exclusionGoal, accusationGoals, met, assess } = proofRules(c);
 
   // --- Search. ---
   // Actions that could ever help toward a goal: those that give one of its items, and
