@@ -6,9 +6,12 @@ import { costNano, usdToNano, worstCaseNano } from "../src/spend/pricing";
 import { MemorySpendStore, type SpendStore } from "../src/spend/store";
 
 const usage = { inputTokens: 3_500, cachedTokens: 2_800, outputTokens: 25 };
+// Every physical request needs its own stable id. Tests that care pass one; the rest get a fresh one.
+let nextAttempt = 0;
 const request = (over: Partial<MeteredRequest> = {}): MeteredRequest => ({
   step: "test.step",
   promptId: "test-prompt-v1",
+  attemptId: `auto-${++nextAttempt}`,
   messages: [{ role: "user", content: "Where were you at 21:00?" }],
   maxOutputTokens: 100,
   ...over,
@@ -316,6 +319,9 @@ describe("metered()", () => {
       retain: async () => {
         throw new Error("store unreachable");
       },
+      suspend: async () => {
+        throw new Error("store unreachable");
+      },
       totals: async () => {
         throw new Error("store unreachable");
       },
@@ -418,6 +424,8 @@ describe("the spend store", () => {
         retainedNano: subtotal("unknown"),
         committedNano: limitNano - available,
         attempts: accounts.size,
+        // Costs in this model never pass their holds, so nothing suspends the envelope.
+        suspended: null,
       });
       expect(actual.committedNano, where).toBeLessThanOrEqual(limitNano);
     }

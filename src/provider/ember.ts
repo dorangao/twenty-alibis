@@ -1,24 +1,13 @@
 import type { Usage } from "../spend/pricing";
-import {
-  NotDispatchedError,
-  type ChatMessage,
-  type Provider,
-  type ProviderRequest,
-  type ProviderResponse,
-  type ToolCall,
-} from "./types";
+import type { ChatMessage, Provider, ProviderRequest, ProviderResponse, ToolCall } from "./types";
 
 export const EMBER_BASE_URL = "https://api.meta.ai/v1";
 
 /**
- * HTTP statuses that mean the API turned the request away before running the model:
- * a malformed request, a bad or missing key, an unknown route, a body that is too large,
- * or a rate limit. Nothing was generated, so nothing was billed.
- * Every other failure (timeouts, 5xx, a dropped connection, an unreadable body) is treated
- * as "may have been billed" and the spend guard keeps the full hold.
+ * Any reply that is not a success. The request reached the API, so this program cannot know
+ * from the status alone whether it was billed: the spend guard keeps the full hold until a
+ * person reconciles it against the dashboard. That includes 400, 401 and 429.
  */
-const TURNED_AWAY = new Set([400, 401, 403, 404, 413, 422, 429]);
-
 export class EmberHttpError extends Error {
   override readonly name = "EmberHttpError";
   constructor(
@@ -32,7 +21,10 @@ export class EmberHttpError extends Error {
 export interface EmberProviderOptions {
   apiKey: string;
   baseUrl?: string;
-  /** A request that runs longer than this is aborted and treated as "may have been billed". */
+  /**
+   * The whole exchange, from sending to the last byte of the reply, must finish within this.
+   * Otherwise it is aborted and treated as "may have been billed".
+   */
   timeoutMs?: number;
   fetch?: typeof fetch;
 }
@@ -40,8 +32,9 @@ export interface EmberProviderOptions {
 /**
  * The only real model provider: Muse Ember through the Chat Completions endpoint.
  *
- * One call is one HTTP request. There is no retry, no streaming and no stored conversation:
- * everything the model sees is in the request body. Use it only through `createMetered()`.
+ * One `send` is one HTTP request. There is no retry, no streaming, no stored conversation and
+ * no redirect: a redirect would repeat the POST under a single hold, so it is an error.
+ * Everything the model sees is in the body. Use it only through `createMetered()`.
  */
 export class EmberProvider implements Provider {
   readonly name = "ember";
@@ -58,29 +51,29 @@ export class EmberProvider implements Provider {
     this.fetchImpl = options.fetch ?? fetch;
   }
 
-  async complete(request: ProviderRequest): Promise<ProviderResponse> {
+  /** The exact body text for a request. The spend guard measures this and passes it to `send`. */
+  encode(request: ProviderRequest): string {
+    return JSON.stringify(toWireBody(request));
+  }
+
+  async send(body: string): Promise<ProviderResponse> {
     const controller = new AbortController();
+    // The timer covers the reply body too: headers arriving does not mean the reply will finish.
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    let response: Response;
     try {
-      response = await this.fetchImpl(this.url, {
+      const response = await this.fetchImpl(this.url, {
         method: "POST",
         headers: { authorization: `Bearer ${this.#apiKey}`, "content-type": "application/json" },
-        body: JSON.stringify(toWireBody(request)),
+        body,
+        redirect: "error",
         signal: controller.signal,
       });
+      const text = await response.text();
+      if (!response.ok) throw new EmberHttpError(response.status, text.slice(0, 300));
+      return fromWireBody(JSON.parse(text));
     } finally {
       clearTimeout(timer);
     }
-
-    if (!response.ok) {
-      const detail = (await response.text().catch(() => "")).slice(0, 300);
-      if (TURNED_AWAY.has(response.status)) {
-        throw new NotDispatchedError(`Meta Model API turned the request away (HTTP ${response.status}): ${detail}`);
-      }
-      throw new EmberHttpError(response.status, detail);
-    }
-    return fromWireBody(await response.json());
   }
 }
 

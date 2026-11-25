@@ -5,7 +5,7 @@
 import { API_KEY_NAMES, readSpendConfig, resolveApiKey } from "../src/runtime";
 import { nanoToUsd } from "../src/spend/pricing";
 import { connectRedis } from "../src/spend/redis-client";
-import { EnvelopeNotInitializedError, RedisSpendStore } from "../src/spend/redis-store";
+import { EnvelopeCorruptError, EnvelopeNotInitializedError, RedisSpendStore } from "../src/spend/redis-store";
 
 const usd = (nano: number) => `$${nanoToUsd(nano).toFixed(6)}`;
 let problems = 0;
@@ -34,6 +34,10 @@ try {
       try {
         const [totals, limit] = [await store.totals(config.envelope), await store.limit(config.envelope)];
         ok("envelope", `initialized with a fixed limit of ${usd(limit)}`);
+        if (totals.suspended) bad("envelope", `SUSPENDED: ${totals.suspended}. Look into it, then \`npm run spend -- resume\``);
+        const audit = await store.audit(config.envelope);
+        if (audit.consistent) ok("record", "the totals equal what the attempt records add up to");
+        else bad("record", "the totals do not match the attempt records; run `npm run spend -- audit`");
         if (limit !== config.limitNano) {
           console.log(`  note     SPEND_LIMIT_USD (${usd(config.limitNano)}) differs from the fixed limit; the lower one applies`);
         }
@@ -42,7 +46,8 @@ try {
             `\n  committed ${usd(totals.committedNano)} of ${usd(Math.min(limit, config.limitNano))}   requests ${totals.attempts}`,
         );
       } catch (error) {
-        if (error instanceof EnvelopeNotInitializedError) bad("envelope", "not initialized; run `npm run spend -- init`");
+        if (error instanceof EnvelopeCorruptError) bad("envelope", "its record in Redis is damaged; reconcile it by hand before anything is sent");
+        else if (error instanceof EnvelopeNotInitializedError) bad("envelope", "not initialized; run `npm run spend -- init`");
         else throw error;
       }
     } finally {

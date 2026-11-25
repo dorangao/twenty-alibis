@@ -5,7 +5,7 @@ import { createMetered } from "../src/metered";
 import { FakeProvider, textResponse } from "../src/provider/fake";
 import { worstCaseNano } from "../src/spend/pricing";
 import { connectRedis } from "../src/spend/redis-client";
-import { EnvelopeNotInitializedError, RedisSpendStore } from "../src/spend/redis-store";
+import { EnvelopeCorruptError, EnvelopeNotInitializedError, RedisSpendStore } from "../src/spend/redis-store";
 import { MemorySpendStore, type SpendStore } from "../src/spend/store";
 
 /**
@@ -80,6 +80,31 @@ function contract(name: string, setup: () => Promise<Context>) {
       expect(result.totals.settledNano).toBe(1_500);
     });
 
+    it("suspends the envelope in the same step as a cost above its hold", async () => {
+      const envelope = await fresh();
+      await ctx.store.reserve({ envelope, attemptId: "a", amountNano: 1_000, limitNano: 10_000 });
+      expect((await ctx.store.totals(envelope)).suspended).toBeNull();
+      const result = await ctx.store.settle({ envelope, attemptId: "a", actualNano: 1_500 });
+      expect(result.totals.suspended).toMatch(/attempt a cost 1500, above its hold of 1000/);
+      // Plenty of room is left, but nothing more is admitted.
+      expect(await ctx.store.reserve({ envelope, attemptId: "b", amountNano: 1, limitNano: 10_000 })).toMatchObject({ ok: false, reason: "suspended" });
+    });
+
+    it("when suspended, admits nothing new but still settles and retains what is in flight", async () => {
+      const envelope = await fresh();
+      await ctx.store.reserve({ envelope, attemptId: "flying", amountNano: 400, limitNano: 10_000 });
+      await ctx.store.reserve({ envelope, attemptId: "lost", amountNano: 400, limitNano: 10_000 });
+      expect((await ctx.store.suspend({ envelope, reason: "operator stop" })).suspended).toBe("operator stop");
+      // A second reason does not replace the first.
+      expect((await ctx.store.suspend({ envelope, reason: "something else" })).suspended).toBe("operator stop");
+
+      expect(await ctx.store.reserve({ envelope, attemptId: "new", amountNano: 1, limitNano: 10_000 })).toMatchObject({ ok: false, reason: "suspended" });
+      // A repeated id is still reported as a duplicate, so it is not sent either.
+      expect(await ctx.store.reserve({ envelope, attemptId: "flying", amountNano: 400, limitNano: 10_000 })).toMatchObject({ ok: true, duplicate: true });
+      expect((await ctx.store.settle({ envelope, attemptId: "flying", actualNano: 90 })).applied).toBe(true);
+      expect(await ctx.store.retain({ envelope, attemptId: "lost" })).toMatchObject({ settledNano: 90, heldNano: 0, retainedNano: 400, attempts: 2 });
+    });
+
     it("rejects settling or retaining an attempt it has never seen", async () => {
       const envelope = await fresh();
       await expect(ctx.store.settle({ envelope, attemptId: "ghost", actualNano: 1 })).rejects.toThrow();
@@ -137,10 +162,12 @@ function contract(name: string, setup: () => Promise<Context>) {
       const hold = worstCaseNano(100);
       const provider = new FakeProvider(() => textResponse("ok", { inputTokens: 3_500, cachedTokens: 2_800, outputTokens: 250 }));
       const metered = createMetered({ provider, store: ctx.store, envelope, limitNano: hold + 206_200 });
-      const request = { step: "t", promptId: "p", messages: [{ role: "user" as const, content: "hi" }], maxOutputTokens: 100 };
-      expect((await metered(request)).ok).toBe(true); // settles at 206,200
-      expect((await metered(request)).ok).toBe(true); // exactly enough room for one more hold
-      expect(await metered(request)).toMatchObject({ ok: false, sent: false, reason: "envelope-exhausted" });
+      const request = (attemptId: string) => ({ step: "t", promptId: "p", attemptId, messages: [{ role: "user" as const, content: "hi" }], maxOutputTokens: 100 });
+      expect((await metered(request("one"))).ok).toBe(true); // settles at 206,200
+      expect((await metered(request("two"))).ok).toBe(true); // exactly enough room for one more hold
+      expect(await metered(request("three"))).toMatchObject({ ok: false, sent: false, reason: "envelope-exhausted" });
+      // The same action delivered again is not sent again.
+      expect(await metered(request("one"))).toMatchObject({ ok: false, sent: false, reason: "duplicate-attempt" });
       expect(provider.dispatched).toBe(2);
     });
   });
@@ -200,17 +227,88 @@ describe.skipIf(!redisUrl)("Redis spend store", () => {
     expect((await store.reserve({ envelope, attemptId: "b", amountNano: 300, limitNano: 1_000 })).ok).toBe(true);
   });
 
-  it("refuses, instead of counting from zero, when the counter is lost", async () => {
+  it("keeps the limit, the totals and every attempt in one key that never expires", async () => {
+    const envelope = fresh();
+    await store.init({ envelope, limitNano: 1_000 });
+    await store.reserve({ envelope, attemptId: "a", amountNano: 300, limitNano: 1_000 });
+    await store.reserve({ envelope, attemptId: "b", amountNano: 300, limitNano: 1_000 });
+    expect(await admin.keys(`${store.keyOf(envelope)}*`)).toEqual([store.keyOf(envelope)]);
+    expect(await admin.ttl(store.keyOf(envelope))).toBe(-1);
+  });
+
+  it.each(["limit", "settled", "held", "retained", "attempts"])(
+    "refuses to read a missing %s as zero, and refuses to initialize over the damage",
+    async (field) => {
+      const envelope = fresh();
+      await store.init({ envelope, limitNano: 1_000 });
+      await store.reserve({ envelope, attemptId: "a", amountNano: 900, limitNano: 1_000 });
+      await admin.hdel(store.keyOf(envelope), field);
+
+      await expect(store.reserve({ envelope, attemptId: "b", amountNano: 1, limitNano: 1_000 })).rejects.toBeInstanceOf(EnvelopeCorruptError);
+      await expect(store.settle({ envelope, attemptId: "a", actualNano: 1 })).rejects.toBeInstanceOf(EnvelopeCorruptError);
+      await expect(store.retain({ envelope, attemptId: "a" })).rejects.toBeInstanceOf(EnvelopeCorruptError);
+      await expect(store.totals(envelope)).rejects.toBeInstanceOf(EnvelopeCorruptError);
+      // Initializing again would wipe what survives, so it is refused too.
+      await expect(store.init({ envelope, limitNano: 1_000 })).rejects.toBeInstanceOf(EnvelopeCorruptError);
+      expect(await admin.hget(store.keyOf(envelope), "a:a")).toBe("reserved|900|0");
+    },
+  );
+
+  it("refuses a total that is not a number", async () => {
+    const envelope = fresh();
+    await store.init({ envelope, limitNano: 1_000 });
+    await admin.hset(store.keyOf(envelope), "held", "plenty");
+    await expect(store.reserve({ envelope, attemptId: "a", amountNano: 1, limitNano: 1_000 })).rejects.toBeInstanceOf(EnvelopeCorruptError);
+  });
+
+  it("refuses, instead of counting from zero, when the whole record is lost", async () => {
     const envelope = fresh();
     await store.init({ envelope, limitNano: 1_000 });
     await store.reserve({ envelope, attemptId: "a", amountNano: 900, limitNano: 1_000 });
-    // Lose the totals but keep the rest, as a partial data loss would.
-    await admin.del(`${prefix}:{${envelope}}:totals`);
-    await expect(store.reserve({ envelope, attemptId: "b", amountNano: 1, limitNano: 1_000 })).rejects.toBeInstanceOf(EnvelopeNotInitializedError);
-    // Lose everything.
-    const keys = await admin.keys(`${prefix}:{${envelope}}:*`);
-    await admin.del(...keys);
-    await expect(store.reserve({ envelope, attemptId: "c", amountNano: 1, limitNano: 1_000 })).rejects.toBeInstanceOf(EnvelopeNotInitializedError);
+    await admin.del(store.keyOf(envelope));
+    const error = await store.reserve({ envelope, attemptId: "c", amountNano: 1, limitNano: 1_000 }).catch((e) => e);
+    expect(error).toBeInstanceOf(EnvelopeNotInitializedError);
+    expect(error).not.toBeInstanceOf(EnvelopeCorruptError);
+  });
+
+  it("lists attempts and audits the totals against them", async () => {
+    const envelope = fresh();
+    await store.init({ envelope, limitNano: 10_000, carriedNano: 50 });
+    await store.reserve({ envelope, attemptId: "paid", amountNano: 1_000, limitNano: 10_000 });
+    await store.reserve({ envelope, attemptId: "flying", amountNano: 1_000, limitNano: 10_000 });
+    await store.reserve({ envelope, attemptId: "lost", amountNano: 1_000, limitNano: 10_000 });
+    await store.settle({ envelope, attemptId: "paid", actualNano: 120 });
+    await store.retain({ envelope, attemptId: "lost" });
+
+    expect((await store.attempts(envelope)).sort((a, b) => a.attemptId.localeCompare(b.attemptId))).toEqual([
+      { attemptId: "flying", state: "reserved", holdNano: 1_000, chargedNano: 0 },
+      { attemptId: "lost", state: "retained", holdNano: 1_000, chargedNano: 0 },
+      { attemptId: "paid", state: "settled", holdNano: 1_000, chargedNano: 120 },
+    ]);
+    const audit = await store.audit(envelope);
+    expect(audit.consistent).toBe(true);
+    expect(audit.fromAttempts).toEqual({ settledNano: 170, heldNano: 1_000, retainedNano: 1_000, attempts: 3 });
+
+    // Someone edits a total by hand. The audit sees that it no longer adds up.
+    await admin.hset(store.keyOf(envelope), "settled", "0");
+    expect((await store.audit(envelope)).consistent).toBe(false);
+  });
+
+  it("stays suspended across connections until an operator resumes it", async () => {
+    const envelope = fresh();
+    await store.init({ envelope, limitNano: 10_000 });
+    const other = new RedisSpendStore((await connectRedis(redisUrl!)).runner, { prefix });
+    await other.suspend({ envelope, reason: "stop from another process" });
+    expect(await store.reserve({ envelope, attemptId: "a", amountNano: 1, limitNano: 10_000 })).toMatchObject({ ok: false, reason: "suspended" });
+    expect((await store.resume(envelope)).suspended).toBeNull();
+    expect((await other.reserve({ envelope, attemptId: "a", amountNano: 1, limitNano: 10_000 })).ok).toBe(true);
+  });
+
+  it("rejects an attempt id that could not be stored safely", async () => {
+    const envelope = fresh();
+    await store.init({ envelope, limitNano: 10_000 });
+    await expect(store.reserve({ envelope, attemptId: "a|b", amountNano: 1, limitNano: 10_000 })).rejects.toThrow();
+    await expect(store.reserve({ envelope, attemptId: "", amountNano: 1, limitNano: 10_000 })).rejects.toThrow();
   });
 
   it("holds totals up to the whole budget without losing precision", async () => {

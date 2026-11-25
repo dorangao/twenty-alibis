@@ -4,20 +4,30 @@ export type FakeHandler = (request: ProviderRequest, index: number) => ProviderR
 
 /**
  * A scripted provider. Tests and CI use only this: no key, no network, no cost.
- * It counts every dispatch, so a test can assert that a refused request was never sent.
+ * It counts every dispatch, so a test can assert that a refused request was never sent,
+ * and it keeps the exact text it was given, so a test can assert what would have gone out.
  */
 export class FakeProvider implements Provider {
   readonly name = "fake";
+  /** The requests that were sent, decoded from the bodies. */
   readonly requests: ProviderRequest[] = [];
+  /** The exact body text of each send. */
+  readonly bodies: string[] = [];
 
   constructor(private readonly handler: FakeHandler) {}
 
   get dispatched(): number {
-    return this.requests.length;
+    return this.bodies.length;
   }
 
-  async complete(request: ProviderRequest): Promise<ProviderResponse> {
-    const index = this.requests.length;
+  encode(request: ProviderRequest): string {
+    return JSON.stringify(request);
+  }
+
+  async send(body: string): Promise<ProviderResponse> {
+    const index = this.bodies.length;
+    const request = JSON.parse(body) as ProviderRequest;
+    this.bodies.push(body);
     this.requests.push(request);
     return this.handler(request, index);
   }

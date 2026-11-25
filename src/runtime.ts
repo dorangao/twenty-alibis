@@ -64,7 +64,10 @@ export async function createRuntime(env: Env = process.env): Promise<{
     store,
     envelope: config.envelope,
     limitNano: config.limitNano,
-    killSwitch: () => env.EMBER_DISABLED === "1",
+    // Two switches, both read again right before every send: this process's own setting,
+    // and the envelope's suspension flag in Redis, which any other process can set
+    // (`npm run spend -- suspend "why"`).
+    killSwitch: async () => env.EMBER_DISABLED === "1" || (await store.totals(config.envelope)).suspended !== null,
     trace: fileTrace(`traces/${config.envelope}.trace.jsonl`),
   });
   return { metered, store, config, close: redis.close };

@@ -20,18 +20,24 @@ export interface EnvelopeTotals {
   /** settled + held + retained: what the envelope must assume is spent. */
   committedNano: number;
   attempts: number;
+  /** Why the envelope admits nothing, or null when it is open. Only an operator clears it. */
+  suspended: string | null;
 }
 
 export type ReserveResult =
   | { ok: true; duplicate: false; totals: EnvelopeTotals }
   /** This attempt id was already admitted. The caller must not send it again. */
   | { ok: true; duplicate: true; state: AttemptState; totals: EnvelopeTotals }
-  | { ok: false; reason: "limit"; totals: EnvelopeTotals };
+  | { ok: false; reason: "limit" | "suspended"; totals: EnvelopeTotals };
 
 export interface SettleResult {
   /** False when the attempt was already settled; the totals did not change. */
   applied: boolean;
-  /** True when the real cost was above the hold. The real cost is still charged. */
+  /**
+   * True when the real cost was above the hold. The real cost is still charged, and the
+   * envelope is suspended in the same step: a hold that failed to bound a charge means the
+   * guard's arithmetic is wrong, and nothing more may be sent until a person has looked.
+   */
   overHold: boolean;
   totals: EnvelopeTotals;
 }
@@ -46,6 +52,8 @@ export interface SpendStore {
   settle(args: { envelope: string; attemptId: string; actualNano: number }): Promise<SettleResult>;
   /** Mark an attempt's outcome as unknown. Its full hold stays charged. */
   retain(args: { envelope: string; attemptId: string }): Promise<EnvelopeTotals>;
+  /** Stop admitting anything from this envelope. Holds and settlements still work. */
+  suspend(args: { envelope: string; reason: string }): Promise<EnvelopeTotals>;
   totals(envelope: string): Promise<EnvelopeTotals>;
 }
 
@@ -66,6 +74,7 @@ const assertAmount = (n: number, name: string) => {
  */
 export class MemorySpendStore implements SpendStore {
   private readonly envelopes = new Map<string, Map<string, Attempt>>();
+  private readonly suspensions = new Map<string, string>();
 
   private attemptsOf(envelope: string): Map<string, Attempt> {
     let attempts = this.envelopes.get(envelope);
@@ -74,7 +83,7 @@ export class MemorySpendStore implements SpendStore {
   }
 
   private sum(envelope: string): EnvelopeTotals {
-    const t = { settledNano: 0, heldNano: 0, retainedNano: 0, committedNano: 0, attempts: 0 };
+    const t: EnvelopeTotals = { settledNano: 0, heldNano: 0, retainedNano: 0, committedNano: 0, attempts: 0, suspended: this.suspensions.get(envelope) ?? null };
     for (const a of this.attemptsOf(envelope).values()) {
       t.attempts++;
       if (a.state === "settled") t.settledNano += a.chargedNano;
@@ -93,6 +102,7 @@ export class MemorySpendStore implements SpendStore {
     if (existing) return { ok: true, duplicate: true, state: existing.state, totals: this.sum(args.envelope) };
 
     const before = this.sum(args.envelope);
+    if (before.suspended !== null) return { ok: false, reason: "suspended", totals: before };
     if (before.committedNano + args.amountNano > args.limitNano) {
       return { ok: false, reason: "limit", totals: before };
     }
@@ -110,6 +120,9 @@ export class MemorySpendStore implements SpendStore {
     const overHold = args.actualNano > attempt.holdNano;
     attempt.state = "settled";
     attempt.chargedNano = args.actualNano;
+    if (overHold && !this.suspensions.has(args.envelope)) {
+      this.suspensions.set(args.envelope, `attempt ${args.attemptId} cost ${args.actualNano}, above its hold of ${attempt.holdNano}`);
+    }
     return { applied: true, overHold, totals: this.sum(args.envelope) };
   }
 
@@ -118,6 +131,18 @@ export class MemorySpendStore implements SpendStore {
     if (!attempt) throw new Error(`unknown attempt ${args.attemptId} in envelope ${args.envelope}`);
     if (attempt.state === "reserved") attempt.state = "retained";
     return this.sum(args.envelope);
+  }
+
+  async suspend(args: { envelope: string; reason: string }): Promise<EnvelopeTotals> {
+    // The first reason is the one worth keeping.
+    if (!this.suspensions.has(args.envelope)) this.suspensions.set(args.envelope, args.reason || "suspended");
+    return this.sum(args.envelope);
+  }
+
+  /** Operator action: admit requests again. */
+  async resume(envelope: string): Promise<EnvelopeTotals> {
+    this.suspensions.delete(envelope);
+    return this.sum(envelope);
   }
 
   async totals(envelope: string): Promise<EnvelopeTotals> {

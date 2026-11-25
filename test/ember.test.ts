@@ -39,6 +39,11 @@ function fakeFetch(reply: (url: string, init: RequestInit) => Response | Promise
   return { impl, calls };
 }
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const provider = (reply: (url: string, init: RequestInit) => Response | Promise<Response>, timeoutMs?: number) => {
+  const fake = fakeFetch(reply);
+  return { ember: new EmberProvider({ apiKey: "test-key-not-real", fetch: fake.impl, ...(timeoutMs ? { timeoutMs } : {}) }), calls: fake.calls };
+};
+const failure = (promise: Promise<unknown>): Promise<Error> => promise.then(() => new Error("did not fail"), (e: Error) => e);
 
 describe("the request Ember receives", () => {
   it("always carries the model, an output limit, a reasoning effort, and no streaming", () => {
@@ -87,10 +92,18 @@ describe("the request Ember receives", () => {
 });
 
 describe("EmberProvider", () => {
+  it("encodes a request to the exact body it will send", async () => {
+    const { ember, calls } = provider(() => json(okBody));
+    const body = ember.encode(request);
+    expect(JSON.parse(body)).toEqual(toWireBody(request));
+    await ember.send(body);
+    // Byte for byte: what was measured is what goes out.
+    expect(calls[0]!.init.body).toBe(body);
+  });
+
   it("sends one POST to the chat completions endpoint with the key in a header only", async () => {
-    const { impl, calls } = fakeFetch(() => json(okBody));
-    const provider = new EmberProvider({ apiKey: "test-key-not-real", fetch: impl });
-    const response = await provider.complete(request);
+    const { ember, calls } = provider(() => json(okBody));
+    const response = await ember.send(ember.encode(request));
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe(`${EMBER_BASE_URL}/chat/completions`);
@@ -105,10 +118,16 @@ describe("EmberProvider", () => {
     });
   });
 
+  it("refuses to follow a redirect, which would repeat the POST under one hold", async () => {
+    const { ember, calls } = provider(() => json(okBody));
+    await ember.send(ember.encode(request));
+    expect(calls[0]!.init.redirect).toBe("error");
+  });
+
   it("does not expose the key on the object", () => {
-    const provider = new EmberProvider({ apiKey: "test-key-not-real", fetch: fakeFetch(() => json(okBody)).impl });
-    expect(JSON.stringify(provider)).not.toContain("test-key-not-real");
-    expect(Object.values(provider)).not.toContain("test-key-not-real");
+    const { ember } = provider(() => json(okBody));
+    expect(JSON.stringify(ember)).not.toContain("test-key-not-real");
+    expect(Object.values(ember)).not.toContain("test-key-not-real");
   });
 
   it("reads tool calls", () => {
@@ -128,34 +147,55 @@ describe("EmberProvider", () => {
     expect(fromWireBody(null)).toEqual({ text: null, toolCalls: [] });
   });
 
-  it.each([400, 401, 403, 404, 413, 422, 429])("treats HTTP %i as turned away: nothing was billed", async (status) => {
-    const provider = new EmberProvider({ apiKey: "k", fetch: fakeFetch(() => json({ error: { message: "nope" } }, status)).impl });
-    await expect(provider.complete(request)).rejects.toBeInstanceOf(NotDispatchedError);
+  it.each([400, 401, 403, 404, 408, 409, 413, 422, 429, 500, 502, 503, 504])(
+    "treats HTTP %i as possibly billed: the request reached the API",
+    async (status) => {
+      const { ember } = provider(() => json({ error: { message: "nope" } }, status));
+      const error = await failure(ember.send(ember.encode(request)));
+      expect(error).toBeInstanceOf(EmberHttpError);
+      expect(error).not.toBeInstanceOf(NotDispatchedError);
+    },
+  );
+
+  it("treats a reply that is not JSON as possibly billed", async () => {
+    const { ember } = provider(() => new Response("<html>bad gateway</html>", { status: 200 }));
+    expect(await failure(ember.send(ember.encode(request)))).not.toBeInstanceOf(NotDispatchedError);
   });
 
-  it.each([408, 409, 500, 502, 503, 504])("treats HTTP %i as possibly billed", async (status) => {
-    const provider = new EmberProvider({ apiKey: "k", fetch: fakeFetch(() => json({ error: { message: "oops" } }, status)).impl });
-    const error = await provider.complete(request).catch((e) => e);
-    expect(error).toBeInstanceOf(EmberHttpError);
-    expect(error).not.toBeInstanceOf(NotDispatchedError);
-  });
-
-  it("aborts a request that runs past the timeout, and that counts as possibly billed", async () => {
-    const { impl } = fakeFetch(
+  it("aborts when no reply arrives in time", async () => {
+    const { ember } = provider(
       (_url, init) =>
         new Promise<Response>((_resolve, reject) => {
           init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
         }),
+      10,
     );
-    const provider = new EmberProvider({ apiKey: "k", fetch: impl, timeoutMs: 10 });
-    const error = await provider.complete(request).catch((e) => e);
+    const error = await failure(ember.send(ember.encode(request)));
+    expect(error.name).toBe("AbortError");
     expect(error).not.toBeInstanceOf(NotDispatchedError);
+  });
+
+  it("aborts when the headers arrive but the body never finishes", async () => {
+    const { ember } = provider(
+      (_url, init) =>
+        ({
+          ok: true,
+          status: 200,
+          // Headers are in; the body stalls until the request is aborted.
+          text: () =>
+            new Promise<string>((_resolve, reject) => {
+              init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+            }),
+        }) as unknown as Response,
+      10,
+    );
+    const error = await failure(ember.send(ember.encode(request)));
     expect(error.name).toBe("AbortError");
   });
 
   it("never retries", async () => {
-    const { impl, calls } = fakeFetch(() => json({ error: {} }, 503));
-    await new EmberProvider({ apiKey: "k", fetch: impl }).complete(request).catch(() => {});
+    const { ember, calls } = provider(() => json({ error: {} }, 503));
+    await failure(ember.send(ember.encode(request)));
     expect(calls).toHaveLength(1);
   });
 });
@@ -164,28 +204,40 @@ describe("EmberProvider behind the spend guard", () => {
   const hold = worstCaseNano(150);
   const run = async (reply: () => Response) => {
     const store = new MemorySpendStore();
-    const provider = new EmberProvider({ apiKey: "k", fetch: fakeFetch(reply).impl });
-    const metered = createMetered({ provider, store, envelope: "e", limitNano: 10 * hold });
-    const result = await metered({ step: "t", promptId: "p", messages: request.messages, maxOutputTokens: 150 });
-    return { result, totals: await store.totals("e") };
+    const { ember, calls } = provider(reply);
+    const metered = createMetered({ provider: ember, store, envelope: "e", limitNano: 10 * hold });
+    const result = await metered({ step: "t", promptId: "p", attemptId: "turn-1", messages: request.messages, maxOutputTokens: 150 });
+    return { result, totals: await store.totals("e"), calls };
   };
 
   it("settles a normal reply at its real cost", async () => {
     const { result, totals } = await run(() => json(okBody));
-    expect(result.ok).toBe(true);
-    expect(totals).toMatchObject({ settledNano: 206_200, heldNano: 0, retainedNano: 0 });
+    expect(result).toMatchObject({ ok: true, settled: true, breached: false });
+    expect(totals).toMatchObject({ settledNano: 206_200, heldNano: 0, retainedNano: 0, suspended: null });
   });
 
-  it("charges nothing for a request the API turned away", async () => {
-    const { result, totals } = await run(() => json({ error: {} }, 429));
-    expect(result).toMatchObject({ ok: false, sent: false, reason: "not-dispatched" });
-    expect(totals.committedNano).toBe(0);
+  it("sends exactly the body it measured", async () => {
+    const { calls } = await run(() => json(okBody));
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual(toWireBody({ ...request, maxOutputTokens: 150 }));
   });
 
-  it("keeps the full hold after a server error or a reply without usage", async () => {
-    expect((await run(() => json({ error: {} }, 500))).totals.retainedNano).toBe(hold);
+  it.each([400, 401, 429, 500])("keeps the full hold after HTTP %i: nothing here proves it was free", async (status) => {
+    const { result, totals } = await run(() => json({ error: {} }, status));
+    expect(result).toMatchObject({ ok: false, sent: true, reason: "outcome-unknown" });
+    expect(totals).toMatchObject({ settledNano: 0, retainedNano: hold });
+  });
+
+  it("keeps the full hold after a reply without usage or a reply that is not JSON", async () => {
     expect((await run(() => json({ choices: [{ message: { content: "hi" } }] }))).totals.retainedNano).toBe(hold);
     expect((await run(() => new Response("<html>bad gateway</html>", { status: 200 }))).totals.retainedNano).toBe(hold);
+  });
+
+  it("suspends the envelope when the API reports more output than the limit allowed", async () => {
+    // 150 was the limit. A reply billed for far more means the hold did not bound the cost.
+    const { result, totals } = await run(() => json({ ...okBody, usage: { prompt_tokens: 3_500, completion_tokens: 100_000 } }));
+    expect(result).toMatchObject({ ok: true, breached: true });
+    expect(totals.settledNano).toBe(3_500 * 100 + 100_000 * 500);
+    expect(totals.suspended).not.toBeNull();
   });
 });
 
