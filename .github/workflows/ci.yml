@@ -9,6 +9,8 @@ permissions:
   contents: read
 
 jobs:
+  # The default suite: type check and tests with the fake provider and the in-memory store.
+  # No key, no network, no service.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -18,5 +20,29 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # Type check and tests. The suite uses a fake provider: no key, no network, no cost.
       - run: npm run check
+
+  # The durable spend store, tested against a throwaway Redis on this runner only.
+  # Still no key and no model request: the provider is the fake one here too.
+  redis-store:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      TEST_REDIS_URL: redis://127.0.0.1:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run test/spend-store.test.ts

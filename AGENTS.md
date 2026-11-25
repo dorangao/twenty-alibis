@@ -6,9 +6,9 @@ A bilingual murder mystery where every suspect is a Muse Ember agent. This repos
 
 1. **Code owns the truth; Ember only performs it.** A suspect's prompt never contains the hidden truth, other suspects' knowledge or undiscovered clues. The solver never reads the hidden truth. The accusation is scored by code.
 2. **One model.** The product's AI uses only `muse-ember-1.0` through the Meta Model API. Do not add another AI provider or model as a dependency, a fallback or a helper.
-3. **One way out.** Every model request goes through `createMetered()` in `src/metered.ts`. No other code may hold a model client. Requests are stateless inline text: no stored conversation ids, no file references, no hosted tools. Automatic retries stay off.
-4. **Tests cost nothing.** Tests and CI use the fake provider and the in-memory store. No key, no network call, no real model request in any test or workflow.
-5. **Nothing private in this repo.** Never commit `.env*` files, keys, raw usage traces, billing details or personal details. Traces published here contain no prompt text, no reply text and no hidden solutions.
+3. **One way out.** Every model request goes through `createMetered()` in `src/metered.ts`. No other code may hold a model client. Requests are stateless inline text: no stored conversation ids, no file references, no hosted tools. No retries and no redirects. Each physical request carries a stable `attemptId` chosen by the caller, and each model turn after a tool call is a new request with its own id.
+4. **Tests cost nothing.** No key and no model request in any test or workflow: the provider is always the fake one. `npm run check` and the default CI job use the in-memory store and no network. The durable store has its own job (`redis-store`) and its own command (`npm run test:redis`), which talk only to a throwaway Redis on the same machine.
+5. **Nothing private in this repo.** Never commit `.env*` files, keys, raw usage traces, billing details or personal details. The settings template is `env.example`, with no values in it. Traces published here contain no prompt text, no reply text and no hidden solutions.
 6. **Every user-facing string is bilingual:** English and Simplified Chinese.
 
 ## Working here

@@ -46,15 +46,30 @@ export interface ProviderResponse {
   finishReason?: string;
 }
 
-/** One physical request per call. A provider must never resend on its own. */
+/**
+ * A provider works in two steps so the spend guard can measure exactly what will be sent.
+ *
+ *   encode  turns a request into the exact text of the body. No I/O, no side effects.
+ *   send    sends that text, once. It never resends, retries or follows a redirect.
+ *
+ * The guard checks the size of the encoded body, reserves for it, and passes that same text
+ * to `send`. What was checked and what is sent cannot differ.
+ */
 export interface Provider {
   readonly name: string;
-  complete(request: ProviderRequest): Promise<ProviderResponse>;
+  /**
+   * True when `send` spends real money. A billable provider is refused unless the envelope
+   * carries an operator's explicit authorization for paid requests. Having a key is not enough.
+   */
+  readonly billable: boolean;
+  encode(request: ProviderRequest): string;
+  send(body: string): Promise<ProviderResponse>;
 }
 
 /**
- * Thrown by a provider only when it is certain nothing was sent (for example, a local
- * validation failure). Any other error is treated as "may have been billed".
+ * Thrown by `send` only when it is certain that nothing left this machine: a local check
+ * failed before any network call. Once a request has been handed to the network, every
+ * failure, including an HTTP error reply, counts as "may have been billed".
  */
 export class NotDispatchedError extends Error {
   override readonly name = "NotDispatchedError";

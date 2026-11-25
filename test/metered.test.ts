@@ -5,10 +5,17 @@ import { NotDispatchedError, type ProviderResponse } from "../src/provider/types
 import { costNano, usdToNano, worstCaseNano } from "../src/spend/pricing";
 import { MemorySpendStore, type SpendStore } from "../src/spend/store";
 
+// Most tests here are about something other than hold size, so they run with a measured
+// input bound in place and get the low-tier hold. Hold selection has its own tests.
+const CALIBRATED = { inputBound: { tokensPerByte: 100 } };
+
 const usage = { inputTokens: 3_500, cachedTokens: 2_800, outputTokens: 25 };
+// Every physical request needs its own stable id. Tests that care pass one; the rest get a fresh one.
+let nextAttempt = 0;
 const request = (over: Partial<MeteredRequest> = {}): MeteredRequest => ({
   step: "test.step",
   promptId: "test-prompt-v1",
+  attemptId: `auto-${++nextAttempt}`,
   messages: [{ role: "user", content: "Where were you at 21:00?" }],
   maxOutputTokens: 100,
   ...over,
@@ -17,7 +24,7 @@ const hold = worstCaseNano(100);
 
 function setup(provider: FakeProvider, limitNano: number, store: SpendStore = new MemorySpendStore()) {
   const trace: TraceEvent[] = [];
-  const metered = createMetered({ provider, store, envelope: "test", limitNano, trace: (e) => trace.push(e) });
+  const metered = createMetered({ ...CALIBRATED, provider, store, envelope: "test", limitNano, trace: (e) => trace.push(e) });
   return { metered, store, trace };
 }
 
@@ -219,9 +226,9 @@ describe("metered()", () => {
   it("refuses without sending when the kill switch is on, or cannot be read", async () => {
     const provider = scripted([textResponse("ok", usage)]);
     const store = new MemorySpendStore();
-    const on = createMetered({ provider, store, envelope: "test", limitNano: usdToNano(1), killSwitch: () => true });
+    const on = createMetered({ ...CALIBRATED, provider, store, envelope: "test", limitNano: usdToNano(1), killSwitch: () => true });
     expect(await on(request())).toMatchObject({ ok: false, sent: false, reason: "kill-switch" });
-    const broken = createMetered({
+    const broken = createMetered({ ...CALIBRATED,
       provider,
       store,
       envelope: "test",
@@ -247,7 +254,7 @@ describe("metered()", () => {
       return textResponse("ok", usage);
     });
     const store = new MemorySpendStore();
-    const metered = createMetered({ provider, store, envelope: "wave", limitNano: 4 * hold, killSwitch: () => stopped });
+    const metered = createMetered({ ...CALIBRATED, provider, store, envelope: "wave", limitNano: 4 * hold, killSwitch: () => stopped });
     const first = metered(request({ step: "gossip", attemptId: "first" }));
     await dispatched;
     stopped = true;
@@ -267,7 +274,7 @@ describe("metered()", () => {
     const lanes = [1, 2, 3, 4, 2, 1].map((capacity, index) => {
       const envelope = `group-${index}`;
       const provider = scripted([textResponse("usage unavailable")]);
-      const metered = createMetered({ provider, store, envelope, limitNano: capacity * hold });
+      const metered = createMetered({ ...CALIBRATED, provider, store, envelope, limitNano: capacity * hold });
       return { envelope, capacity, provider, metered };
     });
     const wave = (attemptId: string) => Promise.all(lanes.map(({ metered }) => metered(request({ attemptId }))));
@@ -314,6 +321,9 @@ describe("metered()", () => {
         throw new Error("store unreachable");
       },
       retain: async () => {
+        throw new Error("store unreachable");
+      },
+      suspend: async () => {
         throw new Error("store unreachable");
       },
       totals: async () => {
@@ -389,8 +399,10 @@ describe("the spend store", () => {
           accounts.set(attemptId, { kind: "hold", charge: amountNano });
         }
       } else if (operation === "settle") {
-        // The model assumes the reservation really bounds the charge.
-        const actualNano = draw((entry?.charge ?? 0) + 1);
+        // The model assumes the reservation really bounds the charge. A settlement that is
+        // repeated carries the same amount, as a replayed acknowledgement would; a repeat
+        // with a different amount is a mismatch and has its own tests.
+        const actualNano = entry?.kind === "paid" ? entry.charge : draw((entry?.charge ?? 0) + 1);
         const settlement = store.settle({ ...target, actualNano });
         if (entry) {
           const firstSettlement = entry.kind !== "paid";
@@ -418,6 +430,9 @@ describe("the spend store", () => {
         retainedNano: subtotal("unknown"),
         committedNano: limitNano - available,
         attempts: accounts.size,
+        // Costs in this model never pass their holds, so nothing suspends the envelope.
+        suspended: null,
+        paidAllowed: null,
       });
       expect(actual.committedNano, where).toBeLessThanOrEqual(limitNano);
     }

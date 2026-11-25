@@ -79,9 +79,6 @@ interface Sample {
   survivors: string[];
   otherSurvivorSets?: string[][];
   truthValid?: boolean;
-  // Narrow expected failures keep the contract executable while the bounded planner is incomplete.
-  verdictDiffers?: boolean;
-  survivorsDiffer?: boolean;
 }
 
 const samples: Sample[] = [];
@@ -119,13 +116,13 @@ samples.push(
   { name: "a reachable log is one action beyond the cap", c: variant(c => {
     c.sessionCap = 1;
     c.actions.inspections[0]!.requires = ["a-ada-foyer-2100"];
-  }), accepted: false, survivors: both, survivorsDiffer: true },
+  }), accepted: false, survivors: both },
   { name: "two routes to one log, longer route first", c: twoRoutes(false),
-    accepted: true, survivors: [ada], verdictDiffers: true },
+    accepted: true, survivors: [ada] },
   { name: "two routes to one log, shorter route first", c: twoRoutes(true),
     accepted: true, survivors: [ada] },
   { name: "different records establish the same facts, costly source first", c: twoRoutes(false, true),
-    accepted: true, survivors: [ada], verdictDiffers: true },
+    accepted: true, survivors: [ada] },
   { name: "different records establish the same facts, cheap source first", c: twoRoutes(true, true),
     accepted: true, survivors: [ada] },
   { name: "one visit can clear Ben or Clara but cannot clear both", c: variant(c => {
@@ -137,7 +134,7 @@ samples.push(
     photo.proves = photo.proves.filter(id => id !== claraAlibi);
     c.evidence.push({ ...photo, id: "clara-photo", proves: [claraAlibi, "a-ada-archive-2100"] });
     c.actions.inspections.push({ id: "inspect-photo", label, yields: ["clara-photo"] });
-  }), accepted: false, survivors: both, otherSurvivorSets: [[ada, "s-clara"]], survivorsDiffer: true },
+  }), accepted: false, survivors: both, otherSurvivorSets: [[ada, "s-clara"]] },
   { name: "two key holders with motives are recorded at the scene", c: variant(atScene),
     accepted: false, survivors: both, truthValid: false },
   { name: "a second person at the scene is proven to lack the key", c: variant(c => {
@@ -158,7 +155,7 @@ samples.push(
     accepted: false, survivors: both },
   { name: "the accusation fits but the statement and its rebuttal cannot be collected together", c: variant(c => {
     c.sessionCap = 1;
-  }), accepted: false, survivors: [ada], verdictDiffers: true },
+  }), accepted: false, survivors: [ada] },
   { name: "an innocent speaker's lie about the prime suspect cannot be reached", c: variant(c => {
     const id = "ada-dining";
     c.assertions.push({ id, prop: { kind: "at", subject: ada, slot: c.victim.death.slot, location: "l-dining" } });
@@ -207,21 +204,15 @@ for (const sample of samples) {
     expect(oracle.survivorSets).toHaveLength(expectedSets.length);
     for (const ids of expectedSets) expect(oracle.survivorSets).toContainEqual([...ids].sort());
     expect(gate.validation.ok).toBe(sample.truthValid ?? true);
-    if (!sample.verdictDiffers) expect(gate.accepted).toBe(oracle.accepted);
-    if (!sample.survivorsDiffer) expect(oracle.survivorSets).toContainEqual([...player.survivors].sort());
+    expect(gate.accepted).toBe(oracle.accepted);
+    expect(oracle.survivorSets).toContainEqual([...player.survivors].sort());
+    // Every smallest set the solver reports is one the oracle found, and none is missing.
+    expect(player.survivorSets.map(ids => [...ids].sort()).sort()).toEqual([...oracle.survivorSets].sort());
     if (gate.accepted) {
       expect(player.proof).not.toBeNull();
       replay(c, player.proof!);
     }
   });
-  if (sample.verdictDiffers) {
-    it.fails(`bounded verdict: ${sample.name}`, () => expect(gate.accepted).toBe(oracle.accepted));
-  }
-  if (sample.survivorsDiffer) {
-    it.fails(`bounded survivors: ${sample.name}`, () => {
-      expect(oracle.survivorSets).toContainEqual([...player.survivors].sort());
-    });
-  }
 }
 
 it("player deduction cannot distinguish two answer keys with the same visible case", () => {

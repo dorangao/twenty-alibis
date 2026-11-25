@@ -4,7 +4,7 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 
 一款中英双语的推理游戏：每个嫌疑人都是一个 Muse Ember 智能体，而真相由代码掌握，不由模型决定。
 
-> **Status: early build.** The case format, the solver and the spend guard exist and are tested. The game itself is not playable yet.
+> **Status: early build.** The case format, the solver, the spend guard and the model client exist and are tested. The game itself is not playable yet.
 >
 > **状态：开发初期。** 案件格式、求解器和额度保护已完成并有测试，游戏本身尚不可玩。
 
@@ -34,6 +34,8 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 | A handwritten pair | [`src/case/fixtures/archive.ts`](src/case/fixtures/archive.ts) | One case that passes, and its twin with the same answer key that must be refused |
 | Spend guard | [`src/metered.ts`](src/metered.ts), [`src/spend/`](src/spend) | Reserve, send once, settle. A request with an unknown outcome stays fully charged |
 | Fake provider | [`src/provider/fake.ts`](src/provider/fake.ts) | Scripted model responses. Tests and CI use only this: no key, no network, no cost |
+| Redis spend store | [`src/spend/redis-store.ts`](src/spend/redis-store.ts) | The same guard, durable: one record per budget, each check-and-reserve is one atomic script, the limit is fixed once set, and a damaged record refuses everything |
+| Ember provider | [`src/provider/ember.ts`](src/provider/ember.ts) | The only real model client: one stateless request, no retry, no redirect, no streaming. Reached only through the spend guard |
 
 ### The pair that defines "solvable" · 定义"可解"的一对案件
 
@@ -55,6 +57,59 @@ npm run check
 ```
 
 `npm run check` runs the type check and all tests. Nothing in the test suite calls a model.
+
+### The durable spend counter · 持久化的额度计数
+
+The spend guard counts in Redis, so the count survives restarts and is shared by every process. For local work, Docker provides it:
+
+```bash
+npm run redis:up
+```
+
+```bash
+npm run test:redis
+```
+
+`npm run test:redis` runs the same suite plus the Redis store tests, in a separate database with its own key prefix.
+
+To prepare a real run, copy `env.example` to `.env.local`, fill it in, then:
+
+```bash
+npm run spend -- init
+```
+
+```bash
+npm run doctor
+```
+
+`doctor` reports whether each setting is present and what the counter says. It makes no model request and never prints a secret. If the counter is ever lost (for example `docker compose down -v`) or damaged, the guard refuses every request until a person has dealt with it: a missing number is never treated as zero.
+
+### What the guard does with a request · 一次请求的经过
+
+1. It copies the request and encodes it to the exact text that will be sent. Only that text is used from then on.
+2. It reserves the worst case in Redis. If the budget cannot cover that, or the budget is suspended, nothing is sent.
+3. It checks the kill switch a second time, then sends the text once. No retry, no redirect.
+4. It settles with the real cost from the reply.
+
+**Real model calls are closed by default.** Having a key is not enough: a request that spends money is refused unless a person has authorized paid requests on that budget, and that authorization lives in Redis next to the counter.
+
+```bash
+npm run spend -- allow-paid "who said so, and for what"
+```
+
+**How much is reserved.** The guard assumes nothing about how many tokens a request becomes. For every request that spends money it reserves the most any request can cost: a full context window at the higher price plus the whole output limit, about $0.31. The difference comes back when the reply is settled. No measured ratio can shrink that reservation: a figure seen on some requests is not a maximum for the next one.
+
+If a reply never arrives, arrives without usable usage figures, or is an HTTP error of any kind, the **full reservation stays charged**. The request reached the API, and nothing on this side proves it was free. Such holds are closed by hand against the dashboard:
+
+```bash
+npm run spend -- attempts retained
+```
+
+If a reply ever costs more than its reservation, or reports more input than the guard assumed possible, the budget is **suspended on the spot** and stays that way until a person resumes it. `npm run spend -- suspend "why"` does the same from any terminal.
+
+一次请求会先被固定为将要发送的确切文本，再按最坏情况在 Redis 里预留额度，发送前第二次检查总开关，只发送一次，最后按实际费用结算。回复缺失、缺少用量数据或返回任何 HTTP 错误时，预留额全额保留，待人工对照后台核销。实际费用一旦超过预留额，该额度立即停用，直到人工恢复。
+
+额度保护把计数存在 Redis 里，重启后不丢失，所有进程共用。本地用 Docker 启动。`doctor` 只报告各项设置是否存在以及当前计数，不发起任何模型请求，也不打印密钥。计数一旦丢失，在重新初始化之前所有请求都会被拒绝。
 
 ## Built during the Muse Ember Hackathon · 关于本项目
 
