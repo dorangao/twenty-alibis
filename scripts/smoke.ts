@@ -115,6 +115,13 @@ const afterRecall = (suspect: string, question: string, call: ToolCall): ChatMes
   }
   return [...ask(suspect, question), { role: "assistant", content: "", toolCalls: [call] }, { role: "tool", toolCallId: call.id, content: recallResult(c, suspect, topic, held) }];
 };
+/** A recall step is usable only if it is one call to recall with a topic that suspect has on its menu. */
+const recallExpect = (suspect: string) => ({
+  kind: "tool" as const,
+  name: "recall",
+  field: "topic",
+  allowed: (recallTool(c, suspect, held).parameters as { properties: { topic: { enum: string[] } } }).properties.topic.enum,
+});
 const EN = "Where were you at 21:00?";
 const ZH = "21:00 你在哪里？";
 
@@ -130,6 +137,7 @@ const batchA: Step[] = [
     n: 2,
     what: ["suspect, English question: expect a recall tool call (effort low)", "嫌疑人，英文提问：应调用 recall（推理档位 low）"],
     build: () => ({ step: "suspect.recall", promptId: "suspect-v1", messages: ask("s-ada", EN), tools: [recallTool(c, "s-ada", held)], maxOutputTokens: 400 }),
+    expect: recallExpect("s-ada"),
     after: (r, ctx) => (ctx.calls.en = r.toolCalls[0]),
   },
   {
@@ -141,6 +149,7 @@ const batchA: Step[] = [
     n: 4,
     what: ["suspect, Chinese question: expect a recall tool call (effort minimal)", "嫌疑人，中文提问：应调用 recall（推理档位 minimal）"],
     build: () => ({ step: "suspect.recall", promptId: "suspect-v1", messages: ask("s-ada", ZH), tools: [recallTool(c, "s-ada", held)], maxOutputTokens: 400, reasoningEffort: "minimal" }),
+    expect: recallExpect("s-ada"),
     after: (r, ctx) => (ctx.calls.zh = r.toolCalls[0]),
   },
   {
@@ -221,6 +230,7 @@ function exchange(n: number, key: string, suspect: string, question: string, not
       n,
       what: [`${note[0]}: question -> recall`, `${note[1]}：提问 -> recall`],
       build: () => ({ step: "suspect.recall", promptId: "suspect-v2", messages: ask(suspect, question), tools: [recallTool(c, suspect, held)], maxOutputTokens: 400 }),
+      expect: recallExpect(suspect),
       after: (r, ctx) => (ctx.calls[key] = r.toolCalls[0]),
     },
     {
@@ -261,6 +271,7 @@ const cacheStep = (n: number, question: string, cacheKey?: string): Step => ({
   n,
   what: [`long shared prefix${cacheKey ? ", with a cache label" : ""}: "${question}"`, `长共享前缀${cacheKey ? "，带缓存标签" : ""}："${question}"`],
   build: () => ({ step: "cache.probe", promptId: "suspect-v2-long", messages: longAsk(question), tools: [recallTool(c, "s-ada", held)], maxOutputTokens: 300, ...(cacheKey ? { cacheKey } : {}) }),
+  expect: recallExpect("s-ada"),
 });
 
 const batchB: Step[] = [
@@ -318,6 +329,7 @@ say(`Envelope "${runtime.config.envelope}": ${usd(before.committedNano)} committ
 const label: Record<TrialOutcome, [string, string]> = {
   ok: ["ok", "正常"],
   truncated: ["TRUNCATED (paid for, not usable)", "被截断（已计费，结果不可用）"],
+  invalid: ["INVALID (paid for, reply not in the expected shape)", "无效（已计费，回复不符合预期格式）"],
   unconfirmed: ["UNCONFIRMED (sent, settlement not confirmed)", "未确认（已发送，结算未确认）"],
   failed: ["FAILED (sent, outcome unknown, full hold kept)", "失败（已发送，结果不明，预留额全额保留）"],
   refused: ["REFUSED (not sent)", "被拒绝（未发送）"],
@@ -356,8 +368,8 @@ const count = (o: TrialOutcome) => rows.filter((r) => r.outcome === o).length;
 const priced = rows.filter((r) => r.costNano !== undefined);
 const total = report.pricedNano;
 say(
-  `${count("ok")} ok, ${count("truncated")} truncated, ${count("unconfirmed")} unconfirmed, ${count("failed")} failed, ${count("refused")} refused, ${count("earlier")} sent earlier, ${count("skipped")} skipped, ${count("not-reached")} not reached.`,
-  `正常 ${count("ok")}，截断 ${count("truncated")}，未确认 ${count("unconfirmed")}，失败 ${count("failed")}，被拒绝 ${count("refused")}，此前已发送 ${count("earlier")}，跳过 ${count("skipped")}，未执行 ${count("not-reached")}。`,
+  `${count("ok")} ok, ${count("truncated")} truncated, ${count("invalid")} invalid, ${count("unconfirmed")} unconfirmed, ${count("failed")} failed, ${count("refused")} refused, ${count("earlier")} sent earlier, ${count("skipped")} skipped, ${count("not-reached")} not reached.`,
+  `正常 ${count("ok")}，截断 ${count("truncated")}，无效 ${count("invalid")}，未确认 ${count("unconfirmed")}，失败 ${count("failed")}，被拒绝 ${count("refused")}，此前已发送 ${count("earlier")}，跳过 ${count("skipped")}，未执行 ${count("not-reached")}。`,
 );
 say(`${priced.length} request(s) priced in this run, ${usd(total)} in total.`, `本次运行计费 ${priced.length} 次请求，合计 ${usd(total)}。`);
 
