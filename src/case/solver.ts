@@ -46,7 +46,7 @@ interface Act {
  * evidence counts. Testimony can unlock further actions, but it never proves or rules out
  * anything, and a fact the player cannot reach does not exist: unknown is never an exclusion.
  *
- * This function never reads the hidden truth. It sees what a player would see.
+ * Candidate proof uses no answer key. The separate catchability check uses the declared lies.
  */
 export function solve(c: Case): SolveResult {
   const assertion = new Map(c.assertions.map((a) => [a.id, a]));
@@ -97,6 +97,17 @@ export function solve(c: Case): SolveResult {
 
   // 3. Each suspect: fully proven, ruled out, or still open.
   const death = c.victim.death;
+  const offScene = (p: Proposition, subject: string) =>
+    p.subject === subject && p.kind === "at" && p.slot === death.slot && p.location !== death.location;
+  const exclusionFor = (subject: string): string[] | undefined => {
+    const direct = provedBy((p) => offScene(p, subject) ||
+      (p.subject === subject && p.kind === "means" && p.means === c.victim.means && !p.value));
+    if (direct) return [direct];
+    // Any one motive suffices. Ruling out motive requires an explicit denial for every listed motive.
+    const records = c.motives.map((m) => provedBy((p) =>
+      p.subject === subject && p.kind === "motive" && p.motive === m.id && !p.value));
+    if (records.every((id) => id !== undefined)) return records;
+  };
   const status = c.suspects.map((s) => {
     const mine = (p: Proposition) => p.subject === s.id;
     return {
@@ -104,12 +115,7 @@ export function solve(c: Case): SolveResult {
       opportunity: provedBy((p) => mine(p) && p.kind === "at" && p.slot === death.slot && p.location === death.location),
       means: provedBy((p) => mine(p) && p.kind === "means" && p.means === c.victim.means && p.value),
       motive: provedBy((p) => mine(p) && p.kind === "motive" && p.value),
-      exclusion: provedBy(
-        (p) =>
-          mine(p) &&
-          ((p.kind === "at" && p.slot === death.slot && p.location !== death.location) ||
-            (p.kind === "means" && p.means === c.victim.means && !p.value)),
-      ),
+      exclusion: exclusionFor(s.id),
     };
   });
   const proven = status.filter((s) => s.opportunity && s.means && s.motive).map((s) => s.id);
@@ -134,7 +140,7 @@ export function solve(c: Case): SolveResult {
   // 5. The verdict, with reasons a writer can act on.
   const reasons: string[] = [];
   for (const s of status) {
-    if (s.exclusion && s.opportunity) {
+    if (s.opportunity && provedBy((p) => offScene(p, s.id))) {
       reasons.push(`reachable evidence both places ${s.id} at the scene and rules them out`);
     }
   }
@@ -154,12 +160,13 @@ export function solve(c: Case): SolveResult {
   } else if (survivors.length === 0) {
     reasons.push("reachable evidence rules out every suspect");
   }
-  if (proven.length === 1 && proven[0] !== c.culprit.suspect) {
-    reasons.push(`the reachable evidence proves ${proven[0]}, but the hidden culprit is ${c.culprit.suspect}`);
-  }
   for (const lie of uncaughtLies) {
-    if (lie.suspect === c.culprit.suspect) {
-      reasons.push(`the culprit's lie ${lie.assertion} cannot be caught: the statement or an independent record is out of reach`);
+    const prop = assertion.get(lie.assertion)!.prop;
+    // Keep every lie by a positively identified suspect catchable, along with any other
+    // speaker's claim about a fact used to establish opportunity, means or motive.
+    if (proven.includes(lie.suspect) || prop.kind === "motive" || (prop.kind === "at" && prop.slot === death.slot)
+      || (prop.kind === "means" && prop.means === c.victim.means)) {
+      reasons.push(`the lie ${lie.assertion} by ${lie.suspect} cannot be caught: the statement or an independent record is out of reach`);
     }
   }
 
@@ -168,7 +175,10 @@ export function solve(c: Case): SolveResult {
   if (reasons.length === 0) {
     const culprit = status.find((s) => s.id === proven[0])!;
     const needed = new Set<string>([culprit.opportunity!, culprit.means!, culprit.motive!]);
-    for (const s of status) if (s.id !== culprit.id) needed.add(s.exclusion!);
+    for (const s of status) {
+      if (s.id === culprit.id) continue;
+      for (const record of s.exclusion!) needed.add(record);
+    }
 
     const actions = new Set<string>();
     const reach = (item: string) => {
