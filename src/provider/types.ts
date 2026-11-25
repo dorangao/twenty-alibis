@@ -36,6 +36,8 @@ export interface ProviderRequest {
   responseSchema?: { name: string; schema: Record<string, unknown> };
   maxOutputTokens: number;
   reasoningEffort: ReasoningEffort;
+  /** A label that tells the API which requests share a prompt prefix, to help its cache. It carries no content. */
+  cacheKey?: string;
 }
 
 export interface ProviderResponse {

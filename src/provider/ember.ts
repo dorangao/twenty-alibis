@@ -84,9 +84,11 @@ export function toWireBody(request: ProviderRequest): Record<string, unknown> {
     model: request.model,
     messages: request.messages.map(toWireMessage),
     // On this API the limit covers reasoning tokens and visible output together.
-    max_tokens: request.maxOutputTokens,
+    // `max_completion_tokens` is the current name; `max_tokens` is a deprecated alias.
+    max_completion_tokens: request.maxOutputTokens,
     reasoning_effort: request.reasoningEffort,
     stream: false,
+    ...(request.cacheKey ? { prompt_cache_key: request.cacheKey } : {}),
     ...(request.tools
       ? { tools: request.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } })) }
       : {}),
@@ -99,7 +101,8 @@ export function toWireBody(request: ProviderRequest): Record<string, unknown> {
 function toWireMessage(m: ChatMessage): Record<string, unknown> {
   return {
     role: m.role,
-    content: m.content,
+    // An assistant turn that only calls tools carries no text: the API's own examples send null.
+    content: m.toolCalls && m.content === "" ? null : m.content,
     ...(m.toolCalls
       ? { tool_calls: m.toolCalls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.arguments } })) }
       : {}),

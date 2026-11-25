@@ -57,7 +57,7 @@ describe("the request Ember receives", () => {
         { role: "system", content: "You are Ada." },
         { role: "user", content: "21:00 你在哪里？" },
       ],
-      max_tokens: 150,
+      max_completion_tokens: 150,
       reasoning_effort: "low",
       stream: false,
     });
@@ -89,7 +89,7 @@ describe("the request Ember receives", () => {
       ],
     });
     expect(body.messages).toEqual([
-      { role: "assistant", content: "", tool_calls: [{ id: "call_1", type: "function", function: { name: "recall", arguments: '{"topic":"21:00"}' } }] },
+      { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "recall", arguments: '{"topic":"21:00"}' } }] },
       { role: "tool", content: '["a-ada-foyer-2100"]', tool_call_id: "call_1" },
     ]);
   });

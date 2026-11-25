@@ -18,7 +18,8 @@
     "redis:down": "docker compose down",
     "doctor": "node --env-file-if-exists=.env.local --import tsx scripts/doctor.ts",
     "spend": "node --env-file-if-exists=.env.local --import tsx scripts/spend.ts",
-    "check:restart": "node --import tsx scripts/restart-check.ts"
+    "check:restart": "node --import tsx scripts/restart-check.ts",
+    "smoke": "node --env-file-if-exists=.env.local --import tsx scripts/smoke.ts"
   },
   "dependencies": {
     "ioredis": "^6.1.0",
