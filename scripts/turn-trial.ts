@@ -1,228 +1,75 @@
 /**
- * A paid trial of whole suspect turns: the real loop, the real guard, the real model.
- * 付费试验：完整的嫌疑人问答，真实的循环、真实的守卫、真实的模型。
+ * The record of a finished trial: whole suspect turns against the real model, Nov 25, 2026.
+ * 一次已结束的试验的记录：2026 年 11 月 25 日，用真实模型跑完整的嫌疑人问答。
  *
- *   npm run trial:turn            run it (needs `npm run spend -- allow-paid "..."` first)
- *   npm run trial:turn -- --plan  list what it would send, without sending anything
+ *   npm run trial:turn    print what was sent and what the local trace recorded
  *
- * It sends at most MAX_REQUESTS requests over all of its runs, counted here as well as by the
- * spend guard. Items run in order; one whose worst case does not fit under what is left of
- * the cap is not run, and neither is anything after it. `--plan` reads the trace and prints
- * exactly what a run would do now. A run stops at the first request that is refused, fails,
- * or comes back with its cost unconfirmed. Each request id can be sent once, ever.
+ * This experiment is closed. This script reads; it cannot send anything. It builds no
+ * request, opens no connection and never touches the spend guard. It stays in the repo so
+ * that the request ids of the trial and what each one tested are written down next to the
+ * trace they appear in.
  *
- * The record so far: the first run sent items 1 to 4 (five requests). Items 5 and 6 were
- * added after it and sent by a second run (two requests). On a fresh trace a run would again
- * do items 1 to 4 and leave 5 and 6 for the next run.
+ * Why it is closed rather than resumable: its cap of eight requests was counted from the
+ * local trace file, and a trace write is allowed to fail without failing the request. A
+ * count taken from the trace can therefore be too low. A future trial has to count from the
+ * spend store's own durable attempt records.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { guardLine } from "../src/agents/line-guard";
-import { recallResult, suspectAnswerSchema, suspectSystemMessages } from "../src/agents/suspect-prompt";
-import { ANSWER_OUTPUT_TOKENS, retryNote, SUSPECT_PROMPT_ID, suspectTurn, type SuspectTurn } from "../src/agents/suspect-turn";
-import { startingHeld } from "../src/case/access";
-import { archivePass } from "../src/case/fixtures/archive";
-import type { Metered } from "../src/metered";
-import { createRuntime } from "../src/runtime";
 import { nanoToUsd } from "../src/spend/pricing";
 import { both, say } from "./say";
 
-const c = archivePass;
-const held = startingHeld(c);
 const PREFIX = "turn-c";
-/** The most requests this trial may send, over all of its runs, whatever the model does. */
-const MAX_REQUESTS = 8;
 const usd = (nano: number) => `$${nanoToUsd(nano).toFixed(6)}`;
 
-interface Item {
-  id: string;
-  what: [en: string, zh: string];
-  /** The most requests this item can send. */
-  most: number;
-  run(metered: Metered): Promise<{ stop: boolean }>;
-}
-
-const showTurn = (turn: SuspectTurn): { stop: boolean } => {
-  const statements = turn.statements.map((s) => s.assertion).join(", ") || "none";
-  console.log(`  topic ${turn.topic ?? "none"} | statements ${statements} | source ${turn.source} | requests ${turn.requests} | ${usd(turn.costNano)}`);
-  console.log(`  line: ${turn.line}`);
-  for (const r of turn.rejections) console.log(`  refused line from ${r.from}: ${r.reason}${r.detail ? ` (${r.detail})` : ""}`);
-  if (turn.problem) console.log(`  ${both(`PROBLEM: ${turn.problem}`, `问题：${turn.problem}`)}`);
-  return { stop: turn.problem !== undefined };
-};
-
-const turnItem = (n: number, what: Item["what"], most: number, args: { suspect: string; question: string; topic?: string }): Item => ({
-  id: `${PREFIX}-${n}`,
-  what,
-  most,
-  run: async (metered) => showTurn(await suspectTurn({ metered, c, held, turnId: `${PREFIX}-${n}`, cacheKey: `case:${c.id}`, ...args })),
-});
-
-/**
- * One retry request, built by hand so that it is sent whatever the model's first line was.
- *   user-message  the note follows the tool result as a user message
- *   tool-result   the note is a field of the tool result, so the request ends the way an ordinary answer request does
- */
-const retryItem = (n: number, where: "user-message" | "tool-result", what: Item["what"]): Item => ({
-  id: `${PREFIX}-${n}`,
-  what,
-  most: 1,
-  run: async (metered) => {
-    const call = { id: "call_topic", name: "recall", arguments: JSON.stringify({ topic: "t-ada-2100" }) };
-    const note = retryNote("en", { from: "answer", reason: "exclusive", detail: "Alone" });
-    const recalled = recallResult(c, "s-ada", "t-ada-2100", held);
-    const result = await metered({
-      step: "suspect.retry",
-      promptId: SUSPECT_PROMPT_ID,
-      attemptId: `${PREFIX}-${n}:retry-shape`,
-      cacheKey: `case:${c.id}`,
-      messages: [
-        ...suspectSystemMessages(c, "s-ada"),
-        { role: "user", content: "Where were you at 21:00?" },
-        { role: "assistant", content: "", toolCalls: [call] },
-        ...(where === "user-message"
-          ? [
-              { role: "tool" as const, toolCallId: call.id, content: recalled },
-              { role: "user" as const, content: note },
-            ]
-          : [{ role: "tool" as const, toolCallId: call.id, content: JSON.stringify({ ...(JSON.parse(recalled) as object), note }) }]),
-      ],
-      responseSchema: suspectAnswerSchema,
-      maxOutputTokens: ANSWER_OUTPUT_TOKENS,
-    });
-    if (!result.ok) {
-      const why = result.sent ? "failed:outcome-unknown" : `refused:${result.reason}`;
-      console.log(`  ${both(`PROBLEM: ${why}`, `问题：${why}`)}`);
-      return { stop: true };
-    }
-    const u = result.response.usage;
-    console.log(`  finish ${result.response.finishReason ?? "?"} | in ${u?.inputTokens} (cached ${u?.cachedTokens}) | out ${u?.outputTokens} (reasoning ${u?.reasoningTokens ?? "?"}) | ${usd(result.costNano)}`);
-    console.log(`  text: ${(result.response.text ?? "").replace(/\s+/g, " ").slice(0, 400)}`);
-    try {
-      const parsed = JSON.parse(result.response.text ?? "") as { assertions: string[]; line: string };
-      const accepted = c.assertions.filter((a) => a.id === "a-ada-foyer-2100");
-      console.log(`  claimed: ${parsed.assertions.join(", ") || "none"} | guard: ${JSON.stringify(guardLine(c, "s-ada", accepted, parsed.line, "en"))}`);
-    } catch {
-      console.log(`  ${both("the reply is not the JSON object asked for", "回复不是所要求的 JSON 对象")}`);
-    }
-    return { stop: !result.settled || result.breached };
+/** What each item of the trial sent, and what came of it. */
+const record: { id: string; requests: string[]; what: [en: string, zh: string]; result: [en: string, zh: string] }[] = [
+  {
+    id: `${PREFIX}-1`,
+    requests: ["answer"],
+    what: ["Ada, a topic picked from the menu, English. The answer followed a tool call whose id code made up", "艾达，从菜单选话题，英文。作答前的工具调用编号由代码生成"],
+    result: ["accepted by the API; the model's line passed the guard", "接口接受；模型的台词通过守卫"],
   },
-});
-
-const items: Item[] = [
-  turnItem(1, ["Ada, topic picked from the menu, English: the answer follows a tool call whose id code made up", "艾达，从菜单选话题，英文：作答前的工具调用编号由代码生成"], 2, {
-    suspect: "s-ada",
-    topic: "t-ada-2100",
-    question: "Where were you at 21:00?",
-  }),
-  turnItem(2, ["Ben, topic picked from the menu, Chinese", "欧本，从菜单选话题，中文"], 2, { suspect: "s-ben", topic: "t-ben-2100", question: "21:00 你在哪里？" }),
-  retryItem(3, "user-message", [
-    "Ada, the retry request as the loop first built it: a note from the game as a user message after the tool result",
-    "艾达，按循环最初的方式构造重试请求：工具结果之后附一条来自游戏的提示",
-  ]),
-  turnItem(4, ["Ada, a typed question that invites inventing a witness: the whole loop, the model chooses the topic", "艾达，一个诱导编造证人的自由提问：完整循环，由模型选话题"], 3, {
-    suspect: "s-ada",
-    question: "Did anyone see you in the foyer at 21:00?",
-  }),
-  // Added after the first run: item 3 was accepted by the API but its reply was not usable.
-  retryItem(5, "user-message", ["Ada, the same retry request once more: does the unusable reply repeat?", "艾达，同样的重试请求再发一次：不可用的回复会重现吗？"]),
-  retryItem(6, "tool-result", ["Ada, the retry note carried inside the tool result instead", "艾达，改为把重试提示放进工具结果里"]),
+  {
+    id: `${PREFIX}-2`,
+    requests: ["answer"],
+    what: ["Ben, a topic picked from the menu, Chinese", "欧本，从菜单选话题，中文"],
+    result: ["accepted; the model's line passed the guard", "接口接受；模型的台词通过守卫"],
+  },
+  {
+    id: `${PREFIX}-3`,
+    requests: ["retry-shape"],
+    what: ["Ada, a retry whose note was a user message after the tool result", "艾达，重试提示作为用户消息放在工具结果之后"],
+    result: ["accepted, but the reply was text repeated to the output limit, not the JSON object", "接口接受，但回复不是 JSON，而是同一句话重复到输出上限"],
+  },
+  {
+    id: `${PREFIX}-4`,
+    requests: ["recall", "answer"],
+    what: ["Ada, a typed question that invites inventing a witness: the whole loop", "艾达，一个诱导编造证人的自由提问：完整循环"],
+    result: ["the model chose the right topic, invented no witness, and its line passed the guard", "模型选对了话题，没有编造证人，台词通过守卫"],
+  },
+  {
+    id: `${PREFIX}-5`,
+    requests: ["retry-shape"],
+    what: ["Ada, the same retry request once more", "艾达，同样的重试请求再发一次"],
+    result: ["a usable reply that passed the guard, close to the output limit", "回复可用并通过守卫，接近输出上限"],
+  },
+  {
+    id: `${PREFIX}-6`,
+    requests: ["retry-shape"],
+    what: ["Ada, the retry note carried inside the tool result", "艾达，把重试提示放进工具结果里"],
+    result: ["a usable reply that passed the guard. The turn loop now builds its retry this way", "回复可用并通过守卫。问答循环现在这样构造重试"],
+  },
 ];
 
-/** The requests of this trial that have already left this machine, read from the trace of `envelope`. */
-function sentEarlier(envelope: string | undefined): { attemptId: string }[] {
-  const path = `traces/${envelope}.trace.jsonl`;
-  if (!envelope || !existsSync(path)) return [];
-  return readFileSync(path, "utf8")
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as { attemptId: string; outcome: string })
-    .filter((e) => e.attemptId.startsWith(`${PREFIX}-`) && ["settled", "settle-pending", "retained"].includes(e.outcome));
+say("This trial is closed. Nothing can be sent from this script.", "本试验已结束。此脚本不能发送任何内容。");
+say("Seven requests were sent in two runs: items 1 to 4, then items 5 and 6.", "共发出七次请求，分两次运行：先是第 1 到 4 项，然后是第 5、6 项。");
+for (const item of record) {
+  console.log(`\n${item.id}  ${item.requests.map((r) => `${item.id}:${r}`).join(", ")}`);
+  console.log(`  ${both(...item.what)}`);
+  console.log(`  ${both(...item.result)}`);
 }
 
-type Standing =
-  /** A request of this item already went out in an earlier run. It is not run again. */
-  | "done"
-  /** It will run: its worst case fits in what is left of the cap. */
-  | "run"
-  /** It will not run: its worst case does not fit. Items after it wait too, so the order is kept. */
-  | "over-cap";
-
-/**
- * What a run would do, given what earlier runs sent. Items run in order, and each one needs
- * its worst case to fit in what is left of the cap. `--plan` prints this and a run follows it,
- * so the plan and the run cannot disagree.
- */
-function schedule(earlier: { attemptId: string }[]): { item: Item; standing: Standing }[] {
-  let left = MAX_REQUESTS - earlier.length;
-  let blocked = false;
-  return items.map((item) => {
-    if (earlier.some((e) => e.attemptId.startsWith(`${item.id}:`))) return { item, standing: "done" as const };
-    if (blocked || item.most > left) {
-      blocked = true;
-      return { item, standing: "over-cap" as const };
-    }
-    left -= item.most;
-    return { item, standing: "run" as const };
-  });
-}
-
-const standingText: Record<Standing, [string, string]> = {
-  done: ["sent in an earlier run (not sent again)", "此前已发送（本次不重发）"],
-  run: ["would run", "将会执行"],
-  "over-cap": ["would NOT run: its worst case does not fit under the cap", "不会执行：最坏情况会超过上限"],
-};
-
-if (process.argv.includes("--plan")) {
-  const earlier = sentEarlier(process.env.SPEND_ENVELOPE?.trim());
-  const plan = schedule(earlier);
-  const toRun = plan.filter((p) => p.standing === "run");
-  say(
-    `Cap: ${MAX_REQUESTS} requests over all runs. Sent by earlier runs: ${earlier.length}. A run now would send at most ${toRun.reduce((sum, p) => sum + p.item.most, 0)}. Nothing is sent by --plan.`,
-    `上限：历次运行合计 ${MAX_REQUESTS} 次请求。此前已发送 ${earlier.length} 次。现在运行最多再发送 ${toRun.reduce((sum, p) => sum + p.item.most, 0)} 次。--plan 不会发送任何内容。`,
-  );
-  for (const { item, standing } of plan) console.log(`  ${item.id}  (max ${item.most})  ${both(...standingText[standing])}  |  ${both(...item.what)}`);
-  process.exit(0);
-}
-
-const runtime = await createRuntime(process.env);
-const before = await runtime.store.totals(runtime.config.envelope);
-if (!before.paidAllowed) {
-  say("Paid requests are not authorized on this envelope. Nothing was sent.", "该额度未授权付费请求。未发送任何内容。");
-  await runtime.close();
-  process.exit(1);
-}
-say(`Envelope "${runtime.config.envelope}": ${usd(before.committedNano)} committed before the run.`, `额度 "${runtime.config.envelope}"：运行前已占用 ${usd(before.committedNano)}。`);
-
-const earlier = sentEarlier(runtime.config.envelope);
-const plan = schedule(earlier);
-say(`${earlier.length} of at most ${MAX_REQUESTS} requests were sent by earlier runs.`, `此前的运行已发送 ${earlier.length} 次，上限 ${MAX_REQUESTS} 次。`);
-
-// A second count, independent of the schedule and of the spend guard: past the cap, a request is refused here.
-let passed = earlier.length;
-const capped: Metered = async (request) => {
-  if (passed >= MAX_REQUESTS) return { ok: false, attemptId: request.attemptId, sent: false, reason: "kill-switch" };
-  passed++;
-  return runtime.metered(request);
-};
-
-let stopped = false;
-for (const { item, standing } of plan) {
-  console.log(`\n${item.id}  ${both(...item.what)}`);
-  if (standing !== "run") {
-    const why: [string, string] = standing === "done" ? standingText.done : ["not run: its worst case does not fit under the cap", "未执行：最坏情况会超过上限"];
-    console.log(`  ${both(...why)}`);
-    continue;
-  }
-  if (stopped) {
-    console.log(`  ${both("not reached (the run stopped before it)", "未执行（运行已提前停止）")}`);
-    continue;
-  }
-  stopped = (await item.run(capped)).stop;
-}
-
-// What the trace recorded for this trial: one line per request. The trace holds no prompt or reply text.
-console.log();
-say("Requests, from the trace", "各次请求（取自记录文件）");
+// What the local trace holds for this trial. The trace has no prompt or reply text in it.
 interface TraceLine {
   attemptId: string;
   step: string;
@@ -233,27 +80,22 @@ interface TraceLine {
   outputTokens?: number;
   reasoningTokens?: number;
 }
-const tracePath = `traces/${runtime.config.envelope}.trace.jsonl`;
-const lines: TraceLine[] = existsSync(tracePath)
-  ? readFileSync(tracePath, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as TraceLine)
-      .filter((e) => e.attemptId.startsWith(`${PREFIX}-`))
-  : [];
-const pad = (value: number | undefined, width: number) => String(value ?? "-").padStart(width);
-for (const e of lines) {
-  console.log(`  ${e.attemptId.padEnd(22)} ${e.step.padEnd(15)} ${e.outcome.padEnd(26)} in ${pad(e.inputTokens, 5)} cached ${pad(e.cachedTokens, 5)} out ${pad(e.outputTokens, 4)} reasoning ${pad(e.reasoningTokens, 4)}  ${usd(e.costNano)}`);
+const envelope = process.env.SPEND_ENVELOPE?.trim();
+const tracePath = `traces/${envelope}.trace.jsonl`;
+console.log();
+if (!envelope || !existsSync(tracePath)) {
+  say("No local trace was found, so there are no token counts to show here.", "没有找到本地记录文件，因此这里没有 token 数可显示。");
+} else {
+  say("Requests of this trial in the local trace", "本地记录文件中属于本试验的请求");
+  const lines = readFileSync(tracePath, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as TraceLine)
+    .filter((e) => e.attemptId.startsWith(`${PREFIX}-`));
+  const pad = (value: number | undefined, width: number) => String(value ?? "-").padStart(width);
+  for (const e of lines) {
+    console.log(`  ${e.attemptId.padEnd(22)} ${e.step.padEnd(15)} ${e.outcome.padEnd(16)} in ${pad(e.inputTokens, 5)} cached ${pad(e.cachedTokens, 5)} out ${pad(e.outputTokens, 4)} reasoning ${pad(e.reasoningTokens, 4)}  ${usd(e.costNano)}`);
+  }
+  const priced = lines.reduce((sum, e) => sum + e.costNano, 0);
+  say(`${lines.length} line(s), ${usd(priced)} priced. The trace is a local convenience; the spend store is the record that counts.`, `共 ${lines.length} 行，计费 ${usd(priced)}。记录文件只是本地的方便之物，算数的是额度存储里的记录。`);
 }
-const sent = lines.filter((e) => e.outcome === "settled" || e.outcome === "settle-pending" || e.outcome === "retained");
-const priced = sent.reduce((sum, e) => sum + e.costNano, 0);
-say(`${sent.length} request(s) left this machine across all runs of this trial, ${usd(priced)} priced.`, `本试验历次运行共有 ${sent.length} 次请求发出，计费 ${usd(priced)}。`);
-
-const after = await runtime.store.totals(runtime.config.envelope);
-say(
-  `Envelope now: settled ${usd(after.settledNano)}, kept for unknown outcomes ${usd(after.retainedNano)}, committed ${usd(after.committedNano)}.${after.suspended ? ` SUSPENDED: ${after.suspended}` : ""}`,
-  `额度现状：已结算 ${usd(after.settledNano)}，结果不明而保留 ${usd(after.retainedNano)}，已占用 ${usd(after.committedNano)}。${after.suspended ? "额度已停用。" : ""}`,
-);
-if (stopped) say("STOPPED EARLY: see the problem above.", "提前停止：见上方的问题。");
-await runtime.close();
-process.exit(stopped ? 1 : 0);
