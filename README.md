@@ -69,9 +69,9 @@ The guard works on words, so it cannot judge meaning: a line could still bend a 
 
 A player names a suspect and cites evidence from the notebook. Code judges the cited evidence with the same rules the solver used to accept the case: it must prove opportunity, means and a motive for the accused, and rule out everyone else. Any set of held evidence that does so is accepted. What a suspect said proves nothing. The right name without the proof is reported as "right but unproven", with what is missing. The hidden truth is given out only after the accusation.
 
-A session costs at most `sessionCap` actions. Hearing a topic again or looking at a record again is free and sends nothing to the model: the saved result is returned.
+A session costs at most `sessionCap` actions. Hearing a topic again, asking a suspect the very same question again while it has the same topics open, or looking at a record again is free and sends nothing to the model: the saved result is returned. A question in other words is a new question. A topic heard in one language and asked for in the other is shown as code words it, since the model's own line exists in one language only.
 
-玩家点名一名嫌疑人，并从笔记本里引用证据。代码用求解器接受案件时的同一套规则来判定：引用的证据必须证明被指认者有机会、有手段、有动机，并排除其他所有人。任何满足这些条件的证据组合都被接受；嫌疑人说的话不能证明任何事。只说对名字而没有证明，会判为"说对了但未证明"，并指出缺什么。真相只在指认之后公开。重听一个话题或再看一份记录不耗行动，也不会再调用模型。
+玩家点名一名嫌疑人，并从笔记本里引用证据。代码用求解器接受案件时的同一套规则来判定：引用的证据必须证明被指认者有机会、有手段、有动机，并排除其他所有人。任何满足这些条件的证据组合都被接受；嫌疑人说的话不能证明任何事。只说对名字而没有证明，会判为"说对了但未证明"，并指出缺什么。真相只在指认之后公开。重听一个话题、在话题没变的情况下向同一人问一模一样的问题、或再看一份记录，都不耗行动，也不会再调用模型；换一种说法就算新问题。用一种语言听过的话题换另一种语言重听时，显示的是代码生成的句子，因为模型的台词只有一种语言。
 
 ## Run it · 运行
 
