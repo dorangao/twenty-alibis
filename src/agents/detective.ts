@@ -1,5 +1,5 @@
 import type { Case } from "../case/schema";
-import { PROOF_RULES } from "../game/rules";
+import { NOTE_MARK, PROOF_RULES } from "../game/rules";
 import { accuse, actionsLeft, ask, inspect, inspectionMenu, notebook, SessionError, startSession, topicMenu, type Session, type Verdict } from "../game/session";
 import { noModel } from "../game/terminal";
 import type { Metered } from "../metered";
@@ -112,9 +112,9 @@ export function detectiveBriefing(c: Case): string {
     "RULES",
     // The rules of proof, word for word as a person at the terminal is told them.
     ...PROOF_RULES.map((rule, i) => `${i + 1}. ${rule.en}`),
-    `${n + 1}. A person no record rules out is still open, even when nothing points at them. So before you accuse, check every other person against your records, and keep inspecting while anyone is still open.`,
-    `${n + 2}. You have a limited number of actions. Asking a topic or inspecting a record costs one. Accusing ends the game.`,
-    `${n + 3}. Do not accuse until your records do all of rules 2 to ${n + 1}. If you are out of actions, accuse with what you have. When you accuse, cite every record you hold.`,
+    `${n + 1}. A person no evidence rules out is still open, even when nothing points at them. So before you accuse, check every other person against your evidence, and keep inspecting while anyone is still open.`,
+    `${n + 2}. You have a limited number of actions. Asking a topic or inspecting costs one. Accusing ends the game.`,
+    `${n + 3}. Do not accuse until your evidence does all of rules 2 to ${n + 1}. If you are out of actions, accuse with what you have. When you accuse, cite everything in your notebook.`,
     `${n + 4}. Decide and answer. You do not need to explain your choice.`,
     "",
     "THE CASE",
@@ -161,8 +161,8 @@ function view(c: Case, s: Session, handles: Handles) {
     `Actions left: ${left}.`,
     "",
     "YOUR NOTEBOOK",
-    "Records:",
-    ...records.map((r) => `- ${r.handle}: ${r.text}${r.authoritative ? "" : " (a note, not proof)"}`),
+    "Evidence:",
+    ...records.map((r) => `- ${r.handle}: ${r.text}${r.authoritative ? "" : ` ${NOTE_MARK.en}`}`),
     "Statements heard:",
     ...(book.statements.length > 0 ? book.statements.map((st) => `- ${name(st.suspect)}: "${st.en}"`) : ["- none yet"]),
     ...(book.contradictions.length > 0
@@ -172,7 +172,7 @@ function view(c: Case, s: Session, handles: Handles) {
     "WHAT YOU CAN DO",
     ...(left > 0 && topics.length > 0 ? ["Ask a topic:", ...topics.map((t) => `- ${t.handle}: ask ${name(t.suspect)}: "${t.label}"`)] : []),
     ...(left > 0 && inspections.length > 0 ? ["Inspect:", ...inspections.map((x) => `- ${x.handle}: ${x.label}`)] : []),
-    `Accuse: name a person (P1 to P${c.suspects.length}) and list the records you cite.`,
+    `Accuse: name a person (P1 to P${c.suspects.length}) and list the evidence you cite, by its R number.`,
     "",
     `Answer with one action. Use "${NONE}" for the fields your action does not need, and an empty list for "cite" unless you accuse.`,
   ].join("\n");

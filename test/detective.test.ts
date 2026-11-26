@@ -7,7 +7,8 @@ import { FakeProvider } from "../src/provider/fake";
 import type { ProviderRequest, ProviderResponse } from "../src/provider/types";
 import { usdToNano } from "../src/spend/pricing";
 import { MemorySpendStore } from "../src/spend/store";
-import { PROOF_RULES } from "../src/game/rules";
+import { proofRules } from "../src/case/proof";
+import { NOTE_MARK, PROOF_RULES } from "../src/game/rules";
 import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
 
@@ -219,7 +220,7 @@ describe("a detective that does not make progress is stopped", () => {
     expect(lines[start + 3]).toContain("It does not show that nobody else was");
     // Then the detective's own: numbered on from there, and pointing back at the right rules.
     expect(lines.slice(start + 4, start + 8).map((l) => l.slice(0, 2))).toEqual(["5.", "6.", "7.", "8."]);
-    expect(lines[start + 6]).toContain("Do not accuse until your records do all of rules 2 to 5.");
+    expect(lines[start + 6]).toContain("Do not accuse until your evidence does all of rules 2 to 5.");
     expect(lines[start + 8]).toBe("");
     // The rules are the same for every case.
     expect(detectiveBriefing(archivePass).split("THE CASE")[0]).toBe(detectiveBriefing(lighthouse).split("THE CASE")[0]);
@@ -236,9 +237,27 @@ describe("a detective that does not make progress is stopped", () => {
     expect(report.steps.at(-1)!.did).toBe("accused P3 (s-03) citing 7 record(s)");
   });
 
-  it("is told that a person no record rules out is still open", () => {
+  it("what proves is evidence that is authoritative, whatever its kind, and the notebook marks the rest", async () => {
+    // The register proves who held what was needed. As an object it proves the same; marked as a note it proves nothing.
+    const culprit = lighthouse.culprit.suspect;
+    const change = (patch: object): Case => ({ ...lighthouse, evidence: lighthouse.evidence.map((e) => (e.id === "e-register" ? { ...e, ...patch } : e)) });
+    const meansGoal = (c: Case) => proofRules(c).suspectGoals.get(culprit)!.positive[1];
+    expect(meansGoal(lighthouse)).toEqual([[["e-register"]]]);
+    expect(meansGoal(change({ kind: "object" }))).toEqual([[["e-register"]]]);
+    expect(meansGoal(change({ authoritative: false }))).toEqual([]);
+
+    // The detective's notebook marks the one item that is not authoritative, with the rules' own word.
+    const { provider, metered } = setup(SOLVE);
+    await playDetective({ metered, c: lighthouse, gameId: "g1" });
+    const shown = provider.requests[0]!.messages[1]!.content.split("\n");
+    expect(shown).toContain("Evidence:");
+    expect(shown.filter((l) => l.endsWith(` ${NOTE_MARK.en}`))).toHaveLength(1);
+    expect(detectiveBriefing(lighthouse)).toContain("An item marked as a note is not evidence and proves nothing.");
+  });
+
+  it("is told that a person no evidence rules out is still open", () => {
     const rules = detectiveBriefing(lighthouse);
-    expect(rules).toContain("A person no record rules out is still open");
+    expect(rules).toContain("A person no evidence rules out is still open");
     expect(rules).toContain("keep inspecting while anyone is still open");
     // The rules say how the game is scored. They name nobody and nothing from this case's answer.
     const culprit = lighthouse.suspects.find((s) => s.id === lighthouse.culprit.suspect)!;

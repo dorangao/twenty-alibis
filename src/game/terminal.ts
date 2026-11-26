@@ -1,7 +1,7 @@
 import type { Lang } from "../agents/render";
 import type { Case, Text } from "../case/schema";
 import type { Metered } from "../metered";
-import { PROOF_RULES } from "./rules";
+import { NOTE_MARK, PROOF_RULES } from "./rules";
 import { accuse, actionsLeft, ask, inspect, inspectionMenu, notebook, reveal, SessionError, startSession, topicMenu, type Session, type Verdict } from "./session";
 
 /**
@@ -35,9 +35,9 @@ const HELP: Record<Lang, string[]> = {
     "  say <person> <words>   ask in your own words (needs the model)",
     "  records                what you can inspect",
     "  inspect <n>            inspect record number n",
-    "  notebook               what you hold: records, statements, contradictions",
-    "  accuse <person> <n…>   name the culprit and cite the records that prove it, by number",
-    "  accuse <person> all    the same, citing every record you hold",
+    "  notebook               what you hold: evidence, statements, contradictions",
+    "  accuse <person> <n…>   name the culprit and cite the evidence that proves it, by number",
+    "  accuse <person> all    the same, citing everything in your notebook",
     "  reveal                 the truth, after you have accused",
     "  lang en|zh             change language",
     "  quit",
@@ -51,9 +51,9 @@ const HELP: Record<Lang, string[]> = {
     "  say <人> <话>          用自己的话提问（需要模型）",
     "  records                可以查看的记录",
     "  inspect <n>            查看第 n 项",
-    "  notebook               笔记本：记录、陈述、矛盾",
-    "  accuse <人> <n…>       指认凶手，并按编号引用能证明的记录",
-    "  accuse <人> all        同上，引用手里的全部记录",
+    "  notebook               笔记本：证据、陈述、矛盾",
+    "  accuse <人> <n…>       指认凶手，并按编号引用能证明的证据",
+    "  accuse <人> all        同上，引用笔记本里的全部条目",
     "  reveal                 指认之后公开真相",
     "  lang en|zh             切换语言",
     "  quit",
@@ -79,7 +79,7 @@ const ERRORS: Record<string, Text> = {
   cap: { en: "You have no actions left. You can still look at your notebook and accuse.", zh: "行动次数已用完。仍可查看笔记本和指认。" },
   "not-available": { en: "There is nothing by that name open to you.", zh: "没有这一项，或者它还没有对你开放。" },
   "bad-question": { en: "A question needs some words, and at most 300 characters.", zh: "提问不能为空，且不超过 300 个字符。" },
-  "not-held": { en: "You can only cite records that are in your notebook.", zh: "只能引用笔记本里已有的记录。" },
+  "not-held": { en: "You can only cite evidence that is in your notebook.", zh: "只能引用笔记本里已有的证据。" },
 };
 
 /** The model switched off: every request is refused before anything is built or sent. */
@@ -157,7 +157,7 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
   };
   const book = () => {
     const b = notebook(c, s);
-    const lines = [say("Records:", "记录："), ...b.evidence.map((e, i) => `  ${i + 1}. ${t(e.text)}${e.authoritative ? "" : say("  (not authoritative)", "（非权威）")}`)];
+    const lines = [say("Evidence:", "证据："), ...b.evidence.map((e, i) => `  ${i + 1}. ${t(e.text)}${e.authoritative ? "" : `  ${t(NOTE_MARK)}`}`)];
     lines.push(say("Statements:", "陈述："));
     if (b.statements.length === 0) lines.push(say("  none yet", "  暂无"));
     for (const st of b.statements) lines.push(`  ${nameOf(st.suspect)}: “${st[lang]}”`);
@@ -250,7 +250,7 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
         // An accusation ends the game, and the evidence is the player's to choose. With none
         // named, nothing happens yet: the player is asked to cite.
         if (numbers.length === 0) {
-          return [say("Cite the records that prove it, by number (see `notebook`), or `all`. For example: accuse ada 1 2 4", "请按编号引用能证明的记录（见 notebook），或写 all。例如：accuse 艾达 1 2 4")];
+          return [say("Cite the evidence that proves it, by number (see `notebook`), or `all`. For example: accuse ada 1 2 4", "请按编号引用能证明的证据（见 notebook），或写 all。例如：accuse 艾达 1 2 4")];
         }
         const all = numbers.length === 1 && ["all", "全部"].includes(numbers[0]!.toLowerCase());
         const cited = all ? held.map((e) => e.id) : numbers.map((n) => held[Number(n) - 1]?.id);

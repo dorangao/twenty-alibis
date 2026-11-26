@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { archivePass } from "../src/case/fixtures/archive";
 import { solve } from "../src/case/solver";
-import { PROOF_RULES } from "../src/game/rules";
+import { NOTE_MARK, PROOF_RULES } from "../src/game/rules";
+import { compilePlot } from "../src/writer/compile";
+import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
 import { createGame, noModel, pinAtLaunch, type GameOptions } from "../src/game/terminal";
 import { createMetered, type Metered } from "../src/metered";
 import { FakeProvider } from "../src/provider/fake";
@@ -69,6 +71,23 @@ describe("the game in a terminal, with the model off", () => {
     expect(zh.join("\n")).toContain("房间记录只列出在那里被看到的人，并不表示当时没有别人。");
   });
 
+  it("marks an item that proves nothing the way the rules name it, in the language of the game", async () => {
+    const built = compilePlot("lighthouse", lighthouseSkeleton, lighthousePeople);
+    if (!built.ok) throw new Error("expected a case");
+    const note = built.case.evidence.find((e) => !e.authoritative)!;
+    for (const language of ["en", "zh"] as const) {
+      const game = createGame(built.case, off, "t1", { language, modelOff: true });
+      const lines = await game.handle("notebook");
+      expect(lines[0]).toBe(language === "en" ? "Evidence:" : "证据：");
+      const marked = lines.filter((l) => l.includes(NOTE_MARK[language]));
+      expect(marked).toHaveLength(1);
+      expect(marked[0]).toContain(note.text[language]);
+      // Rule 1 names the mark by the word the notebook uses.
+      expect(game.opening().join("\n")).toContain(language === "en" ? "marked as a note" : "标为“备注”");
+    }
+    expect(NOTE_MARK).toEqual({ en: "(a note, not evidence)", zh: "（备注，不算证据）" });
+  });
+
   it("can be played from the briefing to a proven accusation and the reveal", async () => {
     const { game, text } = await play(["people", "topics ada", "ask ada 1", "records", "inspect 1", "notebook", "accuse ada all", "reveal"]);
     expect(text).toContain("1. Ada Marlow — Archivist's assistant");
@@ -129,7 +148,7 @@ describe("the game in a terminal, with the model off", () => {
 
   it("asks the player to cite evidence: an accusation with none named does nothing yet", async () => {
     const { game, out } = await play(["inspect 1", "accuse ada"]);
-    expect(out.at(-1)).toBe("Cite the records that prove it, by number (see `notebook`), or `all`. For example: accuse ada 1 2 4");
+    expect(out.at(-1)).toBe("Cite the evidence that proves it, by number (see `notebook`), or `all`. For example: accuse ada 1 2 4");
     expect(game.session().verdict).toBeUndefined();
     // Holding the proof is not citing it: the same notebook, cited in full, solves the case.
     expect((await game.handle("accuse ada 1 2 3 4")).join("\n")).toContain("SOLVED");
@@ -149,7 +168,7 @@ describe("the game in a terminal, with the model off", () => {
       "Which person? Type `people` for the list.",
       "Which topic? Type `topics <person>` for the list.",
       "Which record? Type `records` for the list.",
-      "You can only cite records that are in your notebook.",
+      "You can only cite evidence that is in your notebook.",
       "Clara Voss has no topic to offer right now.",
       "Use `lang en` or `lang zh`.",
     ]);
