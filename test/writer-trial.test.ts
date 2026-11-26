@@ -164,6 +164,8 @@ describe("a writer trial: picking an attempt up from its saved skeleton", () => 
     expect(why(JSON.stringify({ ...record, breached: true }))).toBe("the saved skeleton's cost was not confirmed");
     expect(why(JSON.stringify({ ...record, finishReason: "length" }))).toBe("the saved skeleton was cut off");
     expect(why(JSON.stringify({ ...record, text: null }))).toBe("the saved skeleton was cut off");
+    expect(why(JSON.stringify({ ...record, finishReason: "content_filter" }))).toBe("the saved skeleton did not end normally");
+    expect(why(JSON.stringify({ ...record, finishReason: undefined }))).toBe("the saved skeleton did not end normally");
     expect(why(JSON.stringify({ ...record, text: "not json" }))).toBe("the saved skeleton is not JSON");
     const fewer = JSON.stringify({ ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.slice(0, 19) });
     expect(why(JSON.stringify({ ...record, text: fewer }))).toBe("the saved skeleton is refused by the skeleton check: the skeleton has 19 suspects; 20 were asked for");

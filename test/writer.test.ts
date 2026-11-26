@@ -639,6 +639,25 @@ describe("the writer: two requests, then code", () => {
     }
   });
 
+  it("reads only a reply that ended normally, at either stage, however complete its text looks", async () => {
+    for (const finishReason of ["content_filter", "tool_calls", undefined] as const) {
+      const odd = (value: unknown): ProviderResponse => ({ text: JSON.stringify(value), toolCalls: [], usage, ...(finishReason ? { finishReason } : {}) });
+      const said = finishReason ?? "not given";
+      // A valid skeleton on an odd finish: kept, not used, and the people request is not sent.
+      const seen: ReplyRecord[] = [];
+      const first = setup([odd(lighthouseSkeleton), json(lighthousePeople)]);
+      const a = await writeCase({ metered: first.metered, attemptId: "w-1", brief, onReply: (r) => seen.push(r) });
+      expect(a, said).toMatchObject({ accepted: false, failedAt: "skeleton", reasons: [`the skeleton reply did not end normally (finish: ${said})`], requests: 1 });
+      expect(seen.map((r) => r.finishReason), said).toEqual([finishReason]);
+      expect(first.provider.dispatched, said).toBe(1);
+      // A valid plot on an odd finish: no case.
+      const second = setup([json(lighthouseSkeleton), odd(lighthousePeople)]);
+      const b = await writeCase({ metered: second.metered, attemptId: "w-1", brief });
+      expect(b, said).toMatchObject({ accepted: false, failedAt: "people", reasons: [`the people reply did not end normally (finish: ${said})`], requests: 2 });
+      expect(b.case, said).toBeUndefined();
+    }
+  });
+
   it("hands over a reply whose cost was not confirmed, marked as such", async () => {
     const seen: ReplyRecord[] = [];
     const unsettled: Metered = async (request) => ({ ok: true, attemptId: request.attemptId, response: json(lighthouseSkeleton), costNano: 12, settled: false, breached: false });

@@ -17,7 +17,7 @@ import { checkSkeleton, writeCase, type ReplyRecord, type WriteReport } from "./
  *    JSON or not, with how it ended, what it used and whether its cost was confirmed. The
  *    file is written whole or not at all.
  *  - An attempt whose skeleton went out but whose people request did not may be resumed, and
- *    only from a saved skeleton that is intact, is this attempt's, was complete, had its cost
+ *    only from a saved skeleton that is intact, is this attempt's, ended normally, had its cost
  *    confirmed, and passes today's skeleton check. The plan and the run decide this with the
  *    same function, so the plan cannot promise a request the run will not send.
  */
@@ -94,6 +94,7 @@ export function savedSkeleton(text: string | null, attemptId: string, brief: Ske
   if (saved.attemptId !== `${attemptId}:skeleton` || saved.stage !== "skeleton" || !sameBrief) return no("the saved skeleton belongs to another attempt", "保存的骨架属于另一次尝试");
   if (saved.settled !== true || saved.breached !== false) return no("the saved skeleton's cost was not confirmed", "保存的骨架费用未确认");
   if (saved.finishReason === "length" || typeof saved.text !== "string") return no("the saved skeleton was cut off", "保存的骨架被截断");
+  if (saved.finishReason !== "stop") return no("the saved skeleton did not end normally", "保存的骨架不是正常结束的");
   let skeleton: unknown;
   try {
     skeleton = JSON.parse(saved.text) as unknown;

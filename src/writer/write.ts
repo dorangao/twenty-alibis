@@ -142,6 +142,12 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
       report.reasons = [`the ${stage} reply was cut off at the output limit`];
       return null;
     }
+    // Only a reply the model says it finished is read. Anything else (a filter, a tool call,
+    // no reason given) is kept by the caller and not used, however complete its text looks.
+    if (result.response.finishReason !== "stop") {
+      report.reasons = [`the ${stage} reply did not end normally (finish: ${result.response.finishReason ?? "not given"})`];
+      return null;
+    }
     try {
       return { value: JSON.parse(result.response.text ?? "") as unknown };
     } catch {
