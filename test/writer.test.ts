@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { guardLine } from "../src/agents/line-guard";
+import { guardLine, nameForms } from "../src/agents/line-guard";
 import { renderAssertion } from "../src/agents/render";
 import { recallResult, recallTool, suspectSystemMessages } from "../src/agents/suspect-prompt";
 import { startingHeld } from "../src/case/access";
@@ -15,10 +15,10 @@ import { MemorySpendStore } from "../src/spend/store";
 import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
 import { NO_MOTIVE, peopleRequestSchema, plotIds, skeletonMessages, SkeletonSchema, type People, type Skeleton } from "../src/writer/plot";
-import { nameProblems } from "../src/writer/names";
+import { nameProblems, roleNotes } from "../src/writer/names";
 import { assessQuality, MIN_SHORTLIST } from "../src/writer/quality";
 import { skeletonProblems } from "../src/writer/skeleton";
-import { writeCase } from "../src/writer/write";
+import { writeCase, type ReplyRecord } from "../src/writer/write";
 
 const compiled = (skeleton: Skeleton = lighthouseSkeleton, people: People = lighthousePeople): Case => {
   const result = compilePlot("lighthouse", skeleton, people);
@@ -413,14 +413,69 @@ describe("what is wrong with a skeleton is known before the second request", () 
     expect(issues({ means: { en: "A key to the lamp room 钥匙", zh: "灯室钥匙" } })).toEqual(["means.en: the English text must be in English"]);
   });
 
-  it("refuses a role or a manner that names someone or somewhere from the case", () => {
+  it("refuses a role or a manner that names a person", () => {
     const role = (en: string, zh: string): Skeleton => ({ ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 0 ? { ...s, role: { en, zh } } : s)) });
-    expect(skeletonProblems(role("Assistant to Cormac", "柏康默的助手"), brief)).toEqual([
-      'the role of "Aldric Varga" names something from the case (cormac, 柏康, 康默, 柏康默): "Assistant to Cormac" / “柏康默的助手”',
-    ]);
-    expect(skeletonProblems(role("Keeper of the lamp room", "灯室看守"), brief)[0]).toContain("names something from the case (lamp, room, 灯室)");
+    expect(skeletonProblems(role("Assistant to Cormac", "柏康默的助手"), brief)).toEqual(['the role of "Aldric Varga" names a person (cormac, 柏康, 康默, 柏康默): "Assistant to Cormac" / “柏康默的助手”']);
     const persona: Skeleton = { ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 0 ? { ...s, persona: { en: "Speaks warmly of Helena.", zh: "说起林海伦总是很亲切。" } } : s)) };
-    expect(skeletonProblems(persona, brief)[0]).toContain('the persona of "Aldric Varga" names something from the case');
+    expect(skeletonProblems(persona, brief)[0]).toContain('the persona of "Aldric Varga" names a person (helena');
+  });
+
+  it("allows a role that names a room or the means, and notes it", () => {
+    // What the model really wrote for a boat with a deck: "Deck Officer". Here: the keeper of the lamp room.
+    const skeleton: Skeleton = { ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 0 ? { ...s, role: { en: "Keeper of the lamp room", zh: "灯室看守" } } : s)) };
+    expect(skeletonProblems(skeleton, brief)).toEqual([]);
+    const c = compiled(skeleton);
+    expect(roleNotes(c)).toEqual(['the role of "Aldric Varga" names a place or the means (lamp, room, 灯室): a line that repeats it will be replaced by code\'s sentence']);
+    expect(assessQuality(c).notes).toEqual(roleNotes(c));
+    expect(assessQuality(c).problems).toEqual([]);
+    // The role still buys the speaker nothing: he was in the gallery, and may not add the lamp room.
+    const said = c.assertions.filter((x) => x.id === "a-01-says");
+    expect(guardLine(c, "s-01", said, "I keep the lamp room. I was in the gallery at 22:20.", "en")).toMatchObject({ ok: false, reason: "uncovered" });
+  });
+
+  it("hears a Chinese name written in parts by each whole part, and does not count the space", () => {
+    // Names as the model really wrote them in the first paid trial: transliterations with a space.
+    const trial: [string, string][] = [
+      ["Aldric Varga", "艾德里克 塔莫林"],
+      ["Beatrix Okonkwo", "乌尔夫里克 彭达尔"],
+      ["Cormac Brandt", "米雷尔 科桑"],
+      ["Delphine Marchetti", "索雷尔 哈维克"],
+      ["Edmund Soler", "托文 阿达尔"],
+      ["Fenella Nakamura", "伊奥兰特 德雷扎尔"],
+      ["Gideon Petrov", "赞特 拉维尔"],
+    ];
+    const skeleton: Skeleton = { ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (trial[i] ? { ...s, name: { en: trial[i]![0], zh: trial[i]![1] } } : s)) };
+    // They share syllables (里克, 雷尔, 达尔, 尔) and a space, and that is no longer a collision.
+    expect(skeletonProblems(skeleton, brief)).toEqual([]);
+    const c = compiled(skeleton);
+    expect(checkCase(c).accepted).toBe(true);
+    // What must be his alone is each whole part. What the guard hears is any two characters in a row of a part.
+    const forms = nameForms(c).find((f) => f.id === "s-01")!;
+    expect(forms.zhOwn).toEqual(["艾德里克", "塔莫林"]);
+    expect(forms.zh).toContain("莫林");
+    expect(forms.zh).toContain("里克");
+    expect(forms.zh).not.toContain("克 ");
+    expect(forms.zh).not.toContain("克塔");
+    // The guard hears a part, or a piece of one.
+    const said = c.assertions.filter((x) => x.id === "a-02-says");
+    expect(guardLine(c, "s-02", said, "22:20 我在厨房，和塔莫林在一起。", "zh")).toMatchObject({ ok: false, reason: "uncovered", detail: "塔莫, 莫林, 塔莫林" });
+    const given = guardLine(c, "s-02", said, "22:20 我在厨房，和艾德里克在一起。", "zh");
+    expect(given).toMatchObject({ ok: false, reason: "uncovered" });
+    expect(given.ok ? "" : given.detail).toContain("艾德里克");
+    expect(guardLine(c, "s-02", said, "22:20 我在厨房，莫林也在。", "zh")).toMatchObject({ ok: false, reason: "uncovered", detail: "莫林" });
+    expect(guardLine(c, "s-02", said, "22:20 我在厨房。", "zh")).toEqual({ ok: true });
+    // A role that uses a piece of someone's name names that person.
+    const helper: Skeleton = { ...skeleton, suspects: skeleton.suspects.map((s, i) => (i === 10 ? { ...s, role: { en: s.role.en, zh: "莫林的助手" } } : s)) };
+    expect(skeletonProblems(helper, brief)).toEqual([`the role of "${skeleton.suspects[10]!.name.en}" names a person (莫林): "${skeleton.suspects[10]!.role.en}" / “莫林的助手”`]);
+    // The rendered sentence, which carries the whole name, still passes.
+    expect(guardLine(c, "s-02", said, renderAssertion(c, "s-02", said[0]!, "zh"), "zh")).toEqual({ ok: true });
+
+    // Two people with the same part are still refused.
+    const clash: Skeleton = { ...skeleton, suspects: skeleton.suspects.map((s, i) => (i === 1 ? { ...s, name: { en: s.name.en, zh: "乌尔夫 塔莫林" } } : s)) };
+    expect(skeletonProblems(clash, brief)).toEqual(["“艾德里克 塔莫林”和“乌尔夫 塔莫林”都含有“塔莫林”，说到一个就会被当成也说了另一个"]);
+    // A middle dot separates parts too.
+    const dotted: Skeleton = { ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 0 ? { ...s, name: { en: s.name.en, zh: "艾德里克·塔莫林" } } : s)) };
+    expect(nameForms(compiled(dotted)).find((f) => f.id === "s-01")!.zhOwn).toEqual(["艾德里克", "塔莫林"]);
   });
 
   it("and even if such a role slipped through, the guard would not let it cover a name", () => {
@@ -538,6 +593,98 @@ describe("the writer: two requests, then code", () => {
       expect(report.case, problem).toBeUndefined();
       expect(sent).toBe(2);
     }
+  });
+
+  it("drops surplus suspects at the skeleton stage, and refuses too few", async () => {
+    // What the model really did in the first paid trial: 21 people for 20.
+    const extra = { name: { en: "Ursula Whitlock", zh: "韦乌苏" }, role: { en: "Visitor", zh: "访客" }, persona: { en: "Brisk.", zh: "干脆利落。" } };
+    const { provider, metered } = setup([json({ ...lighthouseSkeleton, suspects: [...lighthouseSkeleton.suspects, extra] }), json(lighthousePeople)]);
+    const report = await writeCase({ metered, attemptId: "w-1", brief });
+    expect(report).toMatchObject({ accepted: true, requests: 2 });
+    expect(report.notes).toEqual(["the skeleton had 21 suspects; the last 1 were dropped"]);
+    expect(report.case!.suspects).toHaveLength(20);
+    // The second request was offered twenty people, not twenty-one.
+    const schema = provider.requests[1]!.responseSchema!.schema as { properties: { culprit: { enum: string[] } } };
+    expect(schema.properties.culprit.enum).toHaveLength(20);
+    expect(provider.requests[1]!.messages.at(-1)!.content).not.toContain("Ursula Whitlock");
+
+    const few = setup([json({ ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.slice(0, 19) }), json(lighthousePeople)]);
+    expect(await writeCase({ metered: few.metered, attemptId: "w-1", brief })).toMatchObject({ accepted: false, failedAt: "skeleton", reasons: ["the skeleton has 19 suspects; 20 were asked for"], requests: 1 });
+  });
+
+  it("hands every reply to the caller as it arrived, before anything parses or judges it", async () => {
+    const seen: ReplyRecord[] = [];
+    const good = setup([json(lighthouseSkeleton), json(lighthousePeople)]);
+    await writeCase({ metered: good.metered, attemptId: "w-1", brief, onReply: (reply) => seen.push(reply) });
+    expect(seen).toEqual([
+      { attemptId: "w-1:skeleton", stage: "skeleton", text: JSON.stringify(lighthouseSkeleton), finishReason: "stop", usage, settled: true, breached: false },
+      { attemptId: "w-1:people", stage: "people", text: JSON.stringify(lighthousePeople), finishReason: "stop", usage, settled: true, breached: false },
+    ]);
+  });
+
+  it("hands over a reply that is cut off, is not JSON, is JSON null, or is later refused", async () => {
+    const named = { ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 3 ? { ...s, name: { en: "May Linden", zh: "林梅" } } : s)) };
+    for (const [reply, finishReason, reason] of [
+      ['{"suspects":', "length", "the skeleton reply was cut off at the output limit"],
+      ["not json", "stop", "the skeleton reply is not JSON"],
+      ["null", "stop", "skeleton: (the whole reply): Invalid input: expected object, received null"],
+      [JSON.stringify(named), "stop", '"may" in the name "May Linden" is an everyday word, so ordinary lines would be refused'],
+    ] as const) {
+      const seen: ReplyRecord[] = [];
+      const { provider, metered } = setup([{ text: reply, toolCalls: [], usage, finishReason }, json(lighthousePeople)]);
+      const report = await writeCase({ metered, attemptId: "w-1", brief, onReply: (r) => seen.push(r) });
+      expect(report, reason).toMatchObject({ accepted: false, failedAt: "skeleton", reasons: [reason], requests: 1 });
+      expect(seen, reason).toEqual([{ attemptId: "w-1:skeleton", stage: "skeleton", text: reply, finishReason, usage, settled: true, breached: false }]);
+      expect(provider.dispatched, reason).toBe(1);
+    }
+  });
+
+  it("reads only a reply that ended normally, at either stage, however complete its text looks", async () => {
+    for (const finishReason of ["content_filter", "tool_calls", undefined] as const) {
+      const odd = (value: unknown): ProviderResponse => ({ text: JSON.stringify(value), toolCalls: [], usage, ...(finishReason ? { finishReason } : {}) });
+      const said = finishReason ?? "not given";
+      // A valid skeleton on an odd finish: kept, not used, and the people request is not sent.
+      const seen: ReplyRecord[] = [];
+      const first = setup([odd(lighthouseSkeleton), json(lighthousePeople)]);
+      const a = await writeCase({ metered: first.metered, attemptId: "w-1", brief, onReply: (r) => seen.push(r) });
+      expect(a, said).toMatchObject({ accepted: false, failedAt: "skeleton", reasons: [`the skeleton reply did not end normally (finish: ${said})`], requests: 1 });
+      expect(seen.map((r) => r.finishReason), said).toEqual([finishReason]);
+      expect(first.provider.dispatched, said).toBe(1);
+      // A valid plot on an odd finish: no case.
+      const second = setup([json(lighthouseSkeleton), odd(lighthousePeople)]);
+      const b = await writeCase({ metered: second.metered, attemptId: "w-1", brief });
+      expect(b, said).toMatchObject({ accepted: false, failedAt: "people", reasons: [`the people reply did not end normally (finish: ${said})`], requests: 2 });
+      expect(b.case, said).toBeUndefined();
+    }
+  });
+
+  it("hands over a reply whose cost was not confirmed, marked as such", async () => {
+    const seen: ReplyRecord[] = [];
+    const unsettled: Metered = async (request) => ({ ok: true, attemptId: request.attemptId, response: json(lighthouseSkeleton), costNano: 12, settled: false, breached: false });
+    await writeCase({ metered: unsettled, attemptId: "w-1", brief, onReply: (r) => seen.push(r) });
+    expect(seen).toMatchObject([{ attemptId: "w-1:skeleton", settled: false, breached: false }]);
+  });
+
+  it("runs stage 2 from a saved skeleton, spending only the people request", async () => {
+    const { provider, metered } = setup([json(lighthousePeople)]);
+    const seen: string[] = [];
+    const report = await writeCase({ metered, attemptId: "w-1", brief, skeleton: JSON.parse(JSON.stringify(lighthouseSkeleton)), onReply: (reply) => seen.push(reply.stage) });
+    expect(report).toMatchObject({ accepted: true, requests: 1, costNano: PRICE });
+    expect(report.usage.map((u) => u.step)).toEqual(["writer.people"]);
+    expect(provider.dispatched).toBe(1);
+    expect(seen).toEqual(["people"]);
+
+    // A saved skeleton is judged like a new one: a bad one sends nothing at all.
+    const bad = setup([json(lighthousePeople)]);
+    const refused = await writeCase({ metered: bad.metered, attemptId: "w-1", brief: { ...brief, rooms: 6 }, skeleton: lighthouseSkeleton });
+    expect(refused).toMatchObject({ accepted: false, failedAt: "skeleton", requests: 0 });
+    expect(bad.provider.dispatched).toBe(0);
+  });
+
+  it("gives each request room for its reasoning", async () => {
+    const { provider, metered } = setup([json(lighthouseSkeleton), json(lighthousePeople)]);
+    await writeCase({ metered, attemptId: "w-1", brief });
+    expect(provider.requests.map((r) => r.maxOutputTokens)).toEqual([8_000, 8_000]);
   });
 
   it("says which later stage refused the plot, and keeps the case it got to", async () => {
