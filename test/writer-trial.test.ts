@@ -65,8 +65,21 @@ describe("a writer trial: the plan and the run agree", () => {
   it("saves each reply exactly as it arrived, with how it ended and what it answered", async () => {
     const t = setup(good);
     await runTrial(t.config, { metered: t.metered, stored: t.stored() });
-    expect(t.saved("w-2", "skeleton")).toEqual({ attemptId: "w-2:skeleton", stage: "skeleton", text: skeletonText, finishReason: "stop", usage, settled: true, breached: false, brief: { theme: "theme 2", suspects: 20, rooms: 5 } });
-    expect(t.saved("w-2", "people")).toMatchObject({ attemptId: "w-2:people", stage: "people", text: peopleText, settled: true });
+    const skeleton = t.saved("w-2", "skeleton");
+    expect(skeleton).toEqual({ attemptId: "w-2:skeleton", stage: "skeleton", text: skeletonText, finishReason: "stop", usage, settled: true, breached: false, salt: expect.any(String) as string, brief: { theme: "theme 2", suspects: 20, rooms: 5 }, shuffleVersion: 1 });
+    const people = t.saved("w-2", "people");
+    expect(people).toMatchObject({ attemptId: "w-2:people", stage: "people", text: peopleText, settled: true, shuffleVersion: 1 });
+    // One attempt, one private salt, saved with both replies and with the report, and not inside the case.
+    expect(skeleton.salt.length).toBeGreaterThan(20);
+    expect(people.salt).toBe(skeleton.salt);
+    // The people reply is saved with the order its request showed the people in: all twenty, not in the skeleton's order.
+    expect([...people.shown!].sort()).toEqual(lighthouseSkeleton.suspects.map((x) => x.name.en).sort());
+    expect(people.shown).not.toEqual(lighthouseSkeleton.suspects.map((x) => x.name.en));
+    const whole = JSON.parse(readFileSync(reportPath(t.config, "w-2"), "utf8")) as { salt: string; case: unknown };
+    expect(whole.salt).toBe(skeleton.salt);
+    expect(JSON.stringify(whole.case)).not.toContain(skeleton.salt);
+    // Different attempts get different salts.
+    expect(t.saved("w-1", "skeleton").salt).not.toBe(skeleton.salt);
     const report = JSON.parse(readFileSync(reportPath(t.config, "w-2"), "utf8")) as { accepted: boolean; case: { suspects: unknown[] } };
     expect(report.accepted).toBe(true);
     expect(report.case.suspects).toHaveLength(20);
@@ -144,11 +157,14 @@ describe("a writer trial: picking an attempt up from its saved skeleton", () => 
     ]);
     expect(t.provider.dispatched).toBe(1 + 5);
     expect(run.reports[0]!.report.usage.map((u) => u.step)).toEqual(["writer.people"]);
+    // The resumed attempt kept the salt its skeleton was saved with.
+    expect(t.saved("w-1", "people").salt).toBe(t.saved("w-1", "skeleton").salt);
+    expect(run.reports[0]!.report.salt).toBe(t.saved("w-1", "skeleton").salt);
   });
 
   it("refuses to resume from a file that is damaged, another attempt's, unconfirmed or no longer passes, and says which", async () => {
     const brief = { theme: "theme 1", suspects: 20, rooms: 5 };
-    const record: SavedReply = { attemptId: "w-1:skeleton", stage: "skeleton", text: skeletonText, finishReason: "stop", usage, settled: true, breached: false, brief };
+    const record: SavedReply = { attemptId: "w-1:skeleton", stage: "skeleton", text: skeletonText, finishReason: "stop", usage, settled: true, breached: false, salt: "a-private-salt", brief, shuffleVersion: 1 };
     const why = (text: string | null) => {
       const result = savedSkeleton(text, "w-1", brief);
       return result.ok ? "ok" : result.why[0];

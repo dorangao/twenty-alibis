@@ -617,11 +617,12 @@ describe("the writer: two requests, then code", () => {
   it("hands every reply to the caller as it arrived, before anything parses or judges it", async () => {
     const seen: ReplyRecord[] = [];
     const good = setup([json(lighthouseSkeleton), json(lighthousePeople)]);
-    await writeCase({ metered: good.metered, attemptId: "w-1", brief, onReply: (reply) => seen.push(reply) });
+    await writeCase({ metered: good.metered, attemptId: "w-1", brief, salt: "salt-1", onReply: (reply) => seen.push(reply) });
     expect(seen).toEqual([
-      { attemptId: "w-1:skeleton", stage: "skeleton", text: JSON.stringify(lighthouseSkeleton), finishReason: "stop", usage, settled: true, breached: false },
-      { attemptId: "w-1:people", stage: "people", text: JSON.stringify(lighthousePeople), finishReason: "stop", usage, settled: true, breached: false },
+      { attemptId: "w-1:skeleton", stage: "skeleton", text: JSON.stringify(lighthouseSkeleton), finishReason: "stop", usage, settled: true, breached: false, salt: "salt-1" },
+      { attemptId: "w-1:people", stage: "people", text: JSON.stringify(lighthousePeople), finishReason: "stop", usage, settled: true, breached: false, salt: "salt-1", shown: expect.any(Array) as string[] },
     ]);
+    expect(seen[1]!.shown).toHaveLength(20);
   });
 
   it("hands over a reply that is cut off, is not JSON, is JSON null, or is later refused", async () => {
@@ -634,9 +635,9 @@ describe("the writer: two requests, then code", () => {
     ] as const) {
       const seen: ReplyRecord[] = [];
       const { provider, metered } = setup([{ text: reply, toolCalls: [], usage, finishReason }, json(lighthousePeople)]);
-      const report = await writeCase({ metered, attemptId: "w-1", brief, onReply: (r) => seen.push(r) });
+      const report = await writeCase({ metered, attemptId: "w-1", brief, salt: "salt-1", onReply: (r) => seen.push(r) });
       expect(report, reason).toMatchObject({ accepted: false, failedAt: "skeleton", reasons: [reason], requests: 1 });
-      expect(seen, reason).toEqual([{ attemptId: "w-1:skeleton", stage: "skeleton", text: reply, finishReason, usage, settled: true, breached: false }]);
+      expect(seen, reason).toEqual([{ attemptId: "w-1:skeleton", stage: "skeleton", text: reply, finishReason, usage, settled: true, breached: false, salt: "salt-1" }]);
       expect(provider.dispatched, reason).toBe(1);
     }
   });

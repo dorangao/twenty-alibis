@@ -36,7 +36,8 @@ const compiled = (skeleton: Skeleton, people: People): Case => {
 const culpritName = (c: Case) => c.suspects.find((s) => s.id === c.culprit.suspect)!.name.en;
 const position = (id: string) => Number(id.slice(2));
 /** Everything about each person that the plot fixed, by name. */
-const byName = (c: Case) => Object.fromEntries(c.suspects.map((s) => [s.name.en, { zh: s.name.zh, role: s.role.en, persona: s.persona.en, whereabouts: Object.values(s.whereabouts), means: s.means.length, motives: s.motives }]));
+const byName = (c: Case) =>
+  Object.fromEntries(c.suspects.map((s) => [s.name.en, { zh: s.name.zh, role: s.role.en, persona: s.persona.en, whereabouts: Object.values(s.whereabouts), means: s.means.length, motives: s.motives.map((id) => c.motives.find((m) => m.id === id)!.text.en) }]));
 
 describe("the model's habit this guards against", () => {
   it("compiled as written, the culprit is first and the shortlist is the first four", () => {
@@ -67,6 +68,10 @@ describe("the roster is put in an order that has nothing to do with the plot", (
     expect(culpritName(after)).toBe("Cormac Brandt");
     expect(byName(after)).toEqual(byName(before));
     expect(after.title).toEqual(before.title);
+    // The motives keep their wording; the catalogue is in another order.
+    expect(after.motives.map((m) => m.text.en).sort()).toEqual(before.motives.map((m) => m.text.en).sort());
+    expect(after.motives.map((m) => m.text.en)).not.toEqual(before.motives.map((m) => m.text.en));
+    expect(after.motives.find((m) => m.id === after.culprit.motive)!.text).toEqual(before.motives.find((m) => m.id === before.culprit.motive)!.text);
     expect(after.locations).toEqual(before.locations);
     expect(after.victim).toEqual(before.victim);
     // What changed is where people stand.
@@ -97,7 +102,8 @@ describe("the roster is put in an order that has nothing to do with the plot", (
     const moved = shuffleRoster("writer-b-1:before", lighthouseSkeleton);
     expect(moved.suspects).not.toEqual(lighthouseSkeleton.suspects);
     expect([...moved.suspects].sort((x, y) => x.name.en.localeCompare(y.name.en))).toEqual([...lighthouseSkeleton.suspects].sort((x, y) => x.name.en.localeCompare(y.name.en)));
-    expect({ ...moved, suspects: [] }).toEqual({ ...lighthouseSkeleton, suspects: [] });
+    expect([...moved.motives].sort((x, y) => x.en.localeCompare(y.en))).toEqual([...lighthouseSkeleton.motives].sort((x, y) => x.en.localeCompare(y.en)));
+    expect({ ...moved, suspects: [], motives: [] }).toEqual({ ...lighthouseSkeleton, suspects: [], motives: [] });
     expect(shuffleRoster("writer-b-1:before", lighthouseSkeleton)).toEqual(moved);
   });
 
@@ -114,57 +120,80 @@ describe("the roster is put in an order that has nothing to do with the plot", (
 describe("the writer applies it, before and after the plot is written", () => {
   const usage = { inputTokens: 900, cachedTokens: 0, outputTokens: 3_000 };
   /**
-   * A model with the habit: whatever people it is shown, the first is the culprit and the
-   * first four have means and motive. It names people in alphabetical order, as two real
-   * rosters did: the handwritten skeleton's given names already run from Aldric to Tamsin.
+   * A model with the habits seen in three real plots: whatever people it is shown, the first
+   * is the culprit and the first four have means and motive; and the culprit gets the first
+   * motive it is shown. It names people in alphabetical order, as two real rosters did: the
+   * handwritten skeleton's given names already run from Aldric to Tamsin.
    */
-  const habitual = (request: ProviderRequest): ProviderResponse => ({ text: JSON.stringify(request.responseSchema?.name === "case_skeleton" ? lighthouseSkeleton : modelLike.people), toolCalls: [], usage, finishReason: "stop" });
-  const write = async (attemptId: string) => {
+  const habitualPeople: People = { ...modelLike.people, suspects: modelLike.people.suspects.map((row) => (row.id === "s-01" ? { ...row, motive: "mo-01" } : row)) };
+  const habitual = (request: ProviderRequest): ProviderResponse => ({ text: JSON.stringify(request.responseSchema?.name === "case_skeleton" ? lighthouseSkeleton : habitualPeople), toolCalls: [], usage, finishReason: "stop" });
+  const write = async (attemptId: string, salt?: string) => {
     const provider = new FakeProvider(habitual);
     const metered = createMetered({ inputBound: { tokensPerByte: 100 }, provider, store: new MemorySpendStore(), envelope: "e", limitNano: usdToNano(1) });
-    return { report: await writeCase({ metered, attemptId, brief: { theme: "a lighthouse", suspects: 20, rooms: 5 } }), provider };
+    return { report: await writeCase({ metered, attemptId, brief: { theme: "a lighthouse", suspects: 20, rooms: 5 }, ...(salt !== undefined ? { salt } : {}) }), provider };
   };
   const alphabetical = lighthouseSkeleton.suspects.map((x) => x.name.en).sort();
+  const culpritMotive = (c: Case) => c.motives.find((m) => m.id === c.culprit.motive)!.text.en;
 
-  it("shows the model the people in a seeded order, not the order it named them in", async () => {
-    const { provider } = await write("writer-b-1");
-    const shown = provider.requests[1]!.messages.at(-1)!.content.split("\n").filter((line) => line.startsWith("- s-")).map((line) => line.replace(/^- s-\d+: /, "").split(",")[0]!);
+  it("shows the model the people and the motives in a seeded order, not the order it wrote them in", async () => {
+    const { provider } = await write("writer-b-1", "salt-1");
+    const lines = provider.requests[1]!.messages.at(-1)!.content.split("\n");
+    const shown = lines.filter((line) => line.startsWith("- s-")).map((line) => line.replace(/^- s-\d+: /, "").split(",")[0]!);
     expect(shown).toHaveLength(20);
     expect([...shown].sort()).toEqual(alphabetical);
     expect(shown).not.toEqual(lighthouseSkeleton.suspects.map((x) => x.name.en));
-    expect(shown[0]).not.toBe("Aldric Varga");
+    const motives = lines.filter((line) => line.startsWith("- mo-")).map((line) => line.replace(/^- mo-\d+: /, ""));
+    expect([...motives].sort()).toEqual(lighthouseSkeleton.motives.map((m) => m.en).sort());
   });
 
-  it("so neither the culprit's name nor their place follows the model's habit", async () => {
+  it("so neither the culprit's name, place nor motive follows the model's habit", async () => {
     const names = new Map<string, number>();
     const places = new Map<string, number>();
-    let firstNamed = 0;
+    const motiveTexts = new Map<string, number>();
+    const motiveIds = new Map<string, number>();
     for (let i = 0; i < 80; i++) {
-      const { report } = await write(`writer-${i}`);
-      expect(report.accepted, `writer-${i}`).toBe(true);
+      const { report } = await write("writer-x", `salt-${i}`);
+      expect(report.accepted, `salt-${i}`).toBe(true);
       const c = report.case!;
-      const who = culpritName(c);
-      names.set(who, (names.get(who) ?? 0) + 1);
+      names.set(culpritName(c), (names.get(culpritName(c)) ?? 0) + 1);
       places.set(c.culprit.suspect, (places.get(c.culprit.suspect) ?? 0) + 1);
-      if (who === alphabetical[0]) firstNamed++;
-      expect(report.quality!.shortlist, `writer-${i}`).toHaveLength(4);
+      motiveTexts.set(culpritMotive(c), (motiveTexts.get(culpritMotive(c)) ?? 0) + 1);
+      motiveIds.set(c.culprit.motive, (motiveIds.get(c.culprit.motive) ?? 0) + 1);
+      expect(report.quality!.shortlist, `salt-${i}`).toHaveLength(4);
     }
     // Over 80 cases the culprit is many different people, in many different places.
     expect(names.size).toBeGreaterThanOrEqual(15);
     expect(places.size).toBeGreaterThanOrEqual(15);
-    // The person the model named first did it about as often as anyone: 4 in 80 on average.
-    expect(firstNamed).toBeLessThan(12);
+    expect(names.get(alphabetical[0]!) ?? 0).toBeLessThan(12);
     expect(Math.max(...names.values())).toBeLessThan(12);
     expect(Math.max(...places.values())).toBeLessThan(12);
+    // And the culprit's motive is each of the three, by wording and by id, none of them nearly always.
+    expect(motiveTexts.size).toBe(3);
+    expect(motiveIds.size).toBe(3);
+    expect(Math.max(...motiveTexts.values())).toBeLessThan(45);
+    expect(Math.max(...motiveIds.values())).toBeLessThan(45);
   });
 
-  it("rebuilds the same case from the same attempt id", async () => {
-    const a = await write("writer-b-1");
-    const again = await write("writer-b-1");
-    const b = await write("writer-b-2");
+  it("uses a private salt, not the public id: the same id gives different cases, and the salt is not in the case", async () => {
+    const a = await write("writer-b-1", "salt-a");
+    const b = await write("writer-b-1", "salt-b");
+    expect(a.report.case!.id).toBe("writer-b-1");
+    expect(b.report.case!.id).toBe("writer-b-1");
+    expect(a.report.case).not.toEqual(b.report.case);
+    expect(a.report.salt).toBe("salt-a");
+    expect(JSON.stringify(a.report.case)).not.toContain("salt-a");
+    // With no salt given, one is drawn at random each time.
+    const c = await write("writer-b-1");
+    const d = await write("writer-b-1");
+    expect(c.report.salt).not.toBe(d.report.salt);
+    expect(c.report.salt.length).toBeGreaterThan(20);
+  });
+
+  it("rebuilds the same case from the same salt", async () => {
+    const a = await write("writer-b-1", "salt-a");
+    const again = await write("writer-b-1", "salt-a");
     expect(again.report.case).toEqual(a.report.case);
-    expect(culpritName(b.report.case!) === culpritName(a.report.case!) && b.report.case!.culprit.suspect === a.report.case!.culprit.suspect).toBe(false);
-    // The second request is the same too, so a saved skeleton resumes to the same plot.
+    // The second request is the same too, so saved replies can be read again later.
     expect(again.provider.bodies[1]).toBe(a.provider.bodies[1]);
   });
 });

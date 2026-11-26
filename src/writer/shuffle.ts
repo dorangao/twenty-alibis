@@ -1,4 +1,4 @@
-import { plotIds, type People, type Skeleton } from "./plot";
+import { NO_MOTIVE, plotIds, type People, type Skeleton } from "./plot";
 
 /**
  * Put the roster in an order that has nothing to do with the plot.
@@ -9,15 +9,18 @@ import { plotIds, type People, type Skeleton } from "./plot";
  * the next case from the list alone, and the briefing's own records list people in roster
  * order, so they would point the same way.
  *
- * So code reorders the people twice, each time by a seed and a fixed rule, so the same seed
- * always gives the same case and a case can be rebuilt:
+ * So code reorders the people, and the list of motives, twice. Each time the order comes
+ * from a seed by a fixed rule, so the same seed always gives the same case and a case can be
+ * rebuilt. The seed must be private: with a public one, anyone who knows the model's habit
+ * could work the order backwards and find who was first.
  *
  *  - before the second request (`shuffleRoster`), so that who the model lists first when it
  *    decides the plot is not who it named first;
  *  - after it (`shufflePlot`), so that a person's place in the finished case says nothing
  *    about the plot.
  *
- * Nothing else changes: each person keeps their name, voice, whereabouts, means and motive.
+ * Nothing else changes: each person keeps their name, voice, whereabouts, means and motive,
+ * and each motive keeps its wording.
  */
 
 /** A small, fixed generator of numbers from a string. The same seed always gives the same sequence. */
@@ -59,8 +62,10 @@ export function rosterOrder(seed: string, size: number): number[] {
  * the model then sees first is no longer the first it named.
  */
 export function shuffleRoster(seed: string, skeleton: Skeleton): Skeleton {
-  const order = rosterOrder(seed, skeleton.suspects.length);
-  return { ...skeleton, suspects: order.map((from) => skeleton.suspects[from]!) };
+  const people = rosterOrder(`${seed}:people`, skeleton.suspects.length);
+  // The motives too: three real culprits in a row were given the first motive on the list.
+  const motives = rosterOrder(`${seed}:motives`, skeleton.motives.length);
+  return { ...skeleton, suspects: people.map((from) => skeleton.suspects[from]!), motives: motives.map((from) => skeleton.motives[from]!) };
 }
 
 /**
@@ -73,14 +78,22 @@ export function shufflePlot(seed: string, skeleton: Skeleton, people: People): {
   const rows = new Map(people.suspects.map((row) => [row.id, row]));
   if (people.suspects.length !== ids.length || rows.size !== ids.length || !ids.every((id) => rows.has(id))) return { skeleton, people };
 
-  const order = rosterOrder(seed, ids.length);
+  const order = rosterOrder(`${seed}:people`, ids.length);
   /** Old id -> new id. */
   const moved = new Map(order.map((from, to) => [ids[from]!, ids[to]!]));
+  // The motive catalogue is reordered the same way. A motive id the catalogue does not have is left for the compiler to refuse.
+  const motiveIds = plotIds(skeleton).motives;
+  const motiveOrder = rosterOrder(`${seed}:motives`, motiveIds.length);
+  const movedMotive = new Map(motiveOrder.map((from, to) => [motiveIds[from]!, motiveIds[to]!]));
+  const motiveOf = (id: string) => (id === NO_MOTIVE ? id : (movedMotive.get(id) ?? id));
   return {
-    skeleton: { ...skeleton, suspects: order.map((from) => skeleton.suspects[from]!) },
+    skeleton: { ...skeleton, suspects: order.map((from) => skeleton.suspects[from]!), motives: motiveOrder.map((from) => skeleton.motives[from]!) },
     people: {
       culprit: moved.get(people.culprit) ?? people.culprit,
-      suspects: order.map((from, to) => ({ ...rows.get(ids[from]!)!, id: ids[to]! })),
+      suspects: order.map((from, to) => {
+        const row = rows.get(ids[from]!)!;
+        return { ...row, id: ids[to]!, motive: motiveOf(row.motive) };
+      }),
     },
   };
 }
