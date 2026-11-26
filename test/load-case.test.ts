@@ -89,6 +89,23 @@ describe("a case read from a file, for playing", () => {
     }
   });
 
+  it("the play command says what its check of a file covers, and then opens the game", () => {
+    const dir = mkdtempSync(join(tmpdir(), "play-"));
+    const path = join(dir, "good.json");
+    writeFileSync(path, JSON.stringify({ accepted: false, case: lighthouse }));
+    const run = spawnSync(process.execPath, ["--import", "tsx", "scripts/play.ts", "--zh", "--case", path], { encoding: "utf8", input: "quit\n", env: { PATH: process.env.PATH ?? "" } });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain("That is not the case writer's quality check.");
+    expect(run.stdout).toContain("这不等于案件写作的质量检查。");
+    expect(run.stdout).toContain(lighthouse.title.zh);
+    expect(run.stdout).toContain("模型已关闭");
+    // The handwritten case is played without that notice.
+    const plain = spawnSync(process.execPath, ["--import", "tsx", "scripts/play.ts"], { encoding: "utf8", input: "quit\n", env: { PATH: process.env.PATH ?? "" } });
+    expect(plain.status).toBe(0);
+    expect(plain.stdout).toContain(archivePass.title.en);
+    expect(plain.stdout).not.toContain("quality check");
+  });
+
   it("the play command itself prints only that much, and ends before the game opens", () => {
     const dir = mkdtempSync(join(tmpdir(), "play-"));
     const other = archivePass.suspects.find((s) => s.id !== archivePass.culprit.suspect)!;

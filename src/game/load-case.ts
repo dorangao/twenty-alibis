@@ -11,6 +11,12 @@ type Why = [en: string, zh: string];
  * it goes through the same gate as every case before anyone plays it (the schema, the truth
  * and evidence checks, and the solver). A file that does not pass is not played.
  *
+ * What this check covers: the case is well formed, its truth holds together, and a player can
+ * prove it. That makes it fair to play. It is NOT the case writer's quality gate
+ * (`assessQuality`): a case whose briefing gives too much away, or whose shortlist is too
+ * short, loads and plays. So this is an author's preview and a way to play a case, not a way
+ * to certify one for release.
+ *
  * A refusal says which kind of failure it was and nothing more. The gate's own reasons name
  * the people and facts of the hidden truth ("the hidden truth points at A, but the culprit is
  * B"), and whoever runs this command is a player. The details are for the author, from the

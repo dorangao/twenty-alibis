@@ -7,8 +7,9 @@
  *   npm run play -- --case <file>     a saved case instead, for instance cases/generated/pilot-a-2.json
  *   npm run play -- --live            use Muse Ember through the spend guard
  *
- * A case from a file goes through the same gate as every case (the schema, the validator and
- * the solver) before it is played. A file that does not pass is not played.
+ * A case from a file is checked before it is played: it must be well formed, hold together,
+ * and be provable by a player. A file that does not pass is not played. That check is not the
+ * case writer's quality check, so playing a file here does not mean it is fit for release.
  *
  * With the model off, a topic picked from the menu still gives the suspect's statement,
  * worded by code. A question in your own words needs the model.
@@ -50,6 +51,10 @@ if (args.casePath !== null) {
     process.exit(1);
   }
   c = loaded.c;
+  say(
+    "Loaded from a file. It was checked to be consistent and provable by a player. That is not the case writer's quality check.",
+    "已从文件加载。已检查案件自洽、玩家可以证明。这不等于案件写作的质量检查。",
+  );
 }
 
 const runtime = live ? await createRuntime(process.env) : null;
