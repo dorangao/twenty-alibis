@@ -41,6 +41,7 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 | Line guard | [`src/agents/line-guard.ts`](src/agents/line-guard.ts) | Checks the model's wording against the statements of the turn, in English and Chinese |
 | Rules of proof | [`src/case/proof.ts`](src/case/proof.ts) | What proves a suspect and what rules one out. The solver and the accusation scorer use this one object |
 | Session | [`src/game/session.ts`](src/game/session.ts) | One player's game as plain data: questions, inspections, the notebook with its contradictions, the accusation and the reveal |
+| Terminal game | [`src/game/terminal.ts`](src/game/terminal.ts), [`scripts/play.ts`](scripts/play.ts) | The whole game as lines of text, in English and Chinese. Playable with the model off |
 
 ### The pair that defines "solvable" · 定义"可解"的一对案件
 
@@ -84,6 +85,20 @@ npm run check
 ```
 
 `npm run check` runs the type check and all tests. Nothing in the test suite calls a model.
+
+### Play the handwritten case in a terminal · 在终端里玩手写案件
+
+```bash
+npm run play
+```
+
+```bash
+npm run play -- --zh
+```
+
+The model is off in both: nothing is sent and nothing is spent. You get the briefing, question the suspects from their topic menus, inspect records, read the notebook with its contradictions, accuse, and see the truth. With the model off a suspect's statement is worded by code; a question in your own words needs the model (`npm run play -- --live`, which sends a request only if a person has authorized paid requests).
+
+以上两条命令都不调用模型，不发送任何内容，也不花钱。可以看简报、从话题菜单里审问嫌疑人、查看记录、翻笔记本和其中的矛盾、指认、最后看真相。模型关闭时嫌疑人的陈述由代码转述；用自己的话提问需要模型（`npm run play -- --live`，只有在有人授权付费请求之后才会真的发送）。
 
 ### The durable spend counter · 持久化的额度计数
 

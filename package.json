@@ -20,7 +20,8 @@
     "spend": "node --env-file-if-exists=.env.local --import tsx scripts/spend.ts",
     "check:restart": "node --import tsx scripts/restart-check.ts",
     "smoke": "node --env-file-if-exists=.env.local --import tsx scripts/smoke.ts",
-    "trial:turn": "node --env-file-if-exists=.env.local --import tsx scripts/turn-trial.ts"
+    "trial:turn": "node --env-file-if-exists=.env.local --import tsx scripts/turn-trial.ts",
+    "play": "node --env-file-if-exists=.env.local --import tsx scripts/play.ts"
   },
   "dependencies": {
     "ioredis": "^6.1.0",

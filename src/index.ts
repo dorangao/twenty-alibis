@@ -18,3 +18,5 @@ export * from "./agents/line-guard";
 export * from "./agents/suspect-turn";
 export * from "./case/proof";
 export * from "./game/session";
+
+export * from "./game/terminal";
