@@ -47,8 +47,12 @@ export interface DetectiveReport {
   actions: number;
   /** Requests that left this machine: the detective's, plus any the suspects made. */
   requests: number;
-  /** The confirmed cost of the detective's own requests that came back. */
+  /** The confirmed cost of the whole game: `detectiveCostNano` plus `suspectCostNano`. */
   costNano: number;
+  /** The confirmed cost of the detective's own requests. */
+  detectiveCostNano: number;
+  /** The confirmed cost of the requests the suspects made. Zero when their model is off. */
+  suspectCostNano: number;
   steps: DetectiveStep[];
   session: Session;
   /** Set when a request was refused, failed, or came back unconfirmed. The caller should stop its run. */
@@ -95,20 +99,36 @@ export function detectiveBriefing(c: Case): string {
   ].join("\n");
 }
 
+/**
+ * The numbers the detective uses for topics and inspections. A thing gets its number the
+ * first time it is open to the player, in the order a player's menu would list it, and
+ * keeps it. So a number says nothing about what is still locked: a case whose locked record
+ * sits first in the file and one where it sits last look the same until it opens.
+ */
+interface Handles {
+  topics: Map<string, number>;
+  inspections: Map<string, number>;
+}
+
 /** What the detective is shown this turn, and the handles it may answer with. */
-function view(c: Case, s: Session) {
+function view(c: Case, s: Session, handles: Handles) {
   const book = notebook(c, s);
   const name = (id: string) => c.suspects.find((x) => x.id === id)?.name.en ?? id;
   // Handles are positions in lists that only grow or never change, so a handle means the same thing every turn.
   const records = book.evidence.map((e, i) => ({ handle: `R${i + 1}`, id: e.id, text: e.text.en, authoritative: e.authoritative }));
-  const topics = c.actions.topics.flatMap((t, i) => {
-    const open = topicMenu(c, s, t.suspect).find((m) => m.id === t.id);
-    return open && !open.heard ? [{ handle: `T${i + 1}`, id: t.id, suspect: t.suspect, label: t.label.en }] : [];
-  });
-  const inspections = c.actions.inspections.flatMap((x, i) => {
-    const open = inspectionMenu(c, s).find((m) => m.id === x.id);
-    return open && !open.done ? [{ handle: `I${i + 1}`, id: x.id, label: x.label.en }] : [];
-  });
+  const number = (map: Map<string, number>, id: string): number => {
+    if (!map.has(id)) map.set(id, map.size + 1);
+    return map.get(id)!;
+  };
+  const topics = c.suspects
+    .flatMap((x) => topicMenu(c, s, x.id).map((m) => ({ ...m, suspect: x.id })))
+    .map((m) => ({ handle: `T${number(handles.topics, m.id)}`, n: number(handles.topics, m.id), id: m.id, suspect: m.suspect, label: m.label.en, heard: m.heard }))
+    .filter((m) => !m.heard)
+    .sort((a, b) => a.n - b.n);
+  const inspections = inspectionMenu(c, s)
+    .map((m) => ({ handle: `I${number(handles.inspections, m.id)}`, n: number(handles.inspections, m.id), id: m.id, label: m.label.en, done: m.done }))
+    .filter((m) => !m.done)
+    .sort((a, b) => a.n - b.n);
   const left = actionsLeft(c, s);
   const text = [
     `Actions left: ${left}.`,
@@ -143,6 +163,9 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
   let wasted = 0;
   let taken = 0;
   let problem: string | undefined;
+  const handles: Handles = { topics: new Map(), inspections: new Map() };
+  /** True when the caller turned the suspects' model on. Then a refusal from it is a problem, not the expected "model off". */
+  const liveSuspects = args.suspects !== undefined;
 
   const report = (outcome: DetectiveReport["outcome"], verdict?: Verdict): DetectiveReport => ({
     outcome,
@@ -150,7 +173,9 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
     turns: taken,
     actions: s.actions,
     requests: requests + s.turns.reduce((sum, t) => sum + t.turn.requests, 0),
-    costNano,
+    costNano: costNano + s.turns.reduce((sum, t) => sum + t.turn.costNano, 0),
+    detectiveCostNano: costNano,
+    suspectCostNano: s.turns.reduce((sum, t) => sum + t.turn.costNano, 0),
     steps,
     session: s,
     ...(problem ? { problem } : {}),
@@ -159,7 +184,7 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     taken = turn;
-    const now = view(c, s);
+    const now = view(c, s, handles);
     const canAct = now.left > 0;
     const schema = {
       name: "detective_action",
@@ -168,7 +193,8 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
         topic: { type: "string", enum: [...(canAct ? now.topics.map((t) => t.handle) : []), NONE] },
         inspection: { type: "string", enum: [...(canAct ? now.inspections.map((x) => x.handle) : []), NONE] },
         person: { type: "string", enum: [...c.suspects.map((_x, i) => `P${i + 1}`), NONE] },
-        cite: { type: "array", items: { type: "string", enum: now.records.map((r) => r.handle) } },
+        // With nothing in the notebook there is nothing to cite: an empty list is the only legal value.
+        cite: now.records.length > 0 ? { type: "array", items: { type: "string", enum: now.records.map((r) => r.handle) } } : { type: "array", items: { type: "string" }, maxItems: 0 },
       }),
     };
     const result = await args.metered({
@@ -190,6 +216,13 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
     if (result.settled) costNano += result.costNano;
     if (result.breached) problem = "envelope-suspended";
     else if (!result.settled) problem = "unconfirmed:not-settled";
+    // The reply is here, but its cost is unconfirmed or the envelope is suspended. Nothing it
+    // asks for is done: an action taken on such a reply could send more requests, or end the
+    // game with a verdict that would then be counted.
+    if (problem) {
+      steps.push({ turn, did: `the reply came back but was not acted on: ${problem}`, used: false });
+      return report("no-accusation");
+    }
 
     // Read the reply. Anything that is not a legal action right now is a wasted turn.
     const waste = (why: string): boolean => {
@@ -219,7 +252,8 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
             s = asked.session;
             wasted = 0;
             steps.push({ turn, did: `asked ${topic.handle} (${topic.id})`, used: true });
-            if (asked.turn.problem && asked.turn.requests > 0) problem = asked.turn.problem;
+            // With the suspects' model off, a refusal is the expected path. With it on, any problem ends the game.
+            if (asked.turn.problem && (liveSuspects || asked.turn.requests > 0)) problem = `suspect:${asked.turn.problem}`;
           }
         } else if (reply.action === "inspect") {
           const item = now.inspections.find((x) => x.handle === reply.inspection);
@@ -246,7 +280,7 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
         stop = waste(`the game refused the action: ${error.code}`);
       }
     }
-    // A request whose cost is unconfirmed, or a suspended envelope, ends the game here.
+    // A suspect's request that did not come back cleanly, or too many wasted turns, ends the game here.
     if (problem || stop) return report("no-accusation");
   }
   steps.push({ turn: maxTurns + 1, did: "ran out of turns without accusing", used: false });
