@@ -5,9 +5,15 @@
  *   npm run trial:turn            run it (needs `npm run spend -- allow-paid "..."` first)
  *   npm run trial:turn -- --plan  list what it would send, without sending anything
  *
- * It sends at most MAX_REQUESTS requests, counted here as well as by the spend guard, and
- * stops at the first request that is refused or fails. Each request id can be sent once,
- * ever: running the trial again sends nothing that already went out.
+ * It sends at most MAX_REQUESTS requests over all of its runs, counted here as well as by the
+ * spend guard. Items run in order; one whose worst case does not fit under what is left of
+ * the cap is not run, and neither is anything after it. `--plan` reads the trace and prints
+ * exactly what a run would do now. A run stops at the first request that is refused, fails,
+ * or comes back with its cost unconfirmed. Each request id can be sent once, ever.
+ *
+ * The record so far: the first run sent items 1 to 4 (five requests). Items 5 and 6 were
+ * added after it and sent by a second run (two requests). On a fresh trace a run would again
+ * do items 1 to 4 and leave 5 and 6 for the next run.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { guardLine } from "../src/agents/line-guard";
@@ -122,9 +128,59 @@ const items: Item[] = [
   retryItem(6, "tool-result", ["Ada, the retry note carried inside the tool result instead", "艾达，改为把重试提示放进工具结果里"]),
 ];
 
+/** The requests of this trial that have already left this machine, read from the trace of `envelope`. */
+function sentEarlier(envelope: string | undefined): { attemptId: string }[] {
+  const path = `traces/${envelope}.trace.jsonl`;
+  if (!envelope || !existsSync(path)) return [];
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as { attemptId: string; outcome: string })
+    .filter((e) => e.attemptId.startsWith(`${PREFIX}-`) && ["settled", "settle-pending", "retained"].includes(e.outcome));
+}
+
+type Standing =
+  /** A request of this item already went out in an earlier run. It is not run again. */
+  | "done"
+  /** It will run: its worst case fits in what is left of the cap. */
+  | "run"
+  /** It will not run: its worst case does not fit. Items after it wait too, so the order is kept. */
+  | "over-cap";
+
+/**
+ * What a run would do, given what earlier runs sent. Items run in order, and each one needs
+ * its worst case to fit in what is left of the cap. `--plan` prints this and a run follows it,
+ * so the plan and the run cannot disagree.
+ */
+function schedule(earlier: { attemptId: string }[]): { item: Item; standing: Standing }[] {
+  let left = MAX_REQUESTS - earlier.length;
+  let blocked = false;
+  return items.map((item) => {
+    if (earlier.some((e) => e.attemptId.startsWith(`${item.id}:`))) return { item, standing: "done" as const };
+    if (blocked || item.most > left) {
+      blocked = true;
+      return { item, standing: "over-cap" as const };
+    }
+    left -= item.most;
+    return { item, standing: "run" as const };
+  });
+}
+
+const standingText: Record<Standing, [string, string]> = {
+  done: ["sent in an earlier run (not sent again)", "此前已发送（本次不重发）"],
+  run: ["would run", "将会执行"],
+  "over-cap": ["would NOT run: its worst case does not fit under the cap", "不会执行：最坏情况会超过上限"],
+};
+
 if (process.argv.includes("--plan")) {
-  say(`${items.length} items, at most ${MAX_REQUESTS} requests. Nothing is sent.`, `${items.length} 项，最多 ${MAX_REQUESTS} 次请求。不会发送任何内容。`);
-  for (const i of items) console.log(`  ${i.id}  (max ${i.most})  ${both(...i.what)}`);
+  const earlier = sentEarlier(process.env.SPEND_ENVELOPE?.trim());
+  const plan = schedule(earlier);
+  const toRun = plan.filter((p) => p.standing === "run");
+  say(
+    `Cap: ${MAX_REQUESTS} requests over all runs. Sent by earlier runs: ${earlier.length}. A run now would send at most ${toRun.reduce((sum, p) => sum + p.item.most, 0)}. Nothing is sent by --plan.`,
+    `上限：历次运行合计 ${MAX_REQUESTS} 次请求。此前已发送 ${earlier.length} 次。现在运行最多再发送 ${toRun.reduce((sum, p) => sum + p.item.most, 0)} 次。--plan 不会发送任何内容。`,
+  );
+  for (const { item, standing } of plan) console.log(`  ${item.id}  (max ${item.most})  ${both(...standingText[standing])}  |  ${both(...item.what)}`);
   process.exit(0);
 }
 
@@ -137,26 +193,12 @@ if (!before.paidAllowed) {
 }
 say(`Envelope "${runtime.config.envelope}": ${usd(before.committedNano)} committed before the run.`, `额度 "${runtime.config.envelope}"：运行前已占用 ${usd(before.committedNano)}。`);
 
-// A second count, independent of the spend guard: past the cap, a request is refused here.
-// It starts from what earlier runs of this trial already sent, so the cap holds across runs.
-const earlierPath = `traces/${runtime.config.envelope}.trace.jsonl`;
-const earlier = existsSync(earlierPath)
-  ? readFileSync(earlierPath, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as { attemptId: string; outcome: string })
-      .filter((e) => e.attemptId.startsWith(`${PREFIX}-`) && ["settled", "settle-pending", "retained"].includes(e.outcome))
-  : [];
-/** An item is done once any request of it has left this machine. It is not run again. */
-const doneEarlier = (item: Item) => earlier.some((e) => e.attemptId.startsWith(`${item.id}:`));
+const earlier = sentEarlier(runtime.config.envelope);
+const plan = schedule(earlier);
+say(`${earlier.length} of at most ${MAX_REQUESTS} requests were sent by earlier runs.`, `此前的运行已发送 ${earlier.length} 次，上限 ${MAX_REQUESTS} 次。`);
+
+// A second count, independent of the schedule and of the spend guard: past the cap, a request is refused here.
 let passed = earlier.length;
-const stillToRun = items.filter((i) => !doneEarlier(i));
-say(`${passed} of at most ${MAX_REQUESTS} requests were sent by earlier runs.`, `此前的运行已发送 ${passed} 次，上限 ${MAX_REQUESTS} 次。`);
-if (passed + stillToRun.reduce((sum, i) => sum + i.most, 0) > MAX_REQUESTS) {
-  say("The remaining items could go past the cap. Nothing was sent.", "剩余各项可能超过上限。未发送任何内容。");
-  await runtime.close();
-  process.exit(1);
-}
 const capped: Metered = async (request) => {
   if (passed >= MAX_REQUESTS) return { ok: false, attemptId: request.attemptId, sent: false, reason: "kill-switch" };
   passed++;
@@ -164,10 +206,11 @@ const capped: Metered = async (request) => {
 };
 
 let stopped = false;
-for (const item of items) {
+for (const { item, standing } of plan) {
   console.log(`\n${item.id}  ${both(...item.what)}`);
-  if (doneEarlier(item)) {
-    console.log(`  ${both("sent in an earlier run (not sent again)", "此前已发送（本次未重发）")}`);
+  if (standing !== "run") {
+    const why: [string, string] = standing === "done" ? standingText.done : ["not run: its worst case does not fit under the cap", "未执行：最坏情况会超过上限"];
+    console.log(`  ${both(...why)}`);
     continue;
   }
   if (stopped) {
