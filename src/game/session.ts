@@ -211,7 +211,14 @@ export async function ask(metered: Metered, c: Case, session: Session, args: Ask
     // A turn that hit a problem is not replayed, so the question can be asked again.
     const wanted = sameWords(question);
     const saved = session.turns.find(
-      (r) => r.turn.suspect === args.suspect && r.turn.problem === undefined && sameWords(r.question) === wanted && r.menu.length === menu.length && r.menu.every((id, i) => id === menu[i]),
+      (r) =>
+        r.turn.suspect === args.suspect &&
+        r.turn.problem === undefined &&
+        sameWords(r.question) === wanted &&
+        // A record stored before menus were kept has none: it is never taken for the same question.
+        Array.isArray(r.menu) &&
+        r.menu.length === menu.length &&
+        r.menu.every((id, i) => id === menu[i]),
     );
     if (saved) return { session, turn: saved.turn, replayed: true, recorded: true };
   }
