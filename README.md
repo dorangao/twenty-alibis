@@ -39,6 +39,8 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 | Suspect prompt | [`src/agents/suspect-prompt.ts`](src/agents/suspect-prompt.ts) | What a suspect is shown: the public briefing and its own voice. It learns what it may say only by calling `recall`, and a topic the player has not unlocked is not served |
 | Suspect turn | [`src/agents/suspect-turn.ts`](src/agents/suspect-turn.ts) | One question, start to finish: at most three requests, and a line to show even when every request is refused |
 | Line guard | [`src/agents/line-guard.ts`](src/agents/line-guard.ts) | Checks the model's wording against the statements of the turn, in English and Chinese |
+| Rules of proof | [`src/case/proof.ts`](src/case/proof.ts) | What proves a suspect and what rules one out. The solver and the accusation scorer use this one object |
+| Session | [`src/game/session.ts`](src/game/session.ts) | One player's game as plain data: questions, inspections, the notebook with its contradictions, the accusation and the reveal |
 
 ### The pair that defines "solvable" · 定义"可解"的一对案件
 
@@ -62,6 +64,14 @@ Muse Ember writes each suspect's line. Code decides what the line is allowed to 
 The guard works on words, so it cannot judge meaning: a line could still bend a fact in words the vocabulary does not know. That is why the promise rests on the notebook and the solver, not on the line. Every turn records where its line came from and why any line was refused.
 
 每个嫌疑人的台词由 Muse Ember 来写，但台词能不能用、笔记本里记什么，都由代码决定。一次提问落在哪个话题上，这一轮的陈述就是案件文件里该话题给出的陈述，模型不能增、删或改。笔记本里的句子由代码按固定方式生成，只有笔记本算证据。模型的台词要通过守卫才会显示：守卫认识本案的人名、地点、各种写法的时间和作案手段，凡是多提了、漏提了、把陈述说反了、声称"只有我一个人"、语言不对或者出戏的台词都会被拒绝。被拒绝后重试一次，再不行就显示代码生成的句子。问题对不上任何话题、或者话题还没解锁时，不让模型写台词，嫌疑人只说几句固定的话之一：没有陈述可对照的台词无从检查。守卫只看字词，判断不了含义，所以我们承诺的是笔记本和求解器，不是台词本身。每一轮都会记录台词的来源和被拒绝的原因。
+
+### How an accusation is scored · 指认如何判分
+
+A player names a suspect and cites evidence from the notebook. Code judges the cited evidence with the same rules the solver used to accept the case: it must prove opportunity, means and a motive for the accused, and rule out everyone else. Any set of held evidence that does so is accepted. What a suspect said proves nothing. The right name without the proof is reported as "right but unproven", with what is missing. The hidden truth is given out only after the accusation.
+
+A session costs at most `sessionCap` actions. Hearing a topic again, asking a suspect the very same question again while it has the same topics open, or looking at a record again is free and sends nothing to the model: the saved result is returned. A question in other words is a new question. A topic heard in one language and asked for in the other is shown as code words it, since the model's own line exists in one language only.
+
+玩家点名一名嫌疑人，并从笔记本里引用证据。代码用求解器接受案件时的同一套规则来判定：引用的证据必须证明被指认者有机会、有手段、有动机，并排除其他所有人。任何满足这些条件的证据组合都被接受；嫌疑人说的话不能证明任何事。只说对名字而没有证明，会判为"说对了但未证明"，并指出缺什么。真相只在指认之后公开。重听一个话题、在话题没变的情况下向同一人问一模一样的问题、或再看一份记录，都不耗行动，也不会再调用模型；换一种说法就算新问题。用一种语言听过的话题换另一种语言重听时，显示的是代码生成的句子，因为模型的台词只有一种语言。
 
 ## Run it · 运行
 
