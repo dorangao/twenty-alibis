@@ -20,8 +20,9 @@ import { skeletonProblems } from "./skeleton";
 
 export const WRITER_PROMPT_ID = "writer-v1";
 /** Output limits per request, reasoning included. */
-export const SKELETON_OUTPUT_TOKENS = 6_000;
-export const PEOPLE_OUTPUT_TOKENS = 6_000;
+// A twenty-person skeleton measured 3,900 to 5,100 output tokens, more than half of it reasoning.
+export const SKELETON_OUTPUT_TOKENS = 8_000;
+export const PEOPLE_OUTPUT_TOKENS = 8_000;
 
 export type WriteStage =
   /** The skeleton request, or reading its reply. */
@@ -44,6 +45,8 @@ export interface WriteReport {
   /** The case, present from the compile stage on, accepted or not. */
   case?: Case;
   quality?: Quality;
+  /** Things worth knowing that did not refuse the attempt, e.g. surplus suspects that were dropped. */
+  notes: string[];
   requests: number;
   /** The confirmed cost of the requests that came back. */
   costNano: number;
@@ -58,10 +61,29 @@ export interface WriteArgs {
   /** A stable id for this attempt. Its requests are "<attemptId>:skeleton" and "<attemptId>:people". */
   attemptId: string;
   brief: SkeletonBrief;
+  /**
+   * A skeleton saved from an earlier run. When given, stage 1 is skipped and nothing is sent
+   * for it: the attempt spends only the people request. It is checked again, as a new one would be.
+   */
+  skeleton?: unknown;
+  /**
+   * Called with every reply the moment it has been read as JSON, before anything judges it.
+   * A caller that pays for replies should save them here: a reply that fails a gate today
+   * may pass tomorrow's, and stage 2 can be run later from a saved skeleton.
+   */
+  onReply?: (stage: "skeleton" | "people", value: unknown) => void;
+}
+
+/** The reply with its list of suspects cut to the number asked for, and how many were cut. */
+function surplusSuspects(raw: unknown, wanted: number): { value: unknown; dropped: number } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { value: raw, dropped: 0 };
+  const suspects = (raw as { suspects?: unknown }).suspects;
+  if (!Array.isArray(suspects) || suspects.length <= wanted) return { value: raw, dropped: 0 };
+  return { value: { ...raw, suspects: suspects.slice(0, wanted) }, dropped: suspects.length - wanted };
 }
 
 export async function writeCase(args: WriteArgs): Promise<WriteReport> {
-  const report: WriteReport = { accepted: false, reasons: [], requests: 0, costNano: 0, usage: [] };
+  const report: WriteReport = { accepted: false, reasons: [], notes: [], requests: 0, costNano: 0, usage: [] };
   const stop = (failedAt: WriteStage, reasons: string[]): WriteReport => ({ ...report, failedAt, reasons });
 
   /** Send one request and read its reply as JSON. Null when the attempt must stop; the reason is already recorded. */
@@ -83,18 +105,25 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
       report.reasons = [`the ${stage} reply was cut off at the output limit`];
       return null;
     }
+    let value: unknown;
     try {
-      return JSON.parse(result.response.text ?? "") as unknown;
+      value = JSON.parse(result.response.text ?? "") as unknown;
     } catch {
       report.reasons = [`the ${stage} reply is not JSON`];
       return null;
     }
+    args.onReply?.(stage, value);
+    return value;
   };
 
-  // ---- Stage 1: the skeleton. ----
-  const rawSkeleton = await ask("skeleton", { messages: skeletonMessages(args.brief), responseSchema: skeletonRequestSchema, maxOutputTokens: SKELETON_OUTPUT_TOKENS });
+  // ---- Stage 1: the skeleton, written now or saved from an earlier run. ----
+  const rawSkeleton = args.skeleton !== undefined ? args.skeleton : await ask("skeleton", { messages: skeletonMessages(args.brief), responseSchema: skeletonRequestSchema, maxOutputTokens: SKELETON_OUTPUT_TOKENS });
   if (rawSkeleton === null) return stop("skeleton", report.reasons);
-  const skeleton = SkeletonSchema.safeParse(rawSkeleton);
+  // More people than were asked for is harmless here: no answer exists yet, so the surplus is
+  // dropped. Too few is refused below.
+  const surplus = surplusSuspects(rawSkeleton, args.brief.suspects);
+  if (surplus.dropped > 0) report.notes.push(`the skeleton had ${args.brief.suspects + surplus.dropped} suspects; the last ${surplus.dropped} were dropped`);
+  const skeleton = SkeletonSchema.safeParse(surplus.value);
   if (!skeleton.success) return stop("skeleton", skeleton.error.issues.slice(0, 8).map((i) => `skeleton: ${i.path.join(".")}: ${i.message}`));
   // Everything that can be known to be wrong with the skeleton is checked before the second request is spent on it.
   const flaws = skeletonProblems(skeleton.data, args.brief);
@@ -120,6 +149,7 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
   if (!checked.accepted) return stop("gate", checked.reasons);
   const quality = assessQuality(compiled.case);
   report.quality = quality;
+  report.notes.push(...quality.notes);
   if (quality.problems.length > 0) return stop("quality", quality.problems);
   return { ...report, accepted: true };
 }

@@ -1,7 +1,7 @@
 import { proofRules } from "../case/proof";
 import type { Case } from "../case/schema";
 import { solve } from "../case/solver";
-import { nameProblems } from "./names";
+import { nameProblems, roleNotes } from "./names";
 
 /**
  * The quality gate: what a case needs beyond being solvable.
@@ -50,7 +50,7 @@ export function assessQuality(c: Case): Quality {
   // the answer: it asks whether anyone else under suspicion states the room the culprit
   // states. If nobody does, a player who knows how cases are built can pick out the liar
   // from the statements, before any record.
-  const notes: string[] = [];
+  const notes: string[] = roleNotes(c);
   const prop = new Map(c.assertions.map((a) => [a.id, a.prop]));
   const stated = new Map<string, string>();
   for (const topic of c.actions.topics) {

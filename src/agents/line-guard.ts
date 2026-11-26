@@ -71,9 +71,21 @@ const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const wordsOf = (name: string): string[] =>
   (name.toLowerCase().match(/[a-z]+/g) ?? []).filter((w) => w.length >= 3 && !FUNCTION_WORDS.has(w));
 
-/** Every run of two or more characters in a Chinese name: a three-character name is also heard as its last two. */
+/** What can stand between the parts of a Chinese name that is written in parts: a space, a middle dot, a hyphen. */
+const NAME_SEPARATORS = /[\s·•‧・\-]+/u;
+
+/**
+ * How a Chinese name is heard.
+ *
+ * A name written as one word (马艾达) is heard in any two or more of its characters in a
+ * row, so its last two (艾达) name the person too. A name written in parts (艾德里克 塔莫林,
+ * a transliteration) is heard by each whole part and nothing shorter: such names share
+ * syllables freely, and the separator is not a character of the name.
+ */
 const piecesOf = (name: string): string[] => {
-  const chars = [...name];
+  const parts = name.split(NAME_SEPARATORS).filter(Boolean);
+  if (parts.length > 1) return parts.filter((part) => [...part].length >= 2);
+  const chars = [...(parts[0] ?? "")];
   const out: string[] = [];
   for (let size = 2; size <= chars.length; size++) {
     for (let i = 0; i + size <= chars.length; i++) out.push(chars.slice(i, i + size).join(""));

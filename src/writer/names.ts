@@ -5,8 +5,8 @@ import { hearsWord, mentions, nameForms, type Names } from "../agents/line-guard
  *
  * The guard works on words. It hears a person in any word of their English name and in any
  * two characters of their Chinese one. So a roster is only safe when no word names two
- * things, no name is an everyday word, and nobody's role or manner names anyone or
- * anywhere. These checks use the guard's own rules, so they cannot disagree with it.
+ * things, no name is an everyday word, and nobody's role or manner names another person.
+ * These checks use the guard's own rules, so they cannot disagree with it.
  */
 
 /** English words that are also names. A suspect called May gets "May I go now?" refused. */
@@ -43,16 +43,38 @@ export function nameProblems(c: Roster): string[] {
       if (inside) problems.push(`“${a.name.zh}”和“${b.name.zh}”都含有“${inside}”，说到一个就会被当成也说了另一个`);
     }
   }
-  // A role or a manner that names a person, a place or the means puts that name in a
-  // suspect's mouth before any question is asked.
+  // A role or a manner that names a person puts that person in a suspect's mouth before any
+  // question is asked.
+  for (const found of namedInRoles(c)) {
+    if (found.people.length > 0) problems.push(`the ${found.what} of "${found.who}" names a person (${found.people.join(", ")}): ${found.text}`);
+  }
+  return problems;
+}
+
+/** What each role and manner names from the case: people, and places or the means. */
+function namedInRoles(c: Roster): { who: string; what: "role" | "persona"; text: string; people: string[]; other: string[] }[] {
+  const personForms = new Set(nameForms(c).filter((f) => f.kind === "suspect").flatMap((f) => [...f.en, ...f.zh]));
+  const out: ReturnType<typeof namedInRoles> = [];
   for (const s of c.suspects) {
     for (const [what, text] of [
       ["role", s.role],
       ["persona", s.persona],
     ] as const) {
       const named = mentions(c, `${text.en}\n${text.zh}`).filter((m) => !m.startsWith("time "));
-      if (named.length > 0) problems.push(`the ${what} of "${s.name.en}" names something from the case (${named.join(", ")}): "${text.en}" / “${text.zh}”`);
+      if (named.length === 0) continue;
+      out.push({ who: s.name.en, what, text: `"${text.en}" / “${text.zh}”`, people: named.filter((m) => personForms.has(m)), other: named.filter((m) => !personForms.has(m)) });
     }
   }
-  return problems;
+  return out;
+}
+
+/**
+ * Roles and manners that name a room or the means: "Deck Officer" on a boat with a deck.
+ * These are allowed. The guard does not treat a role as something the speaker may name for
+ * free, so the only cost is that a line repeating such a role is replaced by code's sentence.
+ */
+export function roleNotes(c: Roster): string[] {
+  return namedInRoles(c)
+    .filter((found) => found.other.length > 0)
+    .map((found) => `the ${found.what} of "${found.who}" names a place or the means (${found.other.join(", ")}): a line that repeats it will be replaced by code's sentence`);
 }
