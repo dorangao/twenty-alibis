@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DEFLECTION, MAX_TURN_REQUESTS, suspectTurn, type SuspectTurnArgs } from "../src/agents/suspect-turn";
+import { guardLine } from "../src/agents/line-guard";
+import { deflection, DEFLECTIONS, MAX_TURN_REQUESTS, suspectTurn, type SuspectTurnArgs } from "../src/agents/suspect-turn";
 import { startingHeld } from "../src/case/access";
 import { archivePass } from "../src/case/fixtures/archive";
 import type { Case } from "../src/case/schema";
@@ -7,7 +8,7 @@ import { createMetered, type TraceEvent } from "../src/metered";
 import { FakeProvider } from "../src/provider/fake";
 import type { ProviderResponse } from "../src/provider/types";
 import { usdToNano } from "../src/spend/pricing";
-import { MemorySpendStore } from "../src/spend/store";
+import { MemorySpendStore, type SpendStore } from "../src/spend/store";
 
 const c = archivePass;
 const usage = { inputTokens: 1_000, cachedTokens: 0, outputTokens: 60 };
@@ -25,7 +26,7 @@ const answer = (assertions: string[], line: string): ProviderResponse => ({ text
 const text = (line: string): ProviderResponse => ({ text: line, toolCalls: [], usage, finishReason: "stop" });
 const cutOff = (): ProviderResponse => ({ text: null, toolCalls: [], usage, finishReason: "length" });
 
-function setup(replies: (ProviderResponse | Error)[], options: { killSwitch?: () => boolean } = {}) {
+function setup(replies: (ProviderResponse | Error)[], options: { killSwitch?: () => boolean; store?: SpendStore } = {}) {
   const provider = new FakeProvider((_request, index) => {
     const reply = replies[Math.min(index, replies.length - 1)]!;
     if (reply instanceof Error) throw reply;
@@ -35,7 +36,7 @@ function setup(replies: (ProviderResponse | Error)[], options: { killSwitch?: ()
   const metered = createMetered({
     inputBound: { tokensPerByte: 100 },
     provider,
-    store: new MemorySpendStore(),
+    store: options.store ?? new MemorySpendStore(),
     envelope: "e",
     limitNano: usdToNano(1),
     trace: (e) => trace.push(e),
@@ -166,55 +167,75 @@ describe("a suspect turn: a line that fails is retried once, then replaced", () 
   });
 });
 
-describe("a suspect turn: when no topic fits", () => {
-  it("shows the model's deflection and records no statement", async () => {
-    const { ask } = setup([recall("none"), answer([], "I don't know who did it. Stop rushing me.")]);
-    expect(await ask({ question: "Who killed Mr. Shen?" })).toMatchObject({ topic: null, statements: [], line: "I don't know who did it. Stop rushing me.", source: "model", requests: 2 });
-  });
-
-  it("replaces a deflection that names anyone or anything with a fixed line", async () => {
-    const blame = answer([], "Ask Ben. He was in the foyer.");
-    const { ask } = setup([recall("none"), blame, blame]);
+describe("a suspect turn: when there is nothing to state", () => {
+  it("gives a fixed line and does not ask the model for one", async () => {
+    const { ask, provider } = setup([recall("none"), answer([], "I signed for a parcel.")]);
     const turn = await ask({ question: "Who killed Mr. Shen?" });
-    expect(turn).toMatchObject({ statements: [], line: DEFLECTION.en, source: "deflection", requests: 3 });
-    const zh = setup([recall("none"), blame, blame]);
-    expect(await zh.ask({ question: "是谁杀了沈先生？" })).toMatchObject({ line: DEFLECTION.zh, source: "deflection" });
+    expect(turn).toMatchObject({ topic: null, statements: [], source: "deflection", requests: 1, costNano: PRICE });
+    expect(DEFLECTIONS.en).toContain(turn.line);
+    expect(turn.problem).toBeUndefined();
+    // One request: the topic. No answer request follows.
+    expect(provider.dispatched).toBe(1);
+
+    const zh = setup([recall("none")]);
+    const zhTurn = await zh.ask({ question: "是谁杀了沈先生？" });
+    expect(DEFLECTIONS.zh).toContain(zhTurn.line);
+    expect(zhTurn.language).toBe("zh");
   });
 
   it("treats a topic that is not on this suspect's menu as no topic", async () => {
     for (const topic of ["t-ben-2100", "t-made-up"]) {
       const { ask, provider } = setup([recall(topic), answer([], "I can't help you there.")]);
-      expect(await ask(), topic).toMatchObject({ topic: null, statements: [], source: "model" });
-      expect(provider.requests[1]!.messages.at(-1)!.content, topic).toBe('{"topic":"none","statements":[]}');
+      expect(await ask(), topic).toMatchObject({ topic: null, statements: [], source: "deflection", requests: 1 });
+      expect(provider.dispatched, topic).toBe(1);
     }
   });
 
   it("treats a locked topic exactly like one that does not exist, until it is unlocked", async () => {
     const gated: Case = { ...c, actions: { ...c.actions, topics: c.actions.topics.map((t) => (t.id === "t-ada-2100" ? { ...t, requires: ["e-attendance-log"] } : t)) } };
     const locked = setup([recall("t-ada-2100"), answer([], "I can't help you there.")]);
-    expect(await locked.ask({ c: gated })).toMatchObject({ topic: null, statements: [] });
+    expect(await locked.ask({ c: gated })).toMatchObject({ topic: null, statements: [], source: "deflection", requests: 1 });
     expect(locked.provider.bodies.join("\n")).not.toContain("a-ada-foyer-2100");
 
     const open = setup([recall("t-ada-2100"), answer(["a-ada-foyer-2100"], GOOD)]);
     expect(await open.ask({ c: gated, held: new Set([...startingHeld(gated), "e-attendance-log"]) })).toMatchObject({ topic: "t-ada-2100", source: "model" });
   });
 
-  it("takes text sent instead of a tool call as a line that may state nothing", async () => {
-    const plain = setup([text("I have nothing to say to you.")]);
-    expect(await plain.ask()).toMatchObject({ topic: null, statements: [], line: "I have nothing to say to you.", source: "model", requests: 1 });
+  it("never shows text the model sent instead of calling recall, however harmless it looks", async () => {
+    for (const line of ["I have nothing to say to you.", "I signed for a parcel.", "I was in the foyer at 21:00."]) {
+      const { ask, provider } = setup([text(line)]);
+      const turn = await ask();
+      expect(turn, line).toMatchObject({ topic: null, statements: [], source: "deflection", requests: 1 });
+      expect(turn.rejections, line).toEqual([{ from: "recall", reason: "no-recall", detail: "" }]);
+      expect(JSON.stringify(turn), line).not.toContain(line);
+      expect(provider.dispatched, line).toBe(1);
+    }
+  });
 
-    // The model stated a fact without calling recall: the fact is not in the notebook and the line is not shown.
-    const fact = setup([text("I was in the foyer at 21:00.")]);
-    const turn = await fact.ask();
-    expect(turn).toMatchObject({ statements: [], line: DEFLECTION.en, source: "deflection", requests: 1 });
-    expect(turn.rejections).toEqual([{ from: "recall", reason: "uncovered", detail: "foyer, time 9:00" }]);
+  it("never shows text that came with a call to some other tool", async () => {
+    const other: ProviderResponse = { text: "Internal draft.", toolCalls: [{ id: "x", name: "other_tool", arguments: "{}" }], usage, finishReason: "tool_calls" };
+    const { ask, provider } = setup([other]);
+    const turn = await ask();
+    expect(turn).toMatchObject({ topic: null, statements: [], source: "deflection", requests: 1 });
+    expect(turn.rejections).toEqual([{ from: "recall", reason: "no-recall", detail: "other_tool" }]);
+    expect(JSON.stringify(turn)).not.toContain("Internal draft");
+    expect(provider.dispatched).toBe(1);
   });
 
   it("falls back when the topic request is cut off", async () => {
     const { ask } = setup([cutOff()]);
     const turn = await ask();
-    expect(turn).toMatchObject({ statements: [], line: DEFLECTION.en, source: "deflection", requests: 1 });
+    expect(turn).toMatchObject({ statements: [], source: "deflection", requests: 1 });
     expect(turn.rejections).toEqual([{ from: "recall", reason: "truncated", detail: "" }]);
+  });
+
+  it("picks the fixed line from the turn id alone, so a turn always gets the same one", () => {
+    expect(deflection("en", "s1:1")).toBe(deflection("en", "s1:1"));
+    expect(DEFLECTIONS.en.indexOf(deflection("en", "s1:1"))).toBe(DEFLECTIONS.zh.indexOf(deflection("zh", "s1:1")));
+    const seen = new Set(["s1:1", "s1:2", "s1:3", "s1:4", "s1:5", "s1:6"].map((id) => deflection("en", id)));
+    expect(seen.size).toBe(DEFLECTIONS.en.length);
+    // Every fixed line passes the guard as a line that states nothing.
+    for (const lang of ["en", "zh"] as const) for (const line of DEFLECTIONS[lang]) expect(guardLine(c, "s-ada", [], line, lang), line).toEqual({ ok: true });
   });
 });
 
@@ -259,7 +280,9 @@ describe("a suspect turn: when a request is refused or fails", () => {
 
   it("with no topic yet, gives the fixed line and no statement", async () => {
     const { ask, provider } = setup([recall("t-ada-2100")], { killSwitch: () => true });
-    expect(await ask()).toMatchObject({ statements: [], line: DEFLECTION.en, source: "deflection", requests: 0, problem: "refused:kill-switch" });
+    const turn = await ask();
+    expect(turn).toMatchObject({ statements: [], source: "deflection", requests: 0, problem: "refused:kill-switch" });
+    expect(DEFLECTIONS.en).toContain(turn.line);
     expect(provider.dispatched).toBe(0);
   });
 
@@ -278,5 +301,49 @@ describe("a suspect turn: when a request is refused or fails", () => {
     expect(provider.dispatched).toBe(1);
     expect(again).toMatchObject({ source: "rendered", requests: 0, problem: "refused:duplicate-attempt" });
     expect(again.statements.map((s) => s.assertion)).toEqual(["a-ada-foyer-2100"]);
+  });
+});
+
+describe("a suspect turn: when a reply comes back but its cost is not confirmed", () => {
+  /** A store whose first settlement fails after the reply has arrived. */
+  const pendingFirst = () => {
+    const store = new MemorySpendStore();
+    const settle = store.settle.bind(store);
+    let first = true;
+    store.settle = async (settleArgs) => {
+      if (first) {
+        first = false;
+        throw new Error("settlement acknowledgement unavailable");
+      }
+      return settle(settleArgs);
+    };
+    return store;
+  };
+
+  it("an unsettled topic request ends the turn: no answer is asked for, and no cost is reported as confirmed", async () => {
+    const { ask, provider } = setup([recall("t-ada-2100"), answer(["a-ada-foyer-2100"], GOOD)], { store: pendingFirst() });
+    const turn = await ask();
+    expect(turn).toMatchObject({ topic: "t-ada-2100", line: RENDERED_EN, source: "rendered", requests: 1, costNano: 0, problem: "unconfirmed:not-settled" });
+    expect(turn.statements.map((s) => s.assertion)).toEqual(["a-ada-foyer-2100"]);
+    expect(provider.dispatched).toBe(1);
+  });
+
+  it("an unsettled answer may still be shown, but it is not retried", async () => {
+    const good = setup([answer(["a-ada-foyer-2100"], GOOD)], { store: pendingFirst() });
+    expect(await good.ask({ topic: "t-ada-2100" })).toMatchObject({ line: GOOD, source: "model", requests: 1, costNano: 0, problem: "unconfirmed:not-settled" });
+
+    const bad = setup([answer(["a-ada-foyer-2100"], "I was in the foyer at 21:00 with Ben."), answer(["a-ada-foyer-2100"], GOOD)], { store: pendingFirst() });
+    const turn = await bad.ask({ topic: "t-ada-2100" });
+    expect(turn).toMatchObject({ line: RENDERED_EN, source: "rendered", requests: 1, problem: "unconfirmed:not-settled" });
+    expect(bad.provider.dispatched).toBe(1);
+  });
+
+  it("a reply that suspends the envelope ends the turn", async () => {
+    // The reply bills more output than the request's limit allows: the guard suspends the envelope.
+    const overLimit: ProviderResponse = { ...recall("t-ada-2100"), usage: { inputTokens: 1_000, cachedTokens: 0, outputTokens: 5_000 } };
+    const { ask, provider } = setup([overLimit, answer(["a-ada-foyer-2100"], GOOD)]);
+    const turn = await ask();
+    expect(turn).toMatchObject({ line: RENDERED_EN, source: "rendered", requests: 1, costNano: 0, problem: "unconfirmed:envelope-suspended" });
+    expect(provider.dispatched).toBe(1);
   });
 });
