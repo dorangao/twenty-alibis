@@ -136,6 +136,28 @@ export function planTrial(config: TrialConfig, stored: readonly StoredAttempt[])
   return { rows, unresolved, most: unresolved.length > 0 ? 0 : rows.reduce((sum, r) => sum + r.standing.most, 0) };
 }
 
+/**
+ * One attempt's writing, with everything it produces saved: each reply as it arrives, and
+ * at the end whatever the attempt got to. If that is a case, its file holds the answer.
+ */
+export async function writeAttempt(config: TrialConfig, attempt: TrialAttempt, standing: Exclude<Standing, { kind: "closed" }>, metered: Metered): Promise<WriteReport> {
+  const brief = briefOf(config, attempt);
+  const report = await writeCase({
+    metered,
+    attemptId: attempt.id,
+    brief,
+    // A resumed attempt keeps the salt its skeleton was saved with: one attempt, one salt.
+    ...(standing.kind === "resume" ? { skeleton: standing.skeleton, ...(standing.salt ? { salt: standing.salt } : {}) } : {}),
+    // Saved before anything parses or judges it.
+    onReply: (reply) => writeWhole(replyPath(config, attempt.id, reply.stage), `${JSON.stringify({ ...reply, brief, shuffleVersion: SHUFFLE_VERSION } satisfies SavedReply, null, 2)}\n`),
+  });
+  writeWhole(
+    reportPath(config, attempt.id),
+    `${JSON.stringify({ accepted: report.accepted, failedAt: report.failedAt ?? null, problem: report.problem ?? null, reasons: report.reasons, notes: report.notes, quality: report.quality ?? null, usage: report.usage, salt: report.salt, shuffleVersion: SHUFFLE_VERSION, case: report.case ?? null }, null, 2)}\n`,
+  );
+  return report;
+}
+
 export interface TrialRun {
   reports: { attempt: TrialAttempt; resumed: boolean; ms: number; report: WriteReport }[];
   /** Set when the run ended early because a request was refused, failed or came back unconfirmed. */
@@ -155,24 +177,10 @@ export async function runTrial(config: TrialConfig, deps: { metered: Metered; st
   const run: TrialRun = { reports: [], blocked: false };
   for (const { attempt, standing } of plan.rows) {
     if (standing.kind === "closed") continue;
-    const brief = briefOf(config, attempt);
     const started = now();
-    const report = await writeCase({
-      metered: deps.metered,
-      attemptId: attempt.id,
-      brief,
-      // A resumed attempt keeps the salt its skeleton was saved with: one attempt, one salt.
-      ...(standing.kind === "resume" ? { skeleton: standing.skeleton, ...(standing.salt ? { salt: standing.salt } : {}) } : {}),
-      // Saved before anything parses or judges it.
-      onReply: (reply) => writeWhole(replyPath(config, attempt.id, reply.stage), `${JSON.stringify({ ...reply, brief, shuffleVersion: SHUFFLE_VERSION } satisfies SavedReply, null, 2)}\n`),
-    });
+    const report = await writeAttempt(config, attempt, standing, deps.metered);
     const entry = { attempt, resumed: standing.kind === "resume", ms: now() - started, report };
     run.reports.push(entry);
-    // Whatever the attempt got to. If that is a case, the file holds its answer.
-    writeWhole(
-      reportPath(config, attempt.id),
-      `${JSON.stringify({ accepted: report.accepted, failedAt: report.failedAt ?? null, problem: report.problem ?? null, reasons: report.reasons, notes: report.notes, quality: report.quality ?? null, usage: report.usage, salt: report.salt, shuffleVersion: SHUFFLE_VERSION, case: report.case ?? null }, null, 2)}\n`,
-    );
     deps.onAttempt?.(entry);
     if (report.problem) {
       run.stoppedBy = report.problem;

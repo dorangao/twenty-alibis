@@ -3,6 +3,7 @@ import { accuse, actionsLeft, ask, inspect, inspectionMenu, notebook, SessionErr
 import { noModel } from "../game/terminal";
 import type { Metered } from "../metered";
 import type { ChatMessage } from "../provider/types";
+import type { Usage } from "../spend/pricing";
 
 /**
  * A detective that plays a case the way a player does.
@@ -73,6 +74,23 @@ export interface DetectiveArgs {
   /** The most turns it may take. Defaults to the session cap plus two. */
   maxTurns?: number;
   cacheKey?: string;
+  /**
+   * Called with every reply of the detective's the moment it arrives, before it is read or
+   * acted on. A caller that pays for replies saves them here.
+   */
+  onReply?: (reply: DetectiveReply) => void;
+}
+
+/** One reply of the detective's exactly as it arrived. */
+export interface DetectiveReply {
+  attemptId: string;
+  turn: number;
+  /** The reply's text, untouched. Null when the model sent none. */
+  text: string | null;
+  finishReason: string | undefined;
+  usage: Usage | undefined;
+  settled: boolean;
+  breached: boolean;
 }
 
 const object = (properties: Record<string, unknown>) => ({ type: "object", additionalProperties: false, required: Object.keys(properties), properties });
@@ -213,6 +231,7 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
       return report("no-accusation");
     }
     requests++;
+    args.onReply?.({ attemptId: `${args.gameId}:d${turn}`, turn, text: result.response.text, finishReason: result.response.finishReason, usage: result.response.usage, settled: result.settled, breached: result.breached });
     if (result.settled) costNano += result.costNano;
     if (result.breached) problem = "envelope-suspended";
     else if (!result.settled) problem = "unconfirmed:not-settled";
@@ -231,7 +250,8 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
     };
     type Reply = { action?: unknown; topic?: unknown; inspection?: unknown; person?: unknown; cite?: unknown };
     const read = (): Reply | null => {
-      if (result.response.finishReason === "length") return null;
+      // Only a reply the model says it finished is read.
+      if (result.response.finishReason !== "stop") return null;
       try {
         const parsed = JSON.parse(result.response.text ?? "") as unknown;
         return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Reply) : null;
@@ -241,7 +261,10 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
     };
     const reply = read();
     let stop = false;
-    if (!reply) stop = waste(result.response.finishReason === "length" ? "the reply was cut off at the output limit" : "the reply was not the object asked for");
+    if (!reply) {
+      const finish = result.response.finishReason;
+      stop = waste(finish === "length" ? "the reply was cut off at the output limit" : finish !== "stop" ? `the reply did not end normally (finish: ${finish ?? "not given"})` : "the reply was not the object asked for");
+    }
     else {
       try {
         if (reply.action === "ask") {
