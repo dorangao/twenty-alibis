@@ -10,7 +10,7 @@ import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
 import { plotIds, type People, type Skeleton } from "../src/writer/plot";
 import { assessQuality } from "../src/writer/quality";
-import { rosterOrder, shufflePlot } from "../src/writer/shuffle";
+import { rosterOrder, shufflePlot, shuffleRoster } from "../src/writer/shuffle";
 import { writeCase } from "../src/writer/write";
 
 /**
@@ -93,6 +93,14 @@ describe("the roster is put in an order that has nothing to do with the plot", (
     expect(shortlistFirstFour).toBeLessThanOrEqual(1);
   });
 
+  it("reorders a skeleton before the plot exists, changing nothing but the order", () => {
+    const moved = shuffleRoster("writer-b-1:before", lighthouseSkeleton);
+    expect(moved.suspects).not.toEqual(lighthouseSkeleton.suspects);
+    expect([...moved.suspects].sort((x, y) => x.name.en.localeCompare(y.name.en))).toEqual([...lighthouseSkeleton.suspects].sort((x, y) => x.name.en.localeCompare(y.name.en)));
+    expect({ ...moved, suspects: [] }).toEqual({ ...lighthouseSkeleton, suspects: [] });
+    expect(shuffleRoster("writer-b-1:before", lighthouseSkeleton)).toEqual(moved);
+  });
+
   it("leaves a plot with missing or doubled rows as it is, for the compiler to refuse", () => {
     const missing: People = { ...modelLike.people, suspects: modelLike.people.suspects.slice(1) };
     expect(shufflePlot("s", modelLike.skeleton, missing)).toEqual({ skeleton: modelLike.skeleton, people: missing });
@@ -103,28 +111,60 @@ describe("the roster is put in an order that has nothing to do with the plot", (
   });
 });
 
-describe("the writer applies it", () => {
+describe("the writer applies it, before and after the plot is written", () => {
   const usage = { inputTokens: 900, cachedTokens: 0, outputTokens: 3_000 };
-  const reply = (request: ProviderRequest): ProviderResponse => ({ text: JSON.stringify(request.responseSchema?.name === "case_skeleton" ? modelLike.skeleton : modelLike.people), toolCalls: [], usage, finishReason: "stop" });
-  const write = (attemptId: string) => {
-    const metered = createMetered({ inputBound: { tokensPerByte: 100 }, provider: new FakeProvider(reply), store: new MemorySpendStore(), envelope: "e", limitNano: usdToNano(1) });
-    return writeCase({ metered, attemptId, brief: { theme: "a lighthouse", suspects: 20, rooms: 5 } });
+  /**
+   * A model with the habit: whatever people it is shown, the first is the culprit and the
+   * first four have means and motive. It names people in alphabetical order, as two real
+   * rosters did: the handwritten skeleton's given names already run from Aldric to Tamsin.
+   */
+  const habitual = (request: ProviderRequest): ProviderResponse => ({ text: JSON.stringify(request.responseSchema?.name === "case_skeleton" ? lighthouseSkeleton : modelLike.people), toolCalls: [], usage, finishReason: "stop" });
+  const write = async (attemptId: string) => {
+    const provider = new FakeProvider(habitual);
+    const metered = createMetered({ inputBound: { tokensPerByte: 100 }, provider, store: new MemorySpendStore(), envelope: "e", limitNano: usdToNano(1) });
+    return { report: await writeCase({ metered, attemptId, brief: { theme: "a lighthouse", suspects: 20, rooms: 5 } }), provider };
   };
+  const alphabetical = lighthouseSkeleton.suspects.map((x) => x.name.en).sort();
 
-  it("so a culprit the model put first does not stay first, and the attempt id decides where they go", async () => {
-    const a = await write("writer-b-1");
-    const b = await write("writer-b-2");
-    const again = await write("writer-b-1");
-    for (const report of [a, b, again]) {
-      expect(report.accepted).toBe(true);
-      expect(culpritName(report.case!)).toBe("Cormac Brandt");
-      expect(report.quality!.shortlist).toHaveLength(4);
+  it("shows the model the people in a seeded order, not the order it named them in", async () => {
+    const { provider } = await write("writer-b-1");
+    const shown = provider.requests[1]!.messages.at(-1)!.content.split("\n").filter((line) => line.startsWith("- s-")).map((line) => line.replace(/^- s-\d+: /, "").split(",")[0]!);
+    expect(shown).toHaveLength(20);
+    expect([...shown].sort()).toEqual(alphabetical);
+    expect(shown).not.toEqual(lighthouseSkeleton.suspects.map((x) => x.name.en));
+    expect(shown[0]).not.toBe("Aldric Varga");
+  });
+
+  it("so neither the culprit's name nor their place follows the model's habit", async () => {
+    const names = new Map<string, number>();
+    const places = new Map<string, number>();
+    let firstNamed = 0;
+    for (let i = 0; i < 80; i++) {
+      const { report } = await write(`writer-${i}`);
+      expect(report.accepted, `writer-${i}`).toBe(true);
+      const c = report.case!;
+      const who = culpritName(c);
+      names.set(who, (names.get(who) ?? 0) + 1);
+      places.set(c.culprit.suspect, (places.get(c.culprit.suspect) ?? 0) + 1);
+      if (who === alphabetical[0]) firstNamed++;
+      expect(report.quality!.shortlist, `writer-${i}`).toHaveLength(4);
     }
-    expect(a.case!.culprit.suspect).not.toBe("s-01");
-    expect(b.case!.culprit.suspect).not.toBe(a.case!.culprit.suspect);
-    // The same attempt id rebuilds the same case.
-    expect(again.case).toEqual(a.case);
-    // The register no longer lists the shortlist first.
-    expect(a.case!.evidence.find((e) => e.id === "e-register")!.text.en).not.toContain("held by Cormac Brandt, Aldric Varga, Gideon Petrov, Leonie Eklund");
+    // Over 80 cases the culprit is many different people, in many different places.
+    expect(names.size).toBeGreaterThanOrEqual(15);
+    expect(places.size).toBeGreaterThanOrEqual(15);
+    // The person the model named first did it about as often as anyone: 4 in 80 on average.
+    expect(firstNamed).toBeLessThan(12);
+    expect(Math.max(...names.values())).toBeLessThan(12);
+    expect(Math.max(...places.values())).toBeLessThan(12);
+  });
+
+  it("rebuilds the same case from the same attempt id", async () => {
+    const a = await write("writer-b-1");
+    const again = await write("writer-b-1");
+    const b = await write("writer-b-2");
+    expect(again.report.case).toEqual(a.report.case);
+    expect(culpritName(b.report.case!) === culpritName(a.report.case!) && b.report.case!.culprit.suspect === a.report.case!.culprit.suspect).toBe(false);
+    // The second request is the same too, so a saved skeleton resumes to the same plot.
+    expect(again.provider.bodies[1]).toBe(a.provider.bodies[1]);
   });
 });

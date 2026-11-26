@@ -5,13 +5,13 @@ import type { Usage } from "../spend/pricing";
 import { compilePlot } from "./compile";
 import { peopleMessages, peopleRequestSchema, PeopleSchema, plotIds, skeletonMessages, skeletonRequestSchema, SkeletonSchema, type Skeleton, type SkeletonBrief } from "./plot";
 import { assessQuality, type Quality } from "./quality";
-import { shufflePlot } from "./shuffle";
+import { shufflePlot, shuffleRoster } from "./shuffle";
 import { skeletonProblems } from "./skeleton";
 
 /**
  * One attempt at a new case: two requests to the model, then code.
  *
- *   skeleton request -> parse -> people request -> parse -> shuffle the roster -> compile -> checkCase -> quality gate
+ *   skeleton request -> parse -> reorder the roster -> people request -> parse -> reorder again -> compile -> checkCase -> quality gate
  *
  * The attempt stops at the first stage that fails and says which one, so a run of attempts
  * can report where plots go wrong. There is no repair here: a failed attempt is a failed
@@ -168,8 +168,11 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
   if (report.problem) return stop("skeleton", [`stopped after the skeleton: ${report.problem}`]);
 
   // ---- Stage 2: the people. The schema offers only the ids code gave to the skeleton. ----
-  const ids = plotIds(checked.skeleton);
-  const second = await ask("people", { messages: peopleMessages(checked.skeleton, ids), responseSchema: peopleRequestSchema(ids), maxOutputTokens: PEOPLE_OUTPUT_TOKENS });
+  // The model is shown the people in a seeded order, not the order it named them in: it
+  // tends to pick the first one it sees, and the first it named is recognizable by name.
+  const presented = shuffleRoster(`${args.attemptId}:before`, checked.skeleton);
+  const ids = plotIds(presented);
+  const second = await ask("people", { messages: peopleMessages(presented, ids), responseSchema: peopleRequestSchema(ids), maxOutputTokens: PEOPLE_OUTPUT_TOKENS });
   if (second === null) return stop("people", report.reasons);
   const people = PeopleSchema.safeParse(second.value);
   if (!people.success) return stop("people", people.error.issues.slice(0, 8).map((i) => `people: ${i.path.join(".") || "(the whole reply)"}: ${i.message}`));
@@ -178,9 +181,9 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
   if (report.problem) return stop("people", [`the people reply came back, but the attempt is not judged: ${report.problem}`]);
 
   // ---- Code from here on. ----
-  // The model tends to put the culprit first. Reorder the people by a seed, so a person's
-  // place in the list says nothing about the plot. The attempt id is the seed.
-  const plot = shufflePlot(args.attemptId, checked.skeleton, people.data);
+  // Reorder the people once more, so a person's place in the finished case says nothing
+  // about the plot either. The attempt id seeds both reorderings.
+  const plot = shufflePlot(`${args.attemptId}:after`, presented, people.data);
   const compiled = compilePlot(args.attemptId, plot.skeleton, plot.people);
   if (!compiled.ok) return stop("compile", compiled.problems);
   report.case = compiled.case;

@@ -9,10 +9,15 @@ import { plotIds, type People, type Skeleton } from "./plot";
  * the next case from the list alone, and the briefing's own records list people in roster
  * order, so they would point the same way.
  *
- * So after the model has written who did it, code reorders the people. The order comes
- * from a seed, by a fixed rule, so the same seed always gives the same case and a case can
- * be rebuilt. Nothing else about the plot changes: each person keeps their name, voice,
- * whereabouts, means and motive. Only their place in the list, and so their id, moves.
+ * So code reorders the people twice, each time by a seed and a fixed rule, so the same seed
+ * always gives the same case and a case can be rebuilt:
+ *
+ *  - before the second request (`shuffleRoster`), so that who the model lists first when it
+ *    decides the plot is not who it named first;
+ *  - after it (`shufflePlot`), so that a person's place in the finished case says nothing
+ *    about the plot.
+ *
+ * Nothing else changes: each person keeps their name, voice, whereabouts, means and motive.
  */
 
 /** A small, fixed generator of numbers from a string. The same seed always gives the same sequence. */
@@ -42,6 +47,20 @@ export function rosterOrder(seed: string, size: number): number[] {
     [order[i], order[j]] = [order[j]!, order[i]!];
   }
   return order;
+}
+
+/**
+ * The skeleton with its people in the seeded order, before anyone has decided who did it.
+ *
+ * Reordering after the plot is written hides the culprit's place in the list, but not a
+ * second trace: the model names people in a recognizable order (two real rosters ran
+ * through the alphabet) and then picks the first one it named. Sorted by name, the culprit
+ * was still first. So the list is reordered before the second request as well: the person
+ * the model then sees first is no longer the first it named.
+ */
+export function shuffleRoster(seed: string, skeleton: Skeleton): Skeleton {
+  const order = rosterOrder(seed, skeleton.suspects.length);
+  return { ...skeleton, suspects: order.map((from) => skeleton.suspects[from]!) };
 }
 
 /**
