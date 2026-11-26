@@ -9,9 +9,10 @@ import { renderAssertion, type Lang } from "./render";
  *
  * What the guard can do: it works on words. It knows the case's closed vocabulary (people,
  * places, times, the means) and refuses a line that names any of it beyond what the accepted
- * statements already say. It also refuses a line that leaves a statement's place or object
- * out, flips a statement with a "not", claims to have been alone, is in the wrong language,
- * is too long, or steps out of character.
+ * statements already say. It also refuses a line that leaves a statement's place, object or
+ * motive out, flips a statement with a "not", names the wrong half of the day ("09:00" for
+ * 21:00), claims to have been alone, is in the wrong language, is too long, or steps out of
+ * character.
  *
  * What it cannot do: judge meaning. A line can add or bend a fact in words the vocabulary
  * does not know. So the game's promise does not rest on the line: the notebook is rendered
@@ -148,27 +149,46 @@ const zhNumber = (text: string): number | null => {
 const HOUR_WORD = Object.keys(HOUR_WORDS).join("|");
 const MINUTE_WORD = "thirty|fifteen|forty[- ]five|twenty|forty|ten";
 const ZH_NUM = "(?:\\d{1,2}|[零〇一二两三四五六七八九十]{1,3})";
-const TIME_PATTERNS: { pattern: RegExp; read(m: RegExpExecArray): [number, number] | null }[] = [
+/** Which half of the day a time was said to be in, when the text says so. */
+type Half = "am" | "pm" | undefined;
+type Read = [hour: number, minute: number, half?: Half];
+
+const suffixHalf = (text: string | undefined): Half => (!text ? undefined : /^a/i.test(text) ? "am" : /^p/i.test(text) ? "pm" : undefined);
+/** "21:00" is the evening and "09:00" the morning. A bare "9:00" does not say. */
+const clockHalf = (digits: string): Half => {
+  const hour = Number(digits);
+  if (hour >= 12) return "pm";
+  return hour === 0 || digits.length === 2 ? "am" : undefined;
+};
+
+const TIME_PATTERNS: { pattern: RegExp; read(m: RegExpExecArray): Read | null }[] = [
   // 21:00, 9：30, 9.30
-  { pattern: /(?<!\d)(\d{1,2})[:：.](\d{2})(?!\d)/g, read: (m) => [Number(m[1]), Number(m[2])] },
+  { pattern: /(?<!\d)(\d{1,2})[:：.](\d{2})(?!\d)/g, read: (m) => [Number(m[1]), Number(m[2]), clockHalf(m[1]!)] },
   // 9 pm, 9 o'clock
-  { pattern: /(?<![\d:：.])(\d{1,2})\s*(?:a\.?m\b|p\.?m\b|o['’]?clock)/gi, read: (m) => [Number(m[1]), 0] },
+  { pattern: /(?<![\d:：.])(\d{1,2})\s*(a\.?m\b|p\.?m\b|o['’]?clock)/gi, read: (m) => [Number(m[1]), 0, Number(m[1]) > 12 ? "pm" : suffixHalf(m[2])] },
   // at 9, around 9
-  { pattern: /\b(?:at|around|about|by|before|after|until|till)\s+(\d{1,2})\b(?![:：.]\d)/gi, read: (m) => [Number(m[1]), 0] },
+  {
+    pattern: /\b(?:at|around|about|by|before|after|until|till)\s+(\d{1,2})\b(?![:：.]\d)/gi,
+    read: (m) => [Number(m[1]), 0, Number(m[1]) > 12 ? "pm" : undefined],
+  },
   // half past nine
   { pattern: new RegExp(`\\bhalf\\s+past\\s+(${HOUR_WORD}|\\d{1,2})\\b`, "gi"), read: (m) => [HOUR_WORDS[m[1]!.toLowerCase()] ?? Number(m[1]), 30] },
   // nine thirty, nine o'clock, nine pm
   {
     pattern: new RegExp(`\\b(${HOUR_WORD})[\\s-]+(${MINUTE_WORD}|o['’]?clock|a\\.?m\\b|p\\.?m\\b)`, "gi"),
-    read: (m) => [HOUR_WORDS[m[1]!.toLowerCase()]!, MINUTE_WORDS[m[2]!.toLowerCase().replace("-", " ")] ?? MINUTE_WORDS[m[2]!.toLowerCase()] ?? 0],
+    read: (m) => {
+      const tail = m[2]!.toLowerCase();
+      return [HOUR_WORDS[m[1]!.toLowerCase()]!, MINUTE_WORDS[tail.replace("-", " ")] ?? MINUTE_WORDS[tail] ?? 0, /^[ap]\.?m/.test(tail) ? suffixHalf(tail) : undefined];
+    },
   },
   // at nine, around noon. Not "at one": "one" after these words is rarely a time ("at one point").
   {
     pattern: new RegExp(`\\b(?:at|around|about|by|before|after|until|till)\\s+(?!one\\b)(${HOUR_WORD})\\b(?![\\s-]+(?:${MINUTE_WORD})\\b)`, "gi"),
     read: (m) => [HOUR_WORDS[m[1]!.toLowerCase()]!, 0],
   },
-  // noon, midnight, 中午, 午夜
-  { pattern: /\b(?:noon|midday|midnight)\b|正午|中午|午夜|半夜/gi, read: () => [12, 0] },
+  // noon, 中午: twelve in the day. midnight, 午夜: twelve at night.
+  { pattern: /\b(?:noon|midday)\b|正午|中午/gi, read: () => [12, 0, "pm"] },
+  { pattern: /\bmidnight\b|午夜|半夜/gi, read: () => [0, 0, "am"] },
   // 九点, 9点半, 九点二十, 21时. A bare "一点" is skipped: it usually means "a little".
   {
     pattern: new RegExp(`(${ZH_NUM})\\s*(点|點|时(?=[^候间期代刻]|$))(半|一刻|三刻|${ZH_NUM})?(钟|整|分)?`, "g"),
@@ -179,22 +199,48 @@ const TIME_PATTERNS: { pattern: RegExp; read(m: RegExpExecArray): [number, numbe
       if (m[1] === "一" && !m[3] && !m[4]) return null;
       const tail = m[3];
       const minute = !tail ? 0 : tail === "半" ? 30 : tail === "一刻" ? 15 : tail === "三刻" ? 45 : zhNumber(tail);
-      return minute === null ? null : [hour, minute];
+      return minute === null ? null : [hour, minute, hour > 12 ? "pm" : undefined];
     },
   },
 ];
 
-/** Every clock time a text mentions, on a twelve-hour face: "21:00", "nine" and "九点" are the same time. */
+const MORNING = /上午|早上|早晨|清晨|凌晨|\bmorning\b|\ba\.?m\b/i;
+const EVENING = /下午|晚上|傍晚|夜里|夜晚|今晚|当晚|晚间|\bafternoon\b|\bevening\b|\bnight\b|\btonight\b|\bp\.?m\b/i;
+/** The half of the day named just before or just after a time: "上午九点", "nine in the morning". */
+const nearbyHalf = (text: string, start: number, end: number): Half => {
+  for (const near of [text.slice(Math.max(0, start - 16), start), text.slice(end, end + 24)]) {
+    const morning = MORNING.test(near);
+    const evening = EVENING.test(near);
+    if (morning !== evening) return morning ? "am" : "pm";
+  }
+  return undefined;
+};
+
+/**
+ * Every clock time a text mentions. "21:00", "nine" and "九点" name the same hour. When the
+ * text says which half of the day it means ("09:00", "9 a.m.", "上午九点", "21:00"), that is
+ * kept: `time 9:00 am` and `time 9:00 pm` are different times, and a bare `time 9:00` fits either.
+ */
 function timesIn(text: string): string[] {
   const found = new Set<string>();
   for (const { pattern, read } of TIME_PATTERNS) {
     pattern.lastIndex = 0;
     for (let m = pattern.exec(text); m; m = pattern.exec(text)) {
       const time = read(m);
-      if (time && time[0] <= 24 && time[1] < 60) found.add(`time ${time[0] % 12}:${String(time[1]).padStart(2, "0")}`);
+      if (!time || time[0] > 24 || time[1] >= 60) continue;
+      const half = time[2] ?? nearbyHalf(text, m.index, m.index + m[0].length);
+      found.add(`time ${time[0] % 12}:${String(time[1]).padStart(2, "0")}${half ? ` ${half}` : ""}`);
     }
   }
   return [...found];
+}
+
+/** Is a mention in a line covered by what the statements name? A time with no half of the day fits either half. */
+function isCovered(mention: string, allowed: ReadonlySet<string>): boolean {
+  if (allowed.has(mention)) return true;
+  if (!mention.startsWith("time ")) return false;
+  const [, clock, half] = mention.split(" ");
+  return half ? allowed.has(`time ${clock}`) : allowed.has(`time ${clock} am`) || allowed.has(`time ${clock} pm`);
 }
 
 /** Every piece of the case's vocabulary, and every clock time, that a text mentions. */
@@ -220,6 +266,25 @@ const clauses = (line: string): string[] =>
     .filter((part) => part.length > 0);
 
 const isNegative = (a: Assertion) => a.prop.kind !== "at" && !a.prop.value;
+
+const MOTIVE_STOP = new Set(["that", "this", "with", "from", "have", "been", "were", "about", "would", "could", "their", "there", "which", "will", "into", "they", "them", "what", "when", "your", "victim"]);
+const ZH_COMMON = new Set([..."的一是了我他她你被将即不没有这那个在和与也就都而及着过吗呢啊死者"]);
+
+/**
+ * Does a text touch the subject of a motive? A motive has no name, only a sentence, so this
+ * is a loose test: an English word of the motive's sentence (four letters or more, compared
+ * on its first four), or two of its Chinese characters, common ones aside. It catches a line
+ * that changes the subject. It cannot tell a faithful paraphrase from a bent one.
+ */
+function motiveHeard(c: Case, motiveId: string, text: string): boolean {
+  const motive = c.motives.find((m) => m.id === motiveId);
+  if (!motive) return false;
+  const stems = (motive.text.en.toLowerCase().match(/[a-z]+/g) ?? []).filter((w) => w.length >= 4 && !MOTIVE_STOP.has(w)).map((w) => w.slice(0, 4));
+  const said = new Set((text.toLowerCase().match(/[a-z]+/g) ?? []).filter((w) => w.length >= 4).map((w) => w.slice(0, 4)));
+  if (stems.some((stem) => said.has(stem))) return true;
+  const chars = new Set([...motive.text.zh].filter((ch) => HAN.test(ch) && !ZH_COMMON.has(ch)));
+  return new Set([...text].filter((ch) => chars.has(ch))).size >= 2;
+}
 
 /** What the suspect may be taken to have named: its own statements as code words them, its own name and its role. */
 function coveredText(c: Case, speaker: string, accepted: readonly Assertion[]): string {
@@ -275,14 +340,17 @@ export function guardLine(c: Case, speaker: string, accepted: readonly Assertion
   if (out) return fail("breaks-character", out[0]);
 
   const allowed = new Set(mentions(c, coveredText(c, speaker, accepted)));
-  const extra = mentions(c, text).filter((m) => !allowed.has(m));
+  const extra = mentions(c, text).filter((m) => !isCovered(m, allowed));
   if (extra.length > 0) return fail("uncovered", extra.join(", "));
 
   const english = new Map(vocabulary(c).en.map((e) => [e.form, e.pattern]));
   const heard = (name: string) => (HAN.test(name) ? text.includes(name) : (english.get(name)?.test(text) ?? false));
   for (const a of accepted) {
     if (!requiredNames(c, speaker, a).every((group) => group.some(heard))) return fail("omits", a.id);
+    if (a.prop.kind === "motive" && !motiveHeard(c, a.prop.motive, text)) return fail("omits", a.id);
   }
+  const motives = accepted.flatMap((a) => (a.prop.kind === "motive" ? [a.prop.motive] : []));
+  const namesCase = (clause: string) => mentions(c, clause).length > 0 || motives.some((id) => motiveHeard(c, id, clause));
 
   const alone = EXCLUSIVE.exec(text);
   if (alone) return fail("exclusive", alone[0]);
@@ -290,7 +358,7 @@ export function guardLine(c: Case, speaker: string, accepted: readonly Assertion
   const denials = accepted.filter(isNegative).length;
   if (denials === 0) {
     // Every statement is a plain assertion, so no clause may deny a case fact.
-    const flipped = clauses(text).find((clause) => hasNegation(clause) && mentions(c, clause).length > 0);
+    const flipped = clauses(text).find((clause) => hasNegation(clause) && namesCase(clause));
     if (flipped) return fail("polarity", flipped);
   } else if (denials === accepted.length && !hasNegation(text)) {
     // Every statement is a denial, so the line must deny something.

@@ -1,5 +1,6 @@
+import { languageOf } from "../agents/line-guard";
 import type { Lang } from "../agents/render";
-import { suspectTurn, type SuspectTurn } from "../agents/suspect-turn";
+import { deflection, suspectTurn, type SuspectTurn } from "../agents/suspect-turn";
 import { isOpen } from "../case/access";
 import { proofRules } from "../case/proof";
 import type { Case, Evidence, Text } from "../case/schema";
@@ -14,8 +15,9 @@ import type { Metered } from "../metered";
  *
  * The rules, all of them code:
  *  - A new question and a new inspection each cost one action. A session has `sessionCap`
- *    actions. Hearing a topic again or looking at a record again costs nothing and sends
- *    nothing: the saved result is returned.
+ *    actions. Hearing a topic again, asking the very same question again, or looking at a
+ *    record again costs nothing and sends nothing: the saved result is returned. A question
+ *    in other words is a new question.
  *  - What is open depends on what the player holds, by the same rule the solver uses.
  *  - The notebook holds records and statements. A statement is worded by code. A contradiction
  *    is shown when a held, authoritative record and a heard statement cannot both be true.
@@ -51,6 +53,8 @@ export interface TurnRecord {
   /** The question's number in the session. Numbers rise but may skip: a question that was refused and not kept still used one. */
   n: number;
   question: string;
+  /** The topics that were open to this suspect when the question was asked. */
+  menu: string[];
   turn: SuspectTurn;
 }
 
@@ -158,7 +162,7 @@ export interface AskArgs {
   topic?: string;
   /** The player's own words. Needed when no topic is given. */
   question?: string;
-  /** The language to use for a menu topic. A typed question sets its own. */
+  /** The language to use for a menu topic. A typed question sets its own. A topic heard before is replayed in its own language unless one is named. */
   language?: Lang;
   cacheKey?: string;
 }
@@ -166,7 +170,10 @@ export interface AskArgs {
 export interface AskResult {
   session: Session;
   turn: SuspectTurn;
-  /** True when a saved turn was returned: nothing was sent and no action was used. */
+  /**
+   * True when a saved turn was returned: nothing was sent and no action was used. If another
+   * language was asked for, the turn is a view in that language, worded by code.
+   */
   replayed: boolean;
   /**
    * False when the spend guard refused the question before anything was sent and there was
@@ -182,6 +189,9 @@ export async function ask(metered: Metered, c: Case, session: Session, args: Ask
   mustBeLive(session);
   if (!c.suspects.some((s) => s.id === args.suspect)) throw new SessionError("not-available", `no suspect called ${args.suspect}`);
   const held = heldBy(session);
+  // The topics open to this suspect now. An earlier question is "the same question" only if these were the same then.
+  const menu = c.actions.topics.filter((t) => t.suspect === args.suspect && isOpen(t, held)).map((t) => t.id);
+  const typed = args.question?.trim() ?? "";
 
   let question: string;
   if (args.topic !== undefined) {
@@ -189,11 +199,21 @@ export async function ask(metered: Metered, c: Case, session: Session, args: Ask
     if (!topic) throw new SessionError("not-available", `${args.suspect} has no topic called ${args.topic}`);
     // Already heard, by the menu or because an earlier question landed on it: give the saved turn.
     const saved = session.turns.find((r) => r.turn.suspect === args.suspect && r.turn.topic === topic.id);
-    if (saved) return { session, turn: saved.turn, replayed: true, recorded: true };
-    question = args.question?.trim() || topic.label[args.language ?? "en"];
+    if (saved) {
+      const language = typed !== "" ? languageOf(typed) : (args.language ?? saved.turn.language);
+      return { session, turn: inLanguage(session, saved, language), replayed: true, recorded: true };
+    }
+    question = typed || topic.label[args.language ?? "en"];
   } else {
-    question = args.question?.trim() ?? "";
+    question = typed;
     if (question === "") throw new SessionError("bad-question", "a question needs a topic or some words");
+    // The same words to the same suspect with the same topics open: the same answer, for nothing.
+    // A turn that hit a problem is not replayed, so the question can be asked again.
+    const wanted = sameWords(question);
+    const saved = session.turns.find(
+      (r) => r.turn.suspect === args.suspect && r.turn.problem === undefined && sameWords(r.question) === wanted && r.menu.length === menu.length && r.menu.every((id, i) => id === menu[i]),
+    );
+    if (saved) return { session, turn: saved.turn, replayed: true, recorded: true };
   }
   if ([...question].length > MAX_QUESTION_CHARS) throw new SessionError("bad-question", `a question may have at most ${MAX_QUESTION_CHARS} characters`);
   if (actionsLeft(c, session) === 0) throw new SessionError("cap", "no actions left");
@@ -212,7 +232,23 @@ export async function ask(metered: Metered, c: Case, session: Session, args: Ask
 
   // Nothing left this machine and there is nothing to note down: as if it was never asked.
   if (turn.requests === 0 && turn.statements.length === 0) return { session: { ...session, asked: n }, turn, replayed: false, recorded: false };
-  return { session: { ...session, asked: n, actions: session.actions + 1, turns: [...session.turns, { n, question, turn }] }, turn, replayed: false, recorded: true };
+  return { session: { ...session, asked: n, actions: session.actions + 1, turns: [...session.turns, { n, question, menu, turn }] }, turn, replayed: false, recorded: true };
+}
+
+/** Two questions are the same when they differ only in case, width or spacing. Nothing cleverer is attempted. */
+const sameWords = (question: string): string => question.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+
+/**
+ * A saved turn, shown in another language. The model's line exists in one language only, so
+ * the other language gets the statements as code words them, or the fixed line when there
+ * are none. This is a view: the saved turn is not changed and nothing is sent.
+ */
+function inLanguage(session: Session, saved: TurnRecord, language: Lang): SuspectTurn {
+  const turn = saved.turn;
+  if (turn.language === language) return turn;
+  return turn.statements.length > 0
+    ? { ...turn, language, line: turn.statements.map((s) => s[language]).join(" "), source: "rendered" }
+    : { ...turn, language, line: deflection(language, `${session.id}:${saved.n}`), source: "deflection" };
 }
 
 // ---- The notebook ----

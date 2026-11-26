@@ -17,10 +17,14 @@ import { recallResult, recallTool, suspectAnswerSchema, suspectSystemMessages } 
  *    the solver assumes.
  *  - The model's line is shown only if it claims no statement outside that set and passes
  *    the line guard. It gets one retry. After that the code-rendered sentence is shown.
- *  - If a request is refused or fails, the turn still ends with a line: the rendered
- *    sentence when the topic is known, a fixed deflection when it is not.
+ *  - When there is nothing to state (no topic fits, the topic is locked, or the model never
+ *    called `recall`), the suspect gives a fixed line and the model is not asked for one:
+ *    a line with no statement behind it has nothing to be checked against.
+ *  - If a request is refused or fails, or its cost cannot be confirmed, nothing more is sent
+ *    and the turn still ends with a line: the rendered sentence when the topic is known, a
+ *    fixed line when it is not.
  *
- * The text a model sends along with a tool call is never shown to anyone.
+ * Text that the model sends with a tool call, or instead of calling `recall`, is never shown.
  */
 
 export const SUSPECT_PROMPT_ID = "suspect-v2";
@@ -38,7 +42,7 @@ export type LineSource =
   | "model-retry"
   /** The statements as code words them. */
   | "rendered"
-  /** A fixed line, used when there is no statement to render. */
+  /** A fixed line, used when there is no statement to make. */
   | "deflection";
 
 export type RejectionReason =
@@ -48,10 +52,12 @@ export type RejectionReason =
   /** The reply is not the JSON object that was asked for. */
   | "malformed"
   /** The reply claims a statement that `recall` did not return this turn. */
-  | "unknown-claim";
+  | "unknown-claim"
+  /** The model answered without calling `recall`, or called another tool. Its text is not shown. */
+  | "no-recall";
 
 export interface Rejection {
-  /** Which request produced the line: "recall" (text instead of a tool call), "answer" or "retry". */
+  /** Which request it came from: "recall" (cut off, or no call to recall), "answer" or "retry". */
   from: "recall" | "answer" | "retry";
   reason: RejectionReason;
   detail: string;
@@ -81,14 +87,26 @@ export interface SuspectTurn {
   requests: number;
   /** The confirmed cost of the requests that came back. A request with an unknown outcome is not in it: its hold stays with the spend guard. */
   costNano: number;
-  /** Set when a request was refused or failed, e.g. "refused:envelope-exhausted". The turn fell back. */
+  /**
+   * Set when a request was refused ("refused:envelope-exhausted"), failed ("failed:outcome-unknown"),
+   * or came back with its cost unconfirmed ("unconfirmed:not-settled", "unconfirmed:envelope-suspended").
+   * Nothing was sent after it.
+   */
   problem?: string;
 }
 
-export const DEFLECTION: Record<Lang, string> = {
-  en: "I have nothing to tell you about that.",
-  zh: "这个我没什么可说的。",
+/** The fixed lines a suspect gives when it has nothing to state. Written here, not by the model. */
+export const DEFLECTIONS: Record<Lang, readonly string[]> = {
+  en: ["I have nothing to tell you about that.", "That is not something I can help you with.", "Ask me something else."],
+  zh: ["这个我没什么可说的。", "这件事我帮不上忙。", "换个问题吧。"],
 };
+
+/** Which fixed line a turn gets. It depends only on the turn id, so the same turn always gets the same one. */
+export function deflection(lang: Lang, turnId: string): string {
+  const lines = DEFLECTIONS[lang];
+  const sum = [...turnId].reduce((total, ch) => total + ch.codePointAt(0)!, 0);
+  return lines[sum % lines.length]!;
+}
 
 export interface SuspectTurnArgs {
   metered: Metered;
@@ -156,6 +174,12 @@ export async function suspectTurn(args: SuspectTurnArgs): Promise<SuspectTurn> {
       return null;
     }
     requests++;
+    if (!result.settled || result.breached) {
+      // The reply is real and may be used, but its cost is not confirmed, or the envelope was
+      // suspended. Nothing more is sent this turn, and the cost is not reported as confirmed.
+      problem = result.breached ? "unconfirmed:envelope-suspended" : "unconfirmed:not-settled";
+      return result.response;
+    }
     costNano += result.costNano;
     return result.response;
   };
@@ -167,8 +191,6 @@ export async function suspectTurn(args: SuspectTurnArgs): Promise<SuspectTurn> {
   let call: ToolCall | null = null;
   let topic: string | null = null;
   const topicGiven = args.topic !== undefined;
-  /** Text the model gave instead of a tool call. It is treated as a line that makes no statement. */
-  let unprompted: string | null = null;
 
   if (args.topic !== undefined) {
     if (!menu.includes(args.topic) || args.topic === "none") throw new Error(`topic ${args.topic} is not open for ${suspect}`);
@@ -190,7 +212,9 @@ export async function suspectTurn(args: SuspectTurnArgs): Promise<SuspectTurn> {
       } else if (response.finishReason === "length") {
         rejections.push({ from: "recall", reason: "truncated", detail: "" });
       } else {
-        unprompted = response.text ?? "";
+        // The model answered without calling recall, or called something else. Whatever it
+        // wrote is grounded in nothing, so none of it is shown.
+        rejections.push({ from: "recall", reason: "no-recall", detail: response.toolCalls.map((t) => t.name).join(", ") });
       }
     }
   }
@@ -216,7 +240,7 @@ export async function suspectTurn(args: SuspectTurnArgs): Promise<SuspectTurn> {
     ...(problem ? { problem } : {}),
   });
   const fallback = (): SuspectTurn =>
-    accepted.length > 0 ? done(accepted.map((a) => renderAssertion(c, suspect, a, language)).join(" "), "rendered") : done(DEFLECTION[language], "deflection");
+    accepted.length > 0 ? done(accepted.map((a) => renderAssertion(c, suspect, a, language)).join(" "), "rendered") : done(deflection(language, turnId), "deflection");
 
   /** Why a candidate line cannot be shown, or null when it can. */
   const check = (from: Rejection["from"], claimed: readonly string[], line: string): Rejection | null => {
@@ -226,16 +250,12 @@ export async function suspectTurn(args: SuspectTurnArgs): Promise<SuspectTurn> {
     return verdict.ok ? null : { from, reason: verdict.reason, detail: verdict.detail };
   };
 
-  // ---- 2. No tool call: the model answered straight away. ----
-  if (!call) {
-    if (unprompted === null) return fallback();
-    const rejection = check("recall", [], unprompted);
-    if (!rejection) return done(unprompted.trim(), "model");
-    rejections.push(rejection);
-    return fallback();
-  }
+  // ---- 2. Nothing to state: no topic fits, the topic is locked or unknown, or recall was
+  // never called. The suspect gives a fixed line and no answer is asked for. A line with no
+  // statement behind it would have nothing to be checked against. ----
+  if (!call || accepted.length === 0) return fallback();
 
-  // ---- 3. The answer, and at most one retry. ----
+  // ---- 3. The answer, and at most one retry. A recall whose cost is unconfirmed ends the turn here. ----
   const made = call;
   const afterRecall = (toolResult: string): ChatMessage[] => [
     ...base,

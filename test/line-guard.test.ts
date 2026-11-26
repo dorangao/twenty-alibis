@@ -37,9 +37,24 @@ describe("the line guard lets a suspect speak in its own voice", () => {
     ok("s-ada", adaFoyer, "九点我在门厅。");
     ok("s-ada", adaFoyer, "晚上9点我在门厅。");
     expect(mentions(c, "nine o'clock").sort()).toEqual(["time 9:00"]);
-    expect(mentions(c, "half past nine, 9:30, 21时30分, 九点半").sort()).toEqual(["time 9:30"]);
-    expect(mentions(c, "十二点, noon, 中午, at 12").sort()).toEqual(["time 0:00"]);
+    expect(mentions(c, "half past nine, 9:30, 九点半").sort()).toEqual(["time 9:30"]);
+    expect(mentions(c, "十二点, at 12")).toEqual(["time 0:00"]);
     expect(mentions(c, "九点二十")).toEqual(["time 9:20"]);
+  });
+
+  it("keeps morning and evening apart when the line says which it means", () => {
+    // The statement is about 21:00. A bare "nine" fits; a morning nine does not.
+    for (const line of ["I was in the foyer at 21:00.", "I was in the foyer at 9:00.", "I was in the foyer at 9 pm.", "I was in the foyer at nine in the evening.", "晚上九点我在门厅。", "21点我在门厅。"]) {
+      ok("s-ada", adaFoyer, line);
+    }
+    for (const line of ["I was in the foyer at 09:00.", "I was in the foyer at 9 a.m.", "I was in the foyer at nine in the morning.", "上午九点我在门厅。", "早上9点我在门厅。"]) {
+      refused("uncovered", "s-ada", adaFoyer, line);
+    }
+    expect(mentions(c, "21:00")).toEqual(["time 9:00 pm"]);
+    expect(mentions(c, "09:00")).toEqual(["time 9:00 am"]);
+    expect(mentions(c, "21时30分")).toEqual(["time 9:30 pm"]);
+    expect(mentions(c, "noon").concat(mentions(c, "中午"))).toEqual(["time 0:00 pm", "time 0:00 pm"]);
+    expect(mentions(c, "midnight").concat(mentions(c, "午夜"))).toEqual(["time 0:00 am", "time 0:00 am"]);
   });
 
   it("does not take the everyday 一点 for one o'clock", () => {
@@ -101,6 +116,22 @@ describe("the line guard refuses a line that says more than the statements", () 
     refused("omits", "s-ada", adaFoyer, "I'd rather not say.");
     refused("omits", "s-ada", benFoyer, "I was in the foyer at 21:00.");
     ok("s-ada", benFoyer, "Ben was in the foyer at 21:00.");
+  });
+
+  it("holds a statement about a motive to its subject", () => {
+    const debt = the("a-ada-debt");
+    const noDebt: Assertion[] = [{ id: "a-ada-no-debt", prop: { kind: "motive", subject: "s-ada", motive: "mo-debt", value: false } }];
+    ok("s-ada", debt, "Yes, I owed him money. A debt is a debt.");
+    ok("s-ada", debt, "我确实欠他一笔债。");
+    // A line that changes the subject does not make the statement.
+    refused("omits", "s-ada", debt, "I'd rather talk later.");
+    refused("omits", "s-ada", debt, "请下一个问题。");
+    // An admission turned into a denial, and a denial turned into an admission.
+    refused("polarity", "s-ada", debt, "I never owed him anything.");
+    refused("polarity", "s-ada", debt, "我不欠他债。");
+    refused("polarity", "s-ada", noDebt, "I owed him a debt.");
+    ok("s-ada", noDebt, "I owed him nothing. Check your records.");
+    ok("s-ada", noDebt, "我不欠他债。");
   });
 
   it("does not count a word the means shares with a place as naming the means", () => {

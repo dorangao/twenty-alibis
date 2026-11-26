@@ -120,7 +120,7 @@ describe("asking", () => {
     expect({ replayed, recorded }).toEqual({ replayed: false, recorded: true });
     expect(turn).toMatchObject({ topic: "t-ada-2100", line: "I was in the foyer at 21:00.", source: "model", requests: 1 });
     expect(session).toMatchObject({ actions: 1, asked: 1 });
-    expect(session.turns).toEqual([{ n: 1, question: "Where were you at 21:00?", turn }]);
+    expect(session.turns).toEqual([{ n: 1, question: "Where were you at 21:00?", menu: ["t-ada-2100"], turn }]);
     expect(heldBy(session).has("a-ada-foyer-2100")).toBe(true);
     expect(provider.dispatched).toBe(1);
     expect(topicMenu(c, session, "s-ada")[0]!.heard).toBe(true);
@@ -215,6 +215,97 @@ describe("asking", () => {
     expect(recorded).toBe(true);
     expect(turn).toMatchObject({ source: "deflection", requests: 1, problem: "failed:outcome-unknown" });
     expect(session).toMatchObject({ actions: 1, asked: 1 });
+  });
+});
+
+describe("hearing something again", () => {
+  /** Like the well-behaved suspect, but its English line is its own wording, so it can be told from code's. */
+  const withVoice = (request: ProviderRequest): ProviderResponse => {
+    const reply = wellBehaved(request);
+    if (request.tools?.length || !reply.text) return reply;
+    const parsed = JSON.parse(reply.text) as { assertions: string[]; line: string; language: string };
+    return parsed.language === "en" && parsed.assertions.length > 0 ? { ...reply, text: JSON.stringify({ ...parsed, line: "Foyer. At 21:00." }) } : reply;
+  };
+
+  it("replays a topic in the other language as code words it, and leaves the history alone", async () => {
+    const { metered, provider } = setup({ handler: withVoice });
+    const first = await ask(metered, c, startSession(c, "s1"), { suspect: "s-ada", topic: "t-ada-2100", language: "en" });
+    expect(first.turn).toMatchObject({ language: "en", line: "Foyer. At 21:00.", source: "model" });
+
+    const zh = await ask(metered, c, first.session, { suspect: "s-ada", topic: "t-ada-2100", language: "zh" });
+    expect(zh).toMatchObject({ replayed: true, recorded: true });
+    expect(zh.turn).toMatchObject({ language: "zh", line: "21:00 我在门厅。", source: "rendered", topic: "t-ada-2100" });
+    expect(zh.turn.statements).toEqual(first.turn.statements);
+    // Nothing was sent, no action was used, and the saved turn is still the English one.
+    expect(provider.dispatched).toBe(1);
+    expect(zh.session).toBe(first.session);
+    expect(zh.session.turns[0]!.turn).toBe(first.turn);
+    expect(first.turn.line).toBe("Foyer. At 21:00.");
+
+    // Asked for again in English, or with no language named, the model's own line comes back.
+    expect((await ask(metered, c, first.session, { suspect: "s-ada", topic: "t-ada-2100", language: "en" })).turn).toBe(first.turn);
+    expect((await ask(metered, c, first.session, { suspect: "s-ada", topic: "t-ada-2100" })).turn).toBe(first.turn);
+    // Words typed with the topic set the language.
+    expect((await ask(metered, c, first.session, { suspect: "s-ada", topic: "t-ada-2100", question: "21:00 你在哪里？" })).turn).toMatchObject({ language: "zh", source: "rendered" });
+    expect(provider.dispatched).toBe(1);
+  });
+
+  it("replays the very same typed question: nothing is sent and no action is used", async () => {
+    const { metered, provider } = setup();
+    const first = await ask(metered, c, startSession(c, "s1"), { suspect: "s-ben", question: "So where were you?" });
+    expect(first.session.turns[0]).toMatchObject({ question: "So where were you?", menu: ["t-ben-2100"] });
+    expect(provider.dispatched).toBe(2);
+
+    for (const again of ["So where were you?", "  so  WHERE were you? ", "Ｓo where were you?"]) {
+      const repeat = await ask(metered, c, first.session, { suspect: "s-ben", question: again });
+      expect(repeat, again).toMatchObject({ replayed: true, recorded: true });
+      expect(repeat.turn, again).toBe(first.turn);
+      expect(repeat.session, again).toBe(first.session);
+    }
+    expect(provider.dispatched).toBe(2);
+  });
+
+  it("treats other words, or the same words to someone else, as a new question", async () => {
+    const { metered, provider } = setup();
+    let s = (await ask(metered, c, startSession(c, "s1"), { suspect: "s-clara", question: "What did you see?" })).session;
+    expect(provider.dispatched).toBe(1); // Clara has no topic: one request, a fixed line
+    const reworded = await ask(metered, c, s, { suspect: "s-clara", question: "What did you see, exactly?" });
+    expect(reworded.replayed).toBe(false);
+    s = reworded.session;
+    const other = await ask(metered, c, s, { suspect: "s-dev", question: "What did you see?" });
+    expect(other.replayed).toBe(false);
+    expect(other.session).toMatchObject({ actions: 3, asked: 3 });
+    expect(provider.dispatched).toBe(3);
+  });
+
+  it("asks the same words again once the suspect has more to talk about", async () => {
+    const { metered, provider } = setup();
+    let s = startSession(gated, "s1");
+    const before = await ask(metered, gated, s, { suspect: "s-ada", question: "Where were you at 21:00?" });
+    expect(before.turn).toMatchObject({ topic: null, source: "deflection" });
+    s = inspect(gated, before.session, "i-attendance-log").session;
+    // The log unlocked Ada's topic, so the same words are a new question now.
+    const after = await ask(metered, gated, s, { suspect: "s-ada", question: "Where were you at 21:00?" });
+    expect(after.replayed).toBe(false);
+    expect(after.turn).toMatchObject({ topic: "t-ada-2100", source: "model" });
+    expect(provider.dispatched).toBe(3);
+  });
+
+  it("does not replay a question whose request failed", async () => {
+    let fail = true;
+    const { metered, provider } = setup({
+      handler: (request) => {
+        if (fail) throw new Error("socket closed");
+        return wellBehaved(request);
+      },
+    });
+    const failed = await ask(metered, c, startSession(c, "s1"), { suspect: "s-ada", question: "Where were you?" });
+    expect(failed.turn.problem).toBe("failed:outcome-unknown");
+    fail = false;
+    const again = await ask(metered, c, failed.session, { suspect: "s-ada", question: "Where were you?" });
+    expect(again.replayed).toBe(false);
+    expect(again.turn).toMatchObject({ topic: "t-ada-2100", source: "model" });
+    expect(provider.dispatched).toBe(3);
   });
 });
 
