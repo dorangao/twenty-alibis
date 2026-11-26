@@ -100,10 +100,9 @@ export function savedCase(config: TrialConfig, attempt: TrialAttempt, stored: re
 
 export function planPilot(config: PilotConfig, stored: readonly StoredAttempt[]): PilotPlan {
   const later = gameNumber(config) > 1;
-  // An attempt id with a colon in it could be read as another attempt's game or turn.
-  const odd = config.attempts.find((t) => t.id.includes(":"));
-  if (odd) throw new RangeError(`an attempt id cannot contain a colon: ${odd.id}`);
   const mine = stored.filter((a) => config.attempts.some((t) => a.attemptId.startsWith(`${t.id}:`)));
+  // planTrial refuses attempt ids that are not plain: "case.g2" as an attempt of its own would
+  // share files with game 2 of "case", and "case:g2" its request ids.
   const writers = planTrial(config, stored);
   const rows = writers.rows.map(({ attempt, standing: written }) => {
     // A later game plays a case that is already written and saved. It never writes one: an

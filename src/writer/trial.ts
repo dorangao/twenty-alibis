@@ -171,7 +171,27 @@ export const readSaved = (path: string): string | null => {
 };
 
 /** What a run would do now, given the store's records and what is saved on disk. */
+/**
+ * What an attempt's id may be: lower-case letters and digits, in groups joined by single
+ * hyphens. The id is the stem of request ids ("<id>:skeleton", "<id>:g2:d1") and of file
+ * names ("<id>.people.json", "<id>.g2.game.json"), so it may hold no colon and no dot: with
+ * either, one attempt's ids or files could be another's. Lower case only, because some file
+ * systems treat "A-1" and "a-1" as one name.
+ */
+export const ATTEMPT_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** Refuses a config whose attempt ids are not plain, or not all different. */
+export function checkAttempts(config: TrialConfig): void {
+  const seen = new Set<string>();
+  for (const { id } of config.attempts) {
+    if (!ATTEMPT_ID.test(id)) throw new RangeError(`an attempt id is lower-case letters and digits joined by single hyphens, not "${id}"`);
+    if (seen.has(id)) throw new RangeError(`two attempts share the id "${id}"`);
+    seen.add(id);
+  }
+}
+
 export function planTrial(config: TrialConfig, stored: readonly StoredAttempt[]): TrialPlan {
+  checkAttempts(config);
   const ids = new Set(config.attempts.flatMap((a) => [`${a.id}:skeleton`, `${a.id}:people`]));
   const mine = stored.filter((a) => ids.has(a.attemptId));
   const known = new Set(mine.map((a) => a.attemptId));

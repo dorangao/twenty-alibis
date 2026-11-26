@@ -473,7 +473,7 @@ describe("a saved case played again, as a numbered game", () => {
     expect(t.provider.dispatched).toBe(sent);
   });
 
-  it("refuses a game number that is not a whole number from 1 up, and an attempt id with a colon", async () => {
+  it("refuses a game number that is not a whole number from 1 up, and an attempt id that is not plain", async () => {
     const t = setup();
     expect(gameIdOf(t.config, "p-1")).toBe("p-1");
     expect(gameIdOf({ ...t.config, game: 1 }, "p-1")).toBe("p-1");
@@ -483,8 +483,17 @@ describe("a saved case played again, as a numbered game", () => {
       expect(() => planPilot({ ...t.config, game }, [])).toThrow(RangeError);
       await expect(runPilot({ ...t.config, game }, { metered: t.metered, stored: [] })).rejects.toThrow(RangeError);
     }
-    // "p-1:g2" as an attempt of its own would share request ids with game 2 of "p-1".
-    expect(() => planPilot({ ...t.config, attempts: [{ id: "p-1:g2", theme: "x" }] }, [])).toThrow(/colon/);
+    // "p-1:g2" as an attempt of its own would share request ids with game 2 of "p-1", and
+    // "p-1.g2" would share its files: p-1.g2.detective.json and p-1.g2.game.json.
+    const withId = (...ids: string[]): PilotConfig => ({ ...t.config, attempts: ids.map((id) => ({ id, theme: "x" })) });
+    expect(gamePath({ ...withId("p-1"), game: 2 }, "p-1")).toBe(`${t.dir}/p-1.g2.game.json`);
+    for (const id of ["p-1:g2", "p-1.g2", "p-1.skeleton", "P-1", "p--1", "-p1", "p1-", "p 1", "p/1", "../p1", ""]) {
+      expect(() => planPilot(withId("p-1", id), []), id).toThrow(RangeError);
+      expect(() => planTrial(withId(id), []), id).toThrow(RangeError);
+      await expect(runPilot(withId(id), { metered: t.metered, stored: [] }), id).rejects.toThrow(RangeError);
+    }
+    expect(() => planPilot(withId("p-1", "p-1"), [])).toThrow(/share the id/);
+    for (const id of ["p-1", "pilot-a-3", "writer-b-12", "x", "7"]) expect(() => planPilot(withId(id), []), id).not.toThrow();
     expect(t.provider.dispatched).toBe(0);
   });
 });
