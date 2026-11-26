@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { archivePass } from "../src/case/fixtures/archive";
 import { solve } from "../src/case/solver";
-import { createGame, type GameOptions } from "../src/game/terminal";
+import { createGame, noModel, pinAtLaunch, type GameOptions } from "../src/game/terminal";
 import { createMetered, type Metered } from "../src/metered";
 import { FakeProvider } from "../src/provider/fake";
 import type { ProviderRequest, ProviderResponse } from "../src/provider/types";
@@ -11,8 +11,7 @@ import { MemorySpendStore } from "../src/spend/store";
 const c = archivePass;
 const usage = { inputTokens: 1_000, cachedTokens: 0, outputTokens: 60 };
 
-/** The model is off: every request is refused, and the test fails if one is ever built. */
-const off: Metered = async (request) => ({ ok: false, attemptId: request.attemptId, sent: false, reason: "kill-switch" });
+const off = noModel;
 
 /** A stand-in suspect: it picks the first topic on its menu and repeats the statements it is given. */
 function wellBehaved(request: ProviderRequest): ProviderResponse {
@@ -49,7 +48,7 @@ describe("the game in a terminal, with the model off", () => {
   });
 
   it("can be played from the briefing to a proven accusation and the reveal", async () => {
-    const { game, text } = await play(["people", "topics ada", "ask ada 1", "records", "inspect 1", "notebook", "accuse ada", "reveal"]);
+    const { game, text } = await play(["people", "topics ada", "ask ada 1", "records", "inspect 1", "notebook", "accuse ada all", "reveal"]);
     expect(text).toContain("1. Ada Marlow — Archivist's assistant");
     expect(text).toContain("1. Where were you at 21:00?");
     expect(text).toContain("Ada Marlow: “I was in the foyer at 21:00.”  [worded by code]");
@@ -69,11 +68,11 @@ describe("the game in a terminal, with the model off", () => {
       expect(action.type).toBe("inspection");
       await game.handle("inspect 1");
     }
-    expect((await game.handle("accuse ada")).join("\n")).toContain("SOLVED");
+    expect((await game.handle(`accuse ada ${proof.evidence.map((id) => game.session().evidence.indexOf(id) + 1).join(" ")}`)).join("\n")).toContain("SOLVED");
   });
 
   it("plays the same in Chinese", async () => {
-    const { text, game } = await play(["ask 艾达 1", "ask 马艾达 1", "inspect 1", "notebook", "accuse 1", "reveal"], { language: "zh", modelOff: true });
+    const { text, game } = await play(["ask 艾达 1", "ask 马艾达 1", "inspect 1", "notebook", "accuse 1 全部", "reveal"], { language: "zh", modelOff: true });
     // 艾达 and 马艾达 are the same person; the second ask is a replay.
     expect(text).toContain("[代码转述，重听]");
     expect(game.session().actions).toBe(2);
@@ -92,7 +91,7 @@ describe("the game in a terminal, with the model off", () => {
   });
 
   it("tells a right name from a proof, and a wrong name from both", async () => {
-    const unproven = await play(["accuse ada"]);
+    const unproven = await play(["accuse ada all"]);
     expect(unproven.text).toContain("RIGHT, BUT UNPROVEN.");
     expect(unproven.text).toContain("Not proven for Ada Marlow: opportunity.");
     expect(unproven.text).toContain("Not ruled out: Ben Okafor.");
@@ -101,13 +100,21 @@ describe("the game in a terminal, with the model off", () => {
     expect(cited.text).toContain("RIGHT, BUT UNPROVEN.");
     expect(cited.text).toContain("Not proven for Ada Marlow: means, motive.");
 
-    const wrong = await play(["inspect 1", "accuse ben"]);
+    const wrong = await play(["inspect 1", "accuse ben all"]);
     expect(wrong.text).toContain("WRONG. That is not who did it.");
     expect(wrong.text).toContain("Your own evidence rules that person out.");
   });
 
+  it("asks the player to cite evidence: an accusation with none named does nothing yet", async () => {
+    const { game, out } = await play(["inspect 1", "accuse ada"]);
+    expect(out.at(-1)).toBe("Cite the records that prove it, by number (see `notebook`), or `all`. For example: accuse ada 1 2 4");
+    expect(game.session().verdict).toBeUndefined();
+    // Holding the proof is not citing it: the same notebook, cited in full, solves the case.
+    expect((await game.handle("accuse ada 1 2 3 4")).join("\n")).toContain("SOLVED");
+  });
+
   it("keeps the truth back until the accusation, and ends play after it", async () => {
-    const { text } = await play(["reveal", "accuse ben", "ask ada 1", "inspect 1", "accuse ada"]);
+    const { text } = await play(["reveal", "accuse ben all", "ask ada 1", "inspect 1", "accuse ada all"]);
     expect(text.split("\n")[0]).toBe("The truth is revealed only after you accuse someone.");
     expect(text).not.toContain("It was Ada Marlow.");
     expect(text.match(/The session has ended with your accusation/g)).toHaveLength(3);
@@ -156,5 +163,28 @@ describe("the game in a terminal, with a model", () => {
     const { text } = await play(["say clara What did you see?"], {}, metered);
     expect(text).toMatch(/Clara Voss: “.+”  \[nothing to state\]/);
     expect(provider.dispatched).toBe(1);
+  });
+});
+
+describe("whether a game may use the model is decided at launch", () => {
+  it("a game that started with paid requests closed never sends, even if they are opened later", async () => {
+    const { provider, metered: real } = live();
+    // Closed at launch. The real wrapper would send; the pinned one must not be it.
+    const pinned = pinAtLaunch(real, false);
+    expect(pinned.modelOff).toBe(true);
+    const { game, text } = await play(["say ada So where were you?", "ask ada 1"], { modelOff: pinned.modelOff }, pinned.metered);
+    expect(provider.dispatched).toBe(0);
+    expect(text).toContain("The model is off");
+    expect(text).toContain("[worded by code]");
+    expect(game.session().actions).toBe(1);
+  });
+
+  it("a game that started live uses the real wrapper, and one with no runtime has no model", async () => {
+    const { provider, metered: real } = live();
+    const pinned = pinAtLaunch(real, true);
+    expect(pinned).toEqual({ metered: real, modelOff: false });
+    await play(["say ada So where were you?"], {}, pinned.metered);
+    expect(provider.dispatched).toBe(2);
+    expect(pinAtLaunch(null, true)).toEqual({ metered: noModel, modelOff: true });
   });
 });

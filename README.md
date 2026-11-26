@@ -96,9 +96,9 @@ npm run play
 npm run play -- --zh
 ```
 
-The model is off in both: nothing is sent and nothing is spent. You get the briefing, question the suspects from their topic menus, inspect records, read the notebook with its contradictions, accuse, and see the truth. With the model off a suspect's statement is worded by code; a question in your own words needs the model (`npm run play -- --live`, which sends a request only if a person has authorized paid requests).
+The model is off in both: nothing is sent and nothing is spent. You get the briefing, question the suspects from their topic menus, inspect records, read the notebook with its contradictions, accuse, and see the truth. With the model off a suspect's statement is worded by code; a question in your own words needs the model (`npm run play -- --live`, which sends a request only if a person authorized paid requests before the game started). An accusation names the records it rests on: `accuse ada 1 2 4`, or `accuse ada all`.
 
-以上两条命令都不调用模型，不发送任何内容，也不花钱。可以看简报、从话题菜单里审问嫌疑人、查看记录、翻笔记本和其中的矛盾、指认、最后看真相。模型关闭时嫌疑人的陈述由代码转述；用自己的话提问需要模型（`npm run play -- --live`，只有在有人授权付费请求之后才会真的发送）。
+以上两条命令都不调用模型，不发送任何内容，也不花钱。可以看简报、从话题菜单里审问嫌疑人、查看记录、翻笔记本和其中的矛盾、指认、最后看真相。模型关闭时嫌疑人的陈述由代码转述；用自己的话提问需要模型（`npm run play -- --live`，只有在游戏开始前已有人授权付费请求时才会真的发送）。指认时要写明依据哪些记录：`accuse 艾达 1 2 4`，或 `accuse 艾达 all`。
 
 ### The durable spend counter · 持久化的额度计数
 

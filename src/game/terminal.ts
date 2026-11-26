@@ -35,7 +35,8 @@ const HELP: Record<Lang, string[]> = {
     "  records                what you can inspect",
     "  inspect <n>            inspect record number n",
     "  notebook               what you hold: records, statements, contradictions",
-    "  accuse <person> [n…]   name the culprit and cite records by number (none given: all you hold)",
+    "  accuse <person> <n…>   name the culprit and cite the records that prove it, by number",
+    "  accuse <person> all    the same, citing every record you hold",
     "  reveal                 the truth, after you have accused",
     "  lang en|zh             change language",
     "  quit",
@@ -50,7 +51,8 @@ const HELP: Record<Lang, string[]> = {
     "  records                可以查看的记录",
     "  inspect <n>            查看第 n 项",
     "  notebook               笔记本：记录、陈述、矛盾",
-    "  accuse <人> [n…]       指认凶手，并按编号引用记录（不写编号：引用手里全部记录）",
+    "  accuse <人> <n…>       指认凶手，并按编号引用能证明的记录",
+    "  accuse <人> all        同上，引用手里的全部记录",
     "  reveal                 指认之后公开真相",
     "  lang en|zh             切换语言",
     "  quit",
@@ -78,6 +80,21 @@ const ERRORS: Record<string, Text> = {
   "bad-question": { en: "A question needs some words, and at most 300 characters.", zh: "提问不能为空，且不超过 300 个字符。" },
   "not-held": { en: "You can only cite records that are in your notebook.", zh: "只能引用笔记本里已有的记录。" },
 };
+
+/** The model switched off: every request is refused before anything is built or sent. */
+export const noModel: Metered = async (request) => ({ ok: false, attemptId: request.attemptId, sent: false, reason: "kill-switch" });
+
+/**
+ * Decide once, at launch, whether a game may use the model, and keep to it.
+ *
+ * If paid requests are closed when the game starts, it gets `noModel` for good: a game that
+ * told its player "nothing will be sent" must not start spending because someone authorized
+ * paid requests later. If they are open, the game gets the real wrapper, which still asks
+ * the spend guard on every request, so revoking the authorization stops it.
+ */
+export function pinAtLaunch(live: Metered | null, paidAllowedAtLaunch: boolean): { metered: Metered; modelOff: boolean } {
+  return live && paidAllowedAtLaunch ? { metered: live, modelOff: false } : { metered: noModel, modelOff: true };
+}
 
 export interface GameOptions {
   language?: Lang;
@@ -228,7 +245,13 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
         if (!id) return noSuchPerson();
         const held = notebook(c, s).evidence;
         const numbers = words.slice(2);
-        const cited = numbers.length === 0 ? held.map((e) => e.id) : numbers.map((n) => held[Number(n) - 1]?.id);
+        // An accusation ends the game, and the evidence is the player's to choose. With none
+        // named, nothing happens yet: the player is asked to cite.
+        if (numbers.length === 0) {
+          return [say("Cite the records that prove it, by number (see `notebook`), or `all`. For example: accuse ada 1 2 4", "请按编号引用能证明的记录（见 notebook），或写 all。例如：accuse 艾达 1 2 4")];
+        }
+        const all = numbers.length === 1 && ["all", "全部"].includes(numbers[0]!.toLowerCase());
+        const cited = all ? held.map((e) => e.id) : numbers.map((n) => held[Number(n) - 1]?.id);
         if (cited.some((e) => e === undefined)) return [t(ERRORS["not-held"]!)];
         const result = accuse(c, s, { suspect: id, evidence: cited as string[] });
         s = result.session;
