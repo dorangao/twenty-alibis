@@ -1,5 +1,6 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { Metered } from "../metered";
+import { memoryRunLock, type RunLock } from "../spend/run-lock";
 import type { SkeletonBrief } from "./plot";
 import { checkSkeleton, SHUFFLE_VERSION, writeCase, type ReplyRecord, type WriteReport } from "./write";
 
@@ -72,72 +73,31 @@ export const reportPath = (config: TrialConfig, id: string) => `${config.dir}/${
 export type StoredSource = readonly StoredAttempt[] | (() => readonly StoredAttempt[] | Promise<readonly StoredAttempt[]>);
 export const readStored = async (source: StoredSource): Promise<readonly StoredAttempt[]> => (typeof source === "function" ? source() : source);
 
+/** In-process locks, one per folder, used when the caller gives no lock of its own. */
+const localLocks = new Map<string, RunLock>();
+const localLock = (dir: string): RunLock => {
+  let lock = localLocks.get(dir);
+  if (!lock) localLocks.set(dir, (lock = memoryRunLock()));
+  return lock;
+};
+
 /**
- * One runner at a time.
- *
- * The request ids stop two runs from sending the same request. They do not stop two runs
- * from working on the same trial at once, and that breaks two promises: a run that finds a
- * request refused could write over the results of the run that sent it, and a run could go
- * on sending after another run's request had failed. So a run takes a lock on the folder
- * first, and only then reads the store and makes its plan. A second run is turned away
- * before it reads or sends anything.
- *
- * The lock is a file created with "fail if it exists", holding the owner's process id. If
- * the owner is no longer running (it crashed), the next run takes the lock over. It is
- * released when the run ends, however it ends.
+ * Do the work as the one admitted runner (see `RunLock`). The lease is taken first; the work
+ * gets a wrapper that renews it before every request and refuses the request if the lease is
+ * no longer this run's. The lease is given up however the work ends.
  */
-export async function withRunLock<T>(dir: string, work: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; heldBy: string }> {
-  mkdirSync(dir, { recursive: true });
-  const path = `${dir}/.run.lock`;
-  const mine = JSON.stringify({ pid: process.pid, token: `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}` });
-  const take = (): boolean => {
-    try {
-      const fd = openSync(path, "wx");
-      writeFileSync(fd, mine);
-      closeSync(fd);
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-      throw error;
-    }
+export async function asOnlyRunner<T>(lock: RunLock, metered: Metered, work: (metered: Metered) => Promise<T>): Promise<{ ok: true; value: T } | { ok: false }> {
+  const lease = await lock.acquire();
+  if (!lease) return { ok: false };
+  const guarded: Metered = async (request) => {
+    // Lost the lease (it ran out and another run took it): send nothing more.
+    if (!(await lease.renew())) return { ok: false, attemptId: request.attemptId, sent: false, reason: "kill-switch" };
+    return metered(request);
   };
-  if (!take()) {
-    const held = readSaved(path) ?? "";
-    let pid: number | undefined;
-    try {
-      pid = (JSON.parse(held) as { pid?: number }).pid;
-    } catch {
-      pid = undefined;
-    }
-    // Is the owner still running? Signal 0 only asks; it sends nothing.
-    let alive = true;
-    if (typeof pid === "number" && pid !== process.pid) {
-      try {
-        process.kill(pid, 0);
-      } catch (error) {
-        alive = (error as NodeJS.ErrnoException).code !== "ESRCH";
-      }
-    }
-    if (alive) return { ok: false, heldBy: typeof pid === "number" ? `process ${pid}` : "another run" };
-    // The owner is gone. Take the lock over: remove the stale file, then create it as before, so
-    // that of two runs doing this at once only one succeeds.
-    try {
-      unlinkSync(path);
-    } catch {
-      // someone else removed it first
-    }
-    if (!take()) return { ok: false, heldBy: "another run" };
-  }
   try {
-    return { ok: true, value: await work() };
+    return { ok: true, value: await work(guarded) };
   } finally {
-    if (readSaved(path) === mine) {
-      try {
-        unlinkSync(path);
-      } catch {
-        // already gone
-      }
-    }
+    await lease.release();
   }
 }
 
@@ -265,7 +225,7 @@ export interface TrialRun {
   stoppedBy?: string;
   /** True when nothing was sent: requests of this trial are unresolved, or another run holds the lock. */
   blocked: boolean;
-  /** Set when another run was already working in this folder. */
+  /** Set when another run already held the lease. */
   lockedBy?: string;
 }
 
@@ -273,14 +233,23 @@ export interface TrialRun {
  * Run what the plan says. The caller has already made sure paid requests are authorized; the
  * spend guard refuses them otherwise. `onAttempt` is called after each attempt, for printing.
  */
-export async function runTrial(config: TrialConfig, deps: { metered: Metered; stored: StoredSource; onAttempt?: (entry: TrialRun["reports"][number]) => void; now?: () => number }): Promise<TrialRun> {
-  const locked = await withRunLock(config.dir, () => runTrialLocked(config, deps));
-  return locked.ok ? locked.value : { reports: [], blocked: true, lockedBy: locked.heldBy };
+export interface RunDeps {
+  metered: Metered;
+  /** The store's records. Give a function, so they are read after the lease is held. */
+  stored: StoredSource;
+  /** The one-runner lease. A paid run passes the store's; without one, a lock inside this process is used. */
+  lock?: RunLock;
+  now?: () => number;
 }
 
-async function runTrialLocked(config: TrialConfig, deps: { metered: Metered; stored: StoredSource; onAttempt?: (entry: TrialRun["reports"][number]) => void; now?: () => number }): Promise<TrialRun> {
+export async function runTrial(config: TrialConfig, deps: RunDeps & { onAttempt?: (entry: TrialRun["reports"][number]) => void }): Promise<TrialRun> {
+  const admitted = await asOnlyRunner(deps.lock ?? localLock(config.dir), deps.metered, (metered) => runTrialAdmitted(config, { ...deps, metered }));
+  return admitted.ok ? admitted.value : { reports: [], blocked: true, lockedBy: "another run" };
+}
+
+async function runTrialAdmitted(config: TrialConfig, deps: RunDeps & { onAttempt?: (entry: TrialRun["reports"][number]) => void }): Promise<TrialRun> {
   const now = deps.now ?? Date.now;
-  // Read after the lock is held: nothing else is writing now, so this is the state to plan from.
+  // Read after the lease is held: nothing else is writing now, so this is the state to plan from.
   const plan = planTrial(config, await readStored(deps.stored));
   if (plan.unresolved.length > 0) return { reports: [], blocked: true };
   const run: TrialRun = { reports: [], blocked: false };

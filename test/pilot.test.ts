@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,10 +9,12 @@ import { createMetered, type Metered, type TraceEvent } from "../src/metered";
 import { FakeProvider } from "../src/provider/fake";
 import type { ProviderRequest, ProviderResponse } from "../src/provider/types";
 import { usdToNano } from "../src/spend/pricing";
+import { connectRedis } from "../src/spend/redis-client";
+import { memoryRunLock, redisRunLock, type RunLock } from "../src/spend/run-lock";
 import { MemorySpendStore } from "../src/spend/store";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
 import { detectivePath, gamePath, pilotTotals, planPilot, runCounts, runPilot, savedCase, savedGame, type PilotConfig } from "../src/writer/pilot";
-import { planTrial, withRunLock, writeAttempt, type SavedReply, type StoredAttempt } from "../src/writer/trial";
+import { asOnlyRunner, planTrial, writeAttempt, type SavedReply, type StoredAttempt } from "../src/writer/trial";
 
 const usage = { inputTokens: 1_000, cachedTokens: 0, outputTokens: 500 };
 const done = (value: unknown): ProviderResponse => ({ text: JSON.stringify(value), toolCalls: [], usage, finishReason: "stop" });
@@ -388,7 +391,7 @@ describe("one runner at a time", () => {
         return t.stored();
       },
     });
-    expect(second).toEqual({ entries: [], blocked: true, lockedBy: `process ${process.pid}` });
+    expect(second).toEqual({ entries: [], blocked: true, lockedBy: "another run" });
     expect(storeReads).toBe(0);
     expect(t.provider.dispatched).toBe(1);
 
@@ -398,8 +401,7 @@ describe("one runner at a time", () => {
     expect(runCounts(done)).toEqual({ attempted: 2, accepted: 2, played: 2, solved: 2 });
     expect(JSON.parse(readFileSync(`${t.dir}/p-1.json`, "utf8"))).toMatchObject({ accepted: true });
     expect(await pilotTotals(t.config, t.stored())).toMatchObject({ attempted: 2, accepted: 2, played: 2, solved: 2 });
-    // The lock is gone, and a later run is admitted (and finds nothing to do).
-    expect(readdirSync(t.dir)).not.toContain(".run.lock");
+    // The lease was given up, and a later run is admitted (and finds nothing to do).
     expect(await runPilot(t.config, { metered: t.metered, stored: () => t.stored() })).toEqual({ entries: [], blocked: false });
   });
 
@@ -451,26 +453,120 @@ describe("one runner at a time", () => {
     expect(t.provider.dispatched).toBe(2);
   });
 
-  it("takes over a lock whose owner is gone, refuses one whose owner is running, and lets go when the work throws", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "lock-"));
-    const lock = `${dir}/.run.lock`;
-    // A lock left by a process that no longer exists.
-    writeFileSync(lock, JSON.stringify({ pid: 2_147_483_646, token: "stale" }));
-    expect(await withRunLock(dir, async () => "ran")).toEqual({ ok: true, value: "ran" });
-    expect(readdirSync(dir)).toEqual([]);
-    // A lock held by a run that is still going.
-    let inner: unknown;
-    const outer = await withRunLock(dir, async () => {
-      inner = await withRunLock(dir, async () => "should not run");
-      return "outer";
-    });
-    expect(outer).toEqual({ ok: true, value: "outer" });
-    expect(inner).toEqual({ ok: false, heldBy: `process ${process.pid}` });
-    // Work that throws still releases the lock.
-    await expect(withRunLock(dir, async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
-    expect(readdirSync(dir)).toEqual([]);
-    // A lock file that cannot be read as a lock is not taken over.
-    writeFileSync(lock, "not json");
-    expect(await withRunLock(dir, async () => "ran")).toEqual({ ok: false, heldBy: "another run" });
+  it("holds across checkouts: two runs from different folders that share the store's lease are still one at a time", async () => {
+    // The same pilot, started from two folders, against one spend store and so one lease.
+    const t = setup();
+    const lock = memoryRunLock();
+    const elsewhere: PilotConfig = { ...t.config, dir: mkdtempSync(join(tmpdir(), "pilot-other-")) };
+    const a = holding(t.metered, "p-1:d2");
+    const first = runPilot(t.config, { metered: a.metered, stored: () => t.stored(), lock });
+    await a.reached;
+    const sent = t.provider.dispatched;
+
+    const second = await runPilot(elsewhere, { metered: t.metered, stored: () => t.stored(), lock });
+    expect(second).toEqual({ entries: [], blocked: true, lockedBy: "another run" });
+    expect(t.provider.dispatched).toBe(sent);
+    expect(readdirSync(elsewhere.dir)).toEqual([]);
+
+    a.release();
+    expect(runCounts(await first)).toEqual({ attempted: 2, accepted: 2, played: 2, solved: 2 });
+    // Once the first has let go, the other folder is admitted.
+    expect((await runPilot(elsewhere, { metered: t.metered, stored: () => t.stored(), lock })).blocked).toBe(false);
+  });
+
+  it("a run that loses its lease sends nothing more", async () => {
+    const t = setup();
+    // A lease that is this run's for its first three requests and then is not.
+    let renewals = 0;
+    let released = false;
+    const lock: RunLock = {
+      acquire: async () => ({
+        renew: async () => ++renewals <= 3,
+        release: async () => void (released = true),
+      }),
+    };
+    const run = await runPilot(t.config, { metered: t.metered, stored: () => t.stored(), lock });
+    expect(run.stoppedBy).toBe("refused:kill-switch");
+    expect(t.provider.dispatched).toBe(3); // skeleton, people, d1
+    expect(run.entries.map((e) => e.attempt.id)).toEqual(["p-1"]);
+    expect(released).toBe(true);
+  });
+
+  it("gives the lease up when the work throws, and only its holder can renew or release it", async () => {
+    const lock = memoryRunLock();
+    const noop: Metered = async (request) => ({ ok: false, attemptId: request.attemptId, sent: false, reason: "kill-switch" });
+    await expect(asOnlyRunner(lock, noop, async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
+    // Free again after the throw.
+    const lease = await lock.acquire();
+    expect(lease).not.toBeNull();
+    expect(await lock.acquire()).toBeNull();
+    expect(await lease!.renew()).toBe(true);
+    await lease!.release();
+    expect(await lease!.renew()).toBe(false);
+    const next = await lock.acquire();
+    expect(next).not.toBeNull();
+    // The old holder cannot release the new holder's lease.
+    await lease!.release();
+    expect(await lock.acquire()).toBeNull();
+    expect(await asOnlyRunner(lock, noop, async () => "ran")).toEqual({ ok: false });
+    await next!.release();
+    expect(await asOnlyRunner(lock, noop, async () => "ran")).toEqual({ ok: true, value: "ran" });
+  });
+});
+
+const redisUrl = process.env.TEST_REDIS_URL;
+describe.skipIf(!redisUrl)("the lease in Redis", () => {
+  const key = () => `ta-test-lease-${randomUUID()}`;
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it("is held by one run at a time, across connections, and only its holder can renew or release it", async () => {
+    const one = await connectRedis(redisUrl!);
+    const two = await connectRedis(redisUrl!);
+    try {
+      const k = key();
+      const a = redisRunLock(one.runner, k);
+      const b = redisRunLock(two.runner, k);
+      const lease = await a.acquire();
+      expect(lease).not.toBeNull();
+      expect(await b.acquire()).toBeNull();
+      expect(await a.acquire()).toBeNull();
+      expect(await lease!.renew()).toBe(true);
+      await lease!.release();
+      expect(await lease!.renew()).toBe(false);
+      const other = await b.acquire();
+      expect(other).not.toBeNull();
+      // The first holder's release does nothing to the second holder's lease.
+      await lease!.release();
+      expect(await a.acquire()).toBeNull();
+      await other!.release();
+    } finally {
+      await one.close();
+      await two.close();
+    }
+  });
+
+  it("frees itself when its holder stops renewing, as after a crash", async () => {
+    const { runner, close } = await connectRedis(redisUrl!);
+    try {
+      const k = key();
+      const lock = redisRunLock(runner, k, { ttlMs: 150 });
+      const crashed = await lock.acquire();
+      expect(crashed).not.toBeNull();
+      expect(await lock.acquire()).toBeNull();
+      await wait(250);
+      // The holder never released. The lease ran out, and the next run gets it.
+      const next = await lock.acquire();
+      expect(next).not.toBeNull();
+      // The crashed run, coming back, finds the lease is no longer its own.
+      expect(await crashed!.renew()).toBe(false);
+      // Renewing keeps it past its first term.
+      await wait(100);
+      expect(await next!.renew()).toBe(true);
+      await wait(100);
+      expect(await lock.acquire()).toBeNull();
+      await next!.release();
+    } finally {
+      await close();
+    }
   });
 });

@@ -109,7 +109,9 @@ say(`Envelope "${envelope}": ${usd(before.committedNano)} committed before the r
 
 const run = await runTrial(config, {
   metered: runtime.metered,
-  // Read again once this run holds the lock: the plan printed above was made before it.
+  // The lease lives in the same Redis as the counter, so it holds across terminals and checkouts.
+  lock: runtime.runLock,
+  // Read again once this run holds the lease: the plan printed above was made before it.
   stored: () => runtime.store.attempts(envelope),
   onAttempt: ({ attempt, resumed, ms, report }) => {
     console.log(`\n${attempt.id}  ${attempt.theme}${resumed ? `  ${both("(from its saved skeleton)", "（从已保存的骨架继续）")}` : ""}`);
@@ -126,7 +128,7 @@ const run = await runTrial(config, {
   },
 });
 if (run.lockedBy) {
-  say(`Another run of this trial is already working in this folder (${run.lockedBy}). Nothing was sent.`, `另一个试验进程正在这个文件夹里运行（${run.lockedBy}）。未发送任何内容。`);
+  say(`Another run of this trial already holds the lease on this envelope. Nothing was sent.`, `另一个试验进程已经占用这个额度的运行许可。未发送任何内容。`);
   await runtime.close();
   process.exit(1);
 }

@@ -2,7 +2,8 @@ import { playDetective, type DetectiveReply, type DetectiveReport } from "../age
 import type { Case } from "../case/schema";
 import type { Metered } from "../metered";
 import type { SkeletonBrief } from "./plot";
-import { planTrial, readSaved, readStored, replyPath, savedReply, withRunLock, writeAttempt, writeWhole, type Standing, type StoredAttempt, type StoredSource, type TrialAttempt, type TrialConfig } from "./trial";
+import { memoryRunLock, type RunLock } from "../spend/run-lock";
+import { asOnlyRunner, planTrial, readSaved, readStored, replyPath, savedReply, writeAttempt, writeWhole, type RunDeps, type Standing, type StoredAttempt, type TrialAttempt, type TrialConfig } from "./trial";
 import { rebuildCase, SHUFFLE_VERSION, type WriteReport } from "./write";
 
 /**
@@ -22,9 +23,10 @@ import { rebuildCase, SHUFFLE_VERSION, type WriteReport } from "./write";
  *    rebuilt at any time, by any run, from the replies and the store alone.
  *  - A game that has been started is never started again: a game cannot be picked up in the
  *    middle.
- *  - One runner at a time. A run takes a lock on the folder before it reads the store or
- *    makes its plan, and a second run is turned away. So a run that finds trouble stops the
- *    pilot, not just itself, and no run can write over another's results.
+ *  - One runner at a time. A run takes a lease on the envelope before it reads the store or
+ *    makes its plan, and a second run is turned away, whichever terminal or checkout it was
+ *    started from. So a run that finds trouble stops the pilot, not just itself, and no run
+ *    can write over another's results.
  *  - A run stops at the first request that is refused, fails, or comes back unconfirmed.
  */
 
@@ -110,20 +112,27 @@ export interface PilotRun {
   stoppedBy?: string;
   /** True when nothing was sent: requests of this pilot are unresolved, or another run holds the lock. */
   blocked: boolean;
-  /** Set when another run was already working in this folder. */
+  /** Set when another run already held the lease. */
   lockedBy?: string;
 }
 
 /** Run what the plan says. The caller has made sure paid requests are authorized; the spend guard refuses them otherwise. */
-export async function runPilot(config: PilotConfig, deps: { metered: Metered; stored: StoredSource; onEntry?: (entry: PilotEntry) => void; now?: () => number }): Promise<PilotRun> {
-  // One runner at a time: see `withRunLock`. A second run is turned away before it reads or sends anything.
-  const locked = await withRunLock(config.dir, () => runPilotLocked(config, deps));
-  return locked.ok ? locked.value : { entries: [], blocked: true, lockedBy: locked.heldBy };
+const localLocks = new Map<string, RunLock>();
+const localLock = (dir: string): RunLock => {
+  let lock = localLocks.get(dir);
+  if (!lock) localLocks.set(dir, (lock = memoryRunLock()));
+  return lock;
+};
+
+export async function runPilot(config: PilotConfig, deps: RunDeps & { onEntry?: (entry: PilotEntry) => void }): Promise<PilotRun> {
+  // One runner at a time: see `RunLock`. A second run is turned away before it reads the store or sends anything.
+  const admitted = await asOnlyRunner(deps.lock ?? localLock(config.dir), deps.metered, (metered) => runPilotAdmitted(config, { ...deps, metered }));
+  return admitted.ok ? admitted.value : { entries: [], blocked: true, lockedBy: "another run" };
 }
 
-async function runPilotLocked(config: PilotConfig, deps: { metered: Metered; stored: StoredSource; onEntry?: (entry: PilotEntry) => void; now?: () => number }): Promise<PilotRun> {
+async function runPilotAdmitted(config: PilotConfig, deps: RunDeps & { onEntry?: (entry: PilotEntry) => void }): Promise<PilotRun> {
   const now = deps.now ?? Date.now;
-  // Read after the lock is held: nothing else is writing now, so this is the state to plan from.
+  // Read after the lease is held: nothing else is writing now, so this is the state to plan from.
   const plan = planPilot(config, await readStored(deps.stored));
   if (plan.unresolved.length > 0) return { entries: [], blocked: true };
   const run: PilotRun = { entries: [], blocked: false };
