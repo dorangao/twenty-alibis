@@ -1,4 +1,4 @@
-import { mentions, nameForms, type Names } from "../agents/line-guard";
+import { hearsWord, mentions, nameForms, type Names } from "../agents/line-guard";
 
 /**
  * Names the line guard cannot keep apart, or cannot see.
@@ -36,7 +36,8 @@ export function nameProblems(c: Roster): string[] {
       const b = forms[j]!;
       // A means may share a word with a place ("a key to the archive"); the guard allows for that.
       if ((a.kind === "location" && b.kind === "means") || (a.kind === "means" && b.kind === "location")) continue;
-      const shared = a.en.find((word) => b.en.includes(word));
+      // Compared the way the guard matches, not word for word: it hears "collin" in "Collins".
+      const shared = a.en.find((word) => hearsWord(word, b.name.en)) ?? b.en.find((word) => hearsWord(word, a.name.en));
       if (shared) problems.push(`"${a.name.en}" and "${b.name.en}" share the word "${shared}", so naming one would cover the other`);
       const inside = a.zh.find((piece) => b.name.zh.includes(piece)) ?? b.zh.find((piece) => a.name.zh.includes(piece));
       if (inside) problems.push(`“${a.name.zh}”和“${b.name.zh}”都含有“${inside}”，说到一个就会被当成也说了另一个`);

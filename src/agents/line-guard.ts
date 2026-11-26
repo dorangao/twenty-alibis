@@ -104,6 +104,14 @@ export function nameForms(c: Names): { kind: "suspect" | "location" | "means"; i
   ];
 }
 
+/** How an English word of a name is matched: whole, in any case, with an optional plural or possessive ending. */
+const wordPattern = (form: string): RegExp => new RegExp(`(?<![a-z])${escapeRegex(form)}(?:s|es|'s|’s)?(?![a-z])`, "i");
+
+/** Would the guard hear this word of a name in this text? "collin" is heard in "Collins". */
+export function hearsWord(word: string, text: string): boolean {
+  return wordPattern(word).test(text);
+}
+
 interface Vocabulary {
   /** English words, matched whole, in any case, with an optional plural or possessive ending. */
   en: { form: string; pattern: RegExp }[];
@@ -144,7 +152,7 @@ function vocabulary(c: Names): Vocabulary {
   const built: Vocabulary = {
     en: [...en].map((form) => ({
       form,
-      pattern: new RegExp(`(?<![a-z])${escapeRegex(form)}(?:s|es|'s|’s)?(?![a-z])`, "i"),
+      pattern: wordPattern(form),
     })),
     zh: [...zh],
   };

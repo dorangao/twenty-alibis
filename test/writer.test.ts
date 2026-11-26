@@ -276,6 +276,20 @@ describe("names are checked with the line guard's own word rules", () => {
     expect(problems).toContain("“魏立群”和“马立群”都含有“立群”，说到一个就会被当成也说了另一个");
   });
 
+  it("refuses names that differ only by an ending the guard hears through", () => {
+    // The guard hears "Collin" in "Collins", "Collin's" and "Collines": a plural or possessive ending does not make a new name.
+    const skeleton: Skeleton = {
+      ...lighthouseSkeleton,
+      suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 0 ? { ...s, name: { en: "Aldric Collins", zh: s.name.zh } } : i === 2 ? { ...s, name: { en: "Cormac Collin", zh: s.name.zh } } : s)),
+    };
+    const c = compiled(skeleton);
+    expect(nameProblems(c)).toEqual(['"Aldric Collins" and "Cormac Collin" share the word "collin", so naming one would cover the other']);
+    expect(skeletonProblems(skeleton)).toEqual(nameProblems(c));
+    // The reason: Aldric could name Cormac for free.
+    const said = c.assertions.filter((x) => x.id === "a-01-says");
+    expect(guardLine(c, "s-01", said, "I was in the gallery at 22:20 with Collin.", "en")).toEqual({ ok: true });
+  });
+
   it("refuses a name the guard cannot see", () => {
     expect(nameProblems(compiled(rename(3, { en: "Li Wu", zh: "吴" })))).toEqual([
       'the guard cannot see the English name "Li Wu": no word of it has three letters',
