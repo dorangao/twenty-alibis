@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectiveBriefing, MAX_WASTED_IN_A_ROW, playDetective } from "../src/agents/detective";
+import { DETECTIVE_OUTPUT_TOKENS, detectiveBriefing, MAX_WASTED_IN_A_ROW, playDetective } from "../src/agents/detective";
 import { archivePass } from "../src/case/fixtures/archive";
 import type { Case } from "../src/case/schema";
 import { createMetered, type Metered } from "../src/metered";
@@ -197,6 +197,26 @@ describe("a detective that does not make progress is stopped", () => {
     const report = await playDetective({ metered, c: lighthouse, gameId: "g1" });
     expect(report).toMatchObject({ outcome: "no-accusation", turns: 2 });
     expect(report.session.verdict).toBeUndefined();
+  });
+
+  it("leaves room to think: every turn carries the output limit, which a caller may set", async () => {
+    // Against the real model a turn's reasoning alone passed 800 tokens once the scene's record was held.
+    expect(DETECTIVE_OUTPUT_TOKENS).toBeGreaterThanOrEqual(3_000);
+    const usual = setup(SOLVE);
+    await playDetective({ metered: usual.metered, c: lighthouse, gameId: "g1" });
+    expect(new Set(usual.provider.requests.map((r) => r.maxOutputTokens))).toEqual(new Set([DETECTIVE_OUTPUT_TOKENS]));
+    const tight = setup(SOLVE);
+    await playDetective({ metered: tight.metered, c: lighthouse, gameId: "g1", maxOutputTokens: 1_200 });
+    expect(new Set(tight.provider.requests.map((r) => r.maxOutputTokens))).toEqual(new Set([1_200]));
+  });
+
+  it("is told that a person no record rules out is still open", () => {
+    const rules = detectiveBriefing(lighthouse);
+    expect(rules).toContain("A person no record rules out is still open");
+    expect(rules).toContain("keep inspecting while anyone is still open");
+    // The rules say how the game is scored. They name nobody and nothing from this case's answer.
+    const culprit = lighthouse.suspects.find((s) => s.id === lighthouse.culprit.suspect)!;
+    expect(rules.split("THE CASE")[0]).not.toContain(culprit.name.en);
   });
 
   it("stops at its turn limit without accusing", async () => {

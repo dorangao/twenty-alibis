@@ -2,8 +2,10 @@
  * A paid pilot: write a few cases, then let the detective play each one.
  * 付费试跑：先写几份案件，再让侦探逐个去破。
  *
- *   npm run pilot -- --plan   say exactly what a run would send now; sends nothing
- *   npm run pilot             run it (needs `npm run spend -- allow-paid "..."` first)
+ *   npm run pilot -- --plan            say exactly what a run would send now; sends nothing
+ *   npm run pilot                      run it (needs `npm run spend -- allow-paid "..."` first)
+ *   npm run pilot -- --game 2 [--plan] play the saved cases again as game 2: detective turns
+ *                                      only, under their own request ids, into their own files
  *
  * What runs, what is saved and what may be picked up again is decided in src/writer/pilot.ts
  * and src/writer/trial.ts, which are tested without a model. This file connects them to the
@@ -15,16 +17,28 @@
  * that has been started is never started again. The run stops at the first request that is
  * refused, fails, or comes back unconfirmed.
  *
+ * A later game ("--game 2") plays cases that are already written and saved, and writes none.
+ * Its requests are "<id>:g2:d1" to "<id>:g2:d<maxTurns>": a cap of its own, also once, ever.
+ * Game 1's records and files are left as they are.
+ *
  * It uses the "local" envelope only. Whether it may run at all is a person's decision, made
  * by authorizing paid requests; nothing in this file grants that.
  */
+import { DETECTIVE_OUTPUT_TOKENS } from "../src/agents/detective";
 import { createRuntime } from "../src/runtime";
 import { nanoToUsd } from "../src/spend/pricing";
 import { pilotTotals, planPilot, runCounts, runPilot, type PilotConfig } from "../src/writer/pilot";
 import { both, say } from "./say";
 
 const PILOT_ENVELOPE = "local";
+const at = process.argv.indexOf("--game");
+const game = at < 0 ? 1 : Number(process.argv[at + 1]);
+if (!Number.isSafeInteger(game) || game < 1) {
+  say(`--game takes a whole number from 1 up, not "${process.argv[at + 1] ?? ""}". Nothing was sent.`, `--game 后面要跟一个从 1 起的整数，而不是 "${process.argv[at + 1] ?? ""}"。未发送任何内容。`);
+  process.exit(1);
+}
 const config: PilotConfig = {
+  game,
   attempts: [
     { id: "pilot-a-1", theme: "a vineyard house on the last night of harvest" },
     { id: "pilot-a-2", theme: "a mountain railway hotel during an avalanche warning" },
@@ -48,12 +62,18 @@ if (envelope !== PILOT_ENVELOPE) {
 const stored = await runtime.store.attempts(envelope);
 const plan = planPilot(config, stored);
 const paidOpen = Boolean((await runtime.store.totals(envelope)).paidAllowed);
-const perAttempt = 2 + config.maxTurns;
+const perAttempt = (game === 1 ? 2 : 0) + config.maxTurns;
 
-say(
-  `${config.attempts.length} attempts of ${config.suspects} suspects and ${config.rooms} rooms. Each sends at most ${perAttempt} requests: 2 to write the case, then up to ${config.maxTurns} detective turns. At most ${config.attempts.length * perAttempt} requests in all, ever.`,
-  `共 ${config.attempts.length} 次尝试，每次 ${config.suspects} 名嫌疑人、${config.rooms} 个房间。每次最多 ${perAttempt} 个请求：2 个用于写案件，之后侦探最多 ${config.maxTurns} 轮。总共最多 ${config.attempts.length * perAttempt} 个请求，且只此一次。`,
-);
+if (game === 1)
+  say(
+    `${config.attempts.length} attempts of ${config.suspects} suspects and ${config.rooms} rooms. Each sends at most ${perAttempt} requests: 2 to write the case, then up to ${config.maxTurns} detective turns. At most ${config.attempts.length * perAttempt} requests in all, ever.`,
+    `共 ${config.attempts.length} 次尝试，每次 ${config.suspects} 名嫌疑人、${config.rooms} 个房间。每次最多 ${perAttempt} 个请求：2 个用于写案件，之后侦探最多 ${config.maxTurns} 轮。总共最多 ${config.attempts.length * perAttempt} 个请求，且只此一次。`,
+  );
+else
+  say(
+    `Game ${game} of ${config.attempts.length} saved cases. No case is written. Each case gets up to ${config.maxTurns} detective turns of at most ${DETECTIVE_OUTPUT_TOKENS} output tokens each. At most ${config.attempts.length * perAttempt} requests in all for this game, ever.`,
+    `${config.attempts.length} 份已保存案件的第 ${game} 局。不写任何案件。每份案件侦探最多 ${config.maxTurns} 轮，每轮输出最多 ${DETECTIVE_OUTPUT_TOKENS} 个 token。这一局总共最多 ${config.attempts.length * perAttempt} 个请求，且只此一次。`,
+  );
 const blocked: [string, string] | null =
   plan.unresolved.length > 0
     ? ["blocked: requests of this pilot are unresolved", "受阻：本试跑有请求结果不明"]
@@ -62,9 +82,9 @@ const blocked: [string, string] | null =
       : null;
 for (const row of plan.rows) {
   const writer = row.writer.kind === "closed" ? `writer closed (${row.writer.why[0]})` : row.writer.kind === "resume" ? "writer: 1 request from its saved skeleton" : "writer: 2 requests";
-  const game = row.game.kind === "closed" ? `game closed (${row.game.why[0]})` : `game: up to ${row.game.most} requests`;
+  const play = row.game.kind === "closed" ? `game closed (${row.game.why[0]})` : `game: up to ${row.game.most} requests`;
   const state = row.most === 0 ? both("nothing to send", "没有可发送的") : blocked ? both(...blocked) : both(`would send up to ${row.most}`, `最多发送 ${row.most} 个`);
-  console.log(`  ${row.attempt.id}  ${state}  |  ${writer}; ${game}  |  ${row.attempt.theme}`);
+  console.log(`  ${row.attempt.id}  ${state}  |  ${writer}; ${play}  |  ${row.attempt.theme}`);
 }
 const most = plan.rows.reduce((sum, r) => sum + r.most, 0);
 if (plan.unresolved.length > 0) {
@@ -136,8 +156,8 @@ say(
 // The state of the pilot, whichever runs did the work: made again from the saved replies and the store's records.
 const totals = await pilotTotals(config, await runtime.store.attempts(envelope));
 say(
-  `THE PILOT SO FAR, rebuilt from the saved replies and the spend store: attempted ${totals.attempted}, accepted by the gates ${totals.accepted}, played ${totals.played}, solved ${totals.solved}.`,
-  `试跑至今（由已保存的回复和额度存储重建）：尝试 ${totals.attempted}，通过关卡 ${totals.accepted}，已对局 ${totals.played}，破案 ${totals.solved}。`,
+  `THE PILOT SO FAR, GAME ${game}, rebuilt from the saved replies and the spend store: attempted ${totals.attempted}, accepted by the gates ${totals.accepted}, played ${totals.played}, solved ${totals.solved}.`,
+  `试跑至今（第 ${game} 局，由已保存的回复和额度存储重建）：尝试 ${totals.attempted}，通过关卡 ${totals.accepted}，已对局 ${totals.played}，破案 ${totals.solved}。`,
 );
 for (const row of totals.rows) console.log(`  ${row.id}  ${row.attempted ? "attempted" : "not attempted"}  ${row.accepted ? "accepted" : "not accepted"}  ${row.game}${row.turns ? ` in ${row.turns} turn(s)` : ""}${row.note ? `  (${row.note})` : ""}`);
 const after = await runtime.store.totals(envelope);

@@ -21,9 +21,12 @@ import type { Usage } from "../spend/pricing";
  * "solved" verdict from the scorer.
  */
 
-export const DETECTIVE_PROMPT_ID = "detective-v1";
+export const DETECTIVE_PROMPT_ID = "detective-v2";
 /** Output limit per turn, reasoning included. */
-export const DETECTIVE_OUTPUT_TOKENS = 800;
+// Measured against the real model: with the scene's record in the notebook a turn's reasoning
+// alone passed 800 tokens and the reply was cut off with no answer in it. Reasoning counts
+// toward this limit, so it has to leave room for the thinking as well as the answer.
+export const DETECTIVE_OUTPUT_TOKENS = 3_000;
 /** Two unusable replies in a row end the game: the detective is not making progress. */
 export const MAX_WASTED_IN_A_ROW = 2;
 
@@ -74,6 +77,8 @@ export interface DetectiveArgs {
   /** The most turns it may take. Defaults to the session cap plus two. */
   maxTurns?: number;
   cacheKey?: string;
+  /** The output limit for each turn, reasoning included. Defaults to DETECTIVE_OUTPUT_TOKENS. */
+  maxOutputTokens?: number;
   /**
    * Called with every reply of the detective's the moment it arrives, before it is read or
    * acted on. A caller that pays for replies saves them here.
@@ -104,9 +109,11 @@ export function detectiveBriefing(c: Case): string {
     "",
     "RULES",
     "1. Only records prove anything. What a suspect says proves nothing by itself, but hearing someone can open a record that was closed.",
-    "2. To solve the case you must accuse one person and cite records that together show three things about them: they were at the scene at the time of death, they held what was needed, and they had a motive. The records you cite must also rule out everyone else: by placing them somewhere else at that time, by showing they did not hold what was needed, or by showing they had no motive.",
-    "3. You have a limited number of actions. Asking a topic or inspecting a record costs one. Accusing ends the game.",
-    "4. Do not accuse until your records do all of rule 2. If you are out of actions, accuse with what you have.",
+    "2. To solve the case you must accuse one person and cite records that together show three things about them: they were at the scene at the time of death, they held what was needed, and they had a motive.",
+    "3. The records you cite must also rule out everyone else. A person is ruled out by a record that places them somewhere else at that time, or by a record that shows they did not hold what was needed, or by records that show they had none of the motives. A person no record rules out is still open, even when nothing points at them. So before you accuse, check every other person against your records, and keep inspecting while anyone is still open.",
+    "4. You have a limited number of actions. Asking a topic or inspecting a record costs one. Accusing ends the game.",
+    "5. Do not accuse until your records do all of rules 2 and 3. If you are out of actions, accuse with what you have. When you accuse, cite every record you hold.",
+    "6. Decide and answer. You do not need to explain your choice.",
     "",
     "THE CASE",
     `${c.title.en}. ${c.setting.en}`,
@@ -221,7 +228,7 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
       attemptId: `${args.gameId}:d${turn}`,
       messages: [system, { role: "user", content: now.text }],
       responseSchema: schema,
-      maxOutputTokens: DETECTIVE_OUTPUT_TOKENS,
+      maxOutputTokens: args.maxOutputTokens ?? DETECTIVE_OUTPUT_TOKENS,
       ...(args.cacheKey ? { cacheKey: args.cacheKey } : {}),
     });
     if (!result.ok) {
