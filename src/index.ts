@@ -29,3 +29,5 @@ export * from "./writer/skeleton";
 export * from "./agents/detective";
 export * from "./writer/trial";
 export * from "./writer/shuffle";
+export * from "./writer/pilot";
+export * from "./spend/run-lock";

@@ -43,6 +43,7 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 | Session | [`src/game/session.ts`](src/game/session.ts) | One player's game as plain data: questions, inspections, the notebook with its contradictions, the accusation and the reveal |
 | Terminal game | [`src/game/terminal.ts`](src/game/terminal.ts), [`scripts/play.ts`](scripts/play.ts) | The whole game as lines of text, in English and Chinese. Playable with the model off |
 | Detective | [`src/agents/detective.ts`](src/agents/detective.ts) | An agent that plays a case as a player does: it sees the notebook and what is open, picks one action a turn from that list only, and is scored by the same code. A case counts as agent-solved only when it earns a "solved" verdict |
+| Pilot | [`src/writer/pilot.ts`](src/writer/pilot.ts) | Writes a case, then lets the detective play it, and keeps four counts apart: attempted, accepted by the gates, played, solved |
 | Case writer | [`src/writer/`](src/writer) | Muse Ember writes a plot in two requests; code compiles it into a full case; the validator, the solver and a quality gate decide whether it is kept |
 
 ### The pair that defines "solvable" · 定义"可解"的一对案件

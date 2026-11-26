@@ -5,6 +5,7 @@ import { EmberProvider } from "./provider/ember";
 import { usdToNano } from "./spend/pricing";
 import { connectRedis } from "./spend/redis-client";
 import { RedisSpendStore } from "./spend/redis-store";
+import { redisRunLock, type RunLock } from "./spend/run-lock";
 
 type Env = Record<string, string | undefined>;
 
@@ -50,6 +51,8 @@ export function fileTrace(path: string): (event: TraceEvent) => void {
 export async function createRuntime(env: Env = process.env): Promise<{
   metered: Metered;
   store: RedisSpendStore;
+  /** The one-runner lease for this envelope, kept in the same Redis as the counter. */
+  runLock: RunLock;
   config: SpendConfig;
   close(): Promise<void>;
 }> {
@@ -72,5 +75,5 @@ export async function createRuntime(env: Env = process.env): Promise<{
     killSwitch: async () => env.EMBER_DISABLED === "1" || (await store.totals(config.envelope)).suspended !== null,
     trace: fileTrace(`traces/${config.envelope}.trace.jsonl`),
   });
-  return { metered, store, config, close: redis.close };
+  return { metered, store, runLock: redisRunLock(redis.runner, `${store.keyOf(config.envelope)}:run-lease`), config, close: redis.close };
 }

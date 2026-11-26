@@ -22,7 +22,8 @@
     "smoke": "node --env-file-if-exists=.env.local --import tsx scripts/smoke.ts",
     "trial:turn": "node --env-file-if-exists=.env.local --import tsx scripts/turn-trial.ts",
     "play": "node --env-file-if-exists=.env.local --import tsx scripts/play.ts",
-    "trial:writer": "node --env-file-if-exists=.env.local --import tsx scripts/write-trial.ts"
+    "trial:writer": "node --env-file-if-exists=.env.local --import tsx scripts/write-trial.ts",
+    "pilot": "node --env-file-if-exists=.env.local --import tsx scripts/pilot.ts"
   },
   "dependencies": {
     "ioredis": "^6.1.0",
