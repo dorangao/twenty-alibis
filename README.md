@@ -36,6 +36,9 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 | Fake provider | [`src/provider/fake.ts`](src/provider/fake.ts) | Scripted model responses. Tests and CI use only this: no key, no network, no cost |
 | Redis spend store | [`src/spend/redis-store.ts`](src/spend/redis-store.ts) | The same guard, durable: one record per budget, each check-and-reserve is one atomic script, the limit is fixed once set, and a damaged record refuses everything |
 | Ember provider | [`src/provider/ember.ts`](src/provider/ember.ts) | The only real model client: one stateless request, no retry, no redirect, no streaming. Reached only through the spend guard |
+| Suspect prompt | [`src/agents/suspect-prompt.ts`](src/agents/suspect-prompt.ts) | What a suspect is shown: the public briefing and its own voice. It learns what it may say only by calling `recall`, and a topic the player has not unlocked is not served |
+| Suspect turn | [`src/agents/suspect-turn.ts`](src/agents/suspect-turn.ts) | One question, start to finish: at most three requests, and a line to show even when every request is refused |
+| Line guard | [`src/agents/line-guard.ts`](src/agents/line-guard.ts) | Checks the model's wording against the statements of the turn, in English and Chinese |
 
 ### The pair that defines "solvable" · 定义"可解"的一对案件
 
@@ -45,6 +48,20 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 - **Fail twin:** the same hidden truth and the same log, but the one action that reaches the log is removed. Ada and Ben both still fit, so the solver refuses the case, even though its answer key is perfectly consistent.
 
 《九点的档案室》有八名嫌疑人，其中两人既有钥匙又有动机，都说自己 21:00 在门厅。保留"查看门禁记录"这一行动时案件可解；只删掉这一行动、案底完全不变时，两人都无法排除，求解器必须拒绝。
+
+### What a suspect says, and what counts · 嫌疑人说的话，和算数的话
+
+Muse Ember writes each suspect's line. Code decides what the line is allowed to be, and what goes in the notebook.
+
+- **The statements come from the case file.** When a question lands on a topic, the turn's statements are the ones that topic yields. The model's reply cannot add one, drop one or change one.
+- **The notebook is worded by code.** Each statement is rendered from its typed form, the same way every time, in both languages. Only the notebook counts as evidence.
+- **The model's line is shown only if it passes the guard.** The guard knows the case's closed vocabulary: people, places, clock times however they are written ("21:00", "nine", "九点"), and the means. It refuses a line that names any of it beyond the turn's statements, leaves a statement's place, time, object or motive out, puts someone beside or outside a place instead of in it, puts a "not" beside a stated fact, names the wrong half of the day ("09:00" for 21:00), claims to have been alone, answers in the wrong language, or steps out of character.
+- **One retry, then code speaks.** A refused line gets one retry. After that the player sees the code-rendered sentence.
+- **With nothing to state, the model is not asked for a line.** When no topic fits a question, or the topic is still locked, the suspect gives one of a few fixed lines. A line with no statement behind it would have nothing to be checked against. Text the model sends with a tool call, or instead of one, is never shown.
+
+The guard works on words, so it cannot judge meaning: a line could still bend a fact in words the vocabulary does not know. That is why the promise rests on the notebook and the solver, not on the line. Every turn records where its line came from and why any line was refused.
+
+每个嫌疑人的台词由 Muse Ember 来写，但台词能不能用、笔记本里记什么，都由代码决定。一次提问落在哪个话题上，这一轮的陈述就是案件文件里该话题给出的陈述，模型不能增、删或改。笔记本里的句子由代码按固定方式生成，只有笔记本算证据。模型的台词要通过守卫才会显示：守卫认识本案的人名、地点、各种写法的时间和作案手段，凡是多提了、漏提了、把陈述说反了、声称"只有我一个人"、语言不对或者出戏的台词都会被拒绝。被拒绝后重试一次，再不行就显示代码生成的句子。问题对不上任何话题、或者话题还没解锁时，不让模型写台词，嫌疑人只说几句固定的话之一：没有陈述可对照的台词无从检查。守卫只看字词，判断不了含义，所以我们承诺的是笔记本和求解器，不是台词本身。每一轮都会记录台词的来源和被拒绝的原因。
 
 ## Run it · 运行
 
