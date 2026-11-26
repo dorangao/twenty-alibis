@@ -28,3 +28,4 @@ export * from "./writer/names";
 export * from "./writer/skeleton";
 export * from "./agents/detective";
 export * from "./writer/trial";
+export * from "./writer/shuffle";
