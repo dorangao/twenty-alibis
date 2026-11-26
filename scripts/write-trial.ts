@@ -12,7 +12,11 @@
  *
  * An attempt whose skeleton id is already in the store is not started again, finished or
  * not: its skeleton reply is gone, so the people request could not be built from it.
- * The run stops at the first request that is refused, fails, or comes back unconfirmed.
+ * The run stops at the first request that is refused, fails, or comes back unconfirmed, and
+ * an attempt that ends that way is not counted as accepted or refused.
+ *
+ * It runs on one envelope only, the one it was approved for. And if any of its requests is
+ * still reserved or was kept after a failure, it sends nothing until that is reconciled.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRuntime } from "../src/runtime";
@@ -20,6 +24,8 @@ import { nanoToUsd } from "../src/spend/pricing";
 import { PEOPLE_OUTPUT_TOKENS, SKELETON_OUTPUT_TOKENS, writeCase, type WriteReport } from "../src/writer/write";
 import { both, say } from "./say";
 
+/** The envelope this trial was approved for. The six ids are once-only per envelope, so another envelope would be six more. */
+const APPROVED_ENVELOPE = "local";
 const SUSPECTS = 20;
 const ROOMS = 6;
 const ATTEMPTS: { id: string; theme: string }[] = [
@@ -31,9 +37,17 @@ const usd = (nano: number) => `$${nanoToUsd(nano).toFixed(6)}`;
 
 const runtime = await createRuntime(process.env);
 const envelope = runtime.config.envelope;
-const known = new Set((await runtime.store.attempts(envelope)).map((a) => a.attemptId));
+if (envelope !== APPROVED_ENVELOPE) {
+  say(`This trial is approved for the envelope "${APPROVED_ENVELOPE}" only; this terminal is set to "${envelope}". Nothing was sent.`, `本试验只获准用于额度 "${APPROVED_ENVELOPE}"，当前终端设置的是 "${envelope}"。未发送任何内容。`);
+  await runtime.close();
+  process.exit(1);
+}
+const mine = (await runtime.store.attempts(envelope)).filter((a) => ATTEMPTS.some((t) => a.attemptId === `${t.id}:skeleton` || a.attemptId === `${t.id}:people`));
+const known = new Set(mine.map((a) => a.attemptId));
 const started = (id: string) => known.has(`${id}:skeleton`) || known.has(`${id}:people`);
 const todo = ATTEMPTS.filter((a) => !started(a.id));
+/** Requests of this trial whose outcome the store does not know: still reserved, or kept after a failure. */
+const unresolved = mine.filter((a) => a.state !== "settled");
 
 say(
   `${ATTEMPTS.length} attempts of ${SUSPECTS} suspects and ${ROOMS} rooms. Each sends at most 2 requests (output limits ${SKELETON_OUTPUT_TOKENS} and ${PEOPLE_OUTPUT_TOKENS} tokens). At most ${ATTEMPTS.length * 2} requests in all, ever.`,
@@ -43,13 +57,24 @@ for (const a of ATTEMPTS) {
   const state = started(a.id) ? both("already started, will not be sent again", "此前已开始，不会重发") : both("would run", "将会执行");
   console.log(`  ${a.id}  ${state}  |  ${a.theme}`);
 }
-say(`A run now would send at most ${todo.length * 2} request(s).`, `现在运行最多发送 ${todo.length * 2} 个请求。`);
+if (unresolved.length > 0) {
+  say(
+    `${unresolved.length} request(s) of this trial have an unknown outcome (${unresolved.map((a) => `${a.attemptId}: ${a.state}`).join(", ")}). Reconcile them with the dashboard first (npm run spend -- attempts). A run now would send nothing.`,
+    `本试验有 ${unresolved.length} 个请求结果不明（${unresolved.map((a) => `${a.attemptId}: ${a.state}`).join("，")}）。请先对照后台核对（npm run spend -- attempts）。现在运行不会发送任何内容。`,
+  );
+} else {
+  say(`A run now would send at most ${todo.length * 2} request(s).`, `现在运行最多发送 ${todo.length * 2} 个请求。`);
+}
 
 if (process.argv.includes("--plan")) {
   await runtime.close();
   process.exit(0);
 }
 
+if (unresolved.length > 0) {
+  await runtime.close();
+  process.exit(1);
+}
 const before = await runtime.store.totals(envelope);
 if (!before.paidAllowed) {
   say("Paid requests are not authorized on this envelope. Nothing was sent.", "该额度未授权付费请求。未发送任何内容。");
@@ -73,6 +98,7 @@ for (const a of todo) {
     const c = report.case;
     console.log(`  ${c.title.en} · ${c.title.zh} | ${c.suspects.length} suspects, ${c.locations.length} rooms`);
     if (report.quality) console.log(`  shortlist ${report.quality.shortlist.length} | proof ${report.quality.proofActions} actions, ${report.quality.interviews} interview(s)`);
+    for (const note of report.quality?.notes ?? []) console.log(`    note: ${note}`);
     // The file holds the whole case, answer included. The folder is ignored by git.
     writeFileSync(`cases/generated/${a.id}.json`, `${JSON.stringify({ accepted: report.accepted, failedAt: report.failedAt ?? null, reasons: report.reasons, case: c }, null, 2)}\n`);
   }

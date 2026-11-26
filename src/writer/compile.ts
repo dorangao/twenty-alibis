@@ -1,5 +1,6 @@
 import type { Assertion, Case, Evidence, Text } from "../case/schema";
 import { deathSlot, NO_MOTIVE, plotIds, type People, type Skeleton } from "./plot";
+import { resolveDoors } from "./skeleton";
 
 /**
  * Turn a plot into a full case.
@@ -8,11 +9,11 @@ import { deathSlot, NO_MOTIVE, plotIds, type People, type Skeleton } from "./plo
  *
  *  - One statement per suspect: where they were at the time of death. An innocent suspect
  *    states the truth. The culprit states a room next to the scene; that is the case's
- *    declared lie.
+ *    declared lie. Statement ids have one pattern for everyone, so an id never says who lies.
  *  - Records, all authoritative and all true because they are read off the plot: a register
  *    of who holds the means and who does not; the victim's papers, saying who had which
- *    motive and, for anyone who holds the means, that they had none; one record per occupied
- *    room, listing who was there at the time of death.
+ *    motive and, for anyone who holds the means, that they had none; one record per room,
+ *    occupied or empty, listing who was there at the time of death.
  *  - The record of the scene can only be inspected after one witness has been heard. The
  *    briefing says who that is. The witness is never one of the people the briefing shows
  *    with both means and motive, so who the witness is says nothing about who did it.
@@ -22,7 +23,17 @@ import { deathSlot, NO_MOTIVE, plotIds, type People, type Skeleton } from "./plo
  * gate (quality.ts).
  */
 
-export type CompileResult = { ok: true; case: Case; scene: string; witness: string; shortlist: string[] } | { ok: false; problems: string[] };
+export type CompileResult =
+  | {
+      ok: true;
+      case: Case;
+      scene: string;
+      witness: string;
+      shortlist: string[];
+      /** True when another shortlisted suspect really was in the room the culprit claims. */
+      sharedAlibi: boolean;
+    }
+  | { ok: false; problems: string[] };
 
 const listEn = (names: string[]) => (names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`);
 const listZh = (names: string[]) => names.join("、");
@@ -33,19 +44,8 @@ export function compilePlot(id: string, skeleton: Skeleton, people: People): Com
   const death = deathSlot(skeleton);
 
   // ---- Rooms and doors. A door works both ways, whichever room lists it. ----
-  const roomByName = new Map(skeleton.rooms.map((r, i) => [r.name.en.trim().toLowerCase(), ids.rooms[i]!]));
-  if (roomByName.size !== skeleton.rooms.length) problems.push("two rooms have the same English name");
-  const doors = new Map<string, Set<string>>(ids.rooms.map((r) => [r, new Set<string>()]));
-  skeleton.rooms.forEach((room, i) => {
-    for (const name of room.doors) {
-      const other = roomByName.get(name.trim().toLowerCase());
-      if (!other) problems.push(`room "${room.name.en}" lists a door to "${name}", which is not a room`);
-      else if (other !== ids.rooms[i]) {
-        doors.get(ids.rooms[i]!)!.add(other);
-        doors.get(other)!.add(ids.rooms[i]!);
-      }
-    }
-  });
+  const { doors, problems: doorProblems } = resolveDoors(skeleton);
+  problems.push(...doorProblems);
 
   // ---- The people rows: one per suspect, one room per slot. ----
   const rows = new Map<string, People["suspects"][number]>();
@@ -81,23 +81,35 @@ export function compilePlot(id: string, skeleton: Skeleton, people: People): Com
   // ---- The scene, and the room the culprit claims instead. ----
   const culprit = people.culprit;
   const scene = roomAtDeath(culprit);
-  const claimed = ids.rooms.find((r) => doors.get(scene)!.has(r));
+  const culpritOK = hasMeans(culprit) && motiveOf(culprit) !== null;
+  // Who the briefing will show with both means and motive.
+  const shortlist = ids.suspects.filter((s) => hasMeans(s) && motiveOf(s) !== null);
+  // The culprit claims a room next to the scene. A room where another shortlisted person
+  // really was is preferred: then two of the people under suspicion say the same room, and
+  // the claim alone does not mark the liar.
+  const next = ids.rooms.filter((r) => doors.get(scene)!.has(r));
+  const shared = next.find((r) => shortlist.some((s) => s !== culprit && roomAtDeath(s) === r));
+  const claimed = shared ?? next[0];
   if (!claimed) problems.push(`the scene, "${roomName(scene).en}", has no door, so the culprit has no neighbouring room to claim`);
   if (!hasMeans(culprit)) problems.push("the culprit does not hold the means");
   if (!motiveOf(culprit)) problems.push("the culprit has no motive");
 
-  // ---- Who the briefing will show with both means and motive, and who keeps the scene's record. ----
-  const shortlist = ids.suspects.filter((s) => hasMeans(s) && motiveOf(s) !== null);
+  // ---- Who keeps the scene's record: the first person the briefing does not show with both means and motive. ----
   const witness = ids.suspects.find((s) => !shortlist.includes(s));
   if (!witness) problems.push("everyone holds the means and has a motive, so there is no one to keep the scene's record");
-  if (problems.length > 0 || !claimed || !witness) return { ok: false, problems };
+  if (problems.length > 0 || !claimed || !witness || !culpritOK) return { ok: false, problems };
 
-  // ---- Statements. ----
+  // ---- Statements and facts. ----
+  // Ids say what kind of thing an assertion is, never whether it is true. Every suspect's
+  // statement is "<n>-says" and every recorded place is "<n>-was", guilty or not: the id of
+  // a statement reaches the model inside `recall`, and must not tell it who is lying.
   const assertions: Assertion[] = [];
-  const at = (s: string) => `a-${s.slice(2)}-at`;
-  const claim = `a-${culprit.slice(2)}-claim`;
-  for (const s of ids.suspects) assertions.push({ id: at(s), prop: { kind: "at", subject: s, slot: death, location: roomAtDeath(s) } });
-  assertions.push({ id: claim, prop: { kind: "at", subject: culprit, slot: death, location: claimed } });
+  const says = (s: string) => `a-${s.slice(2)}-says`;
+  const was = (s: string) => `a-${s.slice(2)}-was`;
+  for (const s of ids.suspects) {
+    assertions.push({ id: says(s), prop: { kind: "at", subject: s, slot: death, location: s === culprit ? claimed : roomAtDeath(s) } });
+    assertions.push({ id: was(s), prop: { kind: "at", subject: s, slot: death, location: roomAtDeath(s) } });
+  }
   const means = (s: string) => `a-${s.slice(2)}-means`;
   for (const s of ids.suspects) assertions.push({ id: means(s), prop: { kind: "means", subject: s, means: "m-01", value: hasMeans(s) } });
   const motive = (s: string, m: string) => `a-${s.slice(2)}-${m}`;
@@ -166,18 +178,22 @@ export function compilePlot(id: string, skeleton: Skeleton, people: People): Com
   });
   briefing.push("e-keeper");
 
-  const occupied = ids.rooms.filter((r) => ids.suspects.some((s) => roomAtDeath(s) === r));
-  for (const r of occupied) {
+  // One record for every room, in the skeleton's order, occupied or not. If only occupied
+  // rooms could be inspected, the menu itself would say which rooms were empty.
+  for (const r of ids.rooms) {
     const present = ids.suspects.filter((s) => roomAtDeath(s) === r);
     evidence.push({
       id: `e-room-${r.slice(2)}`,
       kind: "record",
       authoritative: true,
-      proves: present.map(at),
-      text: {
-        en: `${roomName(r).en}, ${death}: ${listEn(present.map((s) => nameOf(s).en))} ${present.length === 1 ? "was" : "were"} here.`,
-        zh: `${roomName(r).zh}，${death}：${listZh(present.map((s) => nameOf(s).zh))}在这里。`,
-      },
+      proves: present.map(was),
+      text:
+        present.length === 0
+          ? { en: `${roomName(r).en}, ${death}: nobody was recorded here.`, zh: `${roomName(r).zh}，${death}：没有人在这里的记录。` }
+          : {
+              en: `${roomName(r).en}, ${death}: ${listEn(present.map((s) => nameOf(s).en))} ${present.length === 1 ? "was" : "were"} here.`,
+              zh: `${roomName(r).zh}，${death}：${listZh(present.map((s) => nameOf(s).zh))}在这里。`,
+            },
     });
   }
 
@@ -193,7 +209,7 @@ export function compilePlot(id: string, skeleton: Skeleton, people: People): Com
     suspects: skeleton.suspects.map((s, i) => {
       const sid = ids.suspects[i]!;
       const own = motiveOf(sid);
-      return { id: sid, name: s.name, role: s.role, persona: s.persona, whereabouts: whereabouts.get(sid)!, means: hasMeans(sid) ? ["m-01"] : [], motives: own ? [own] : [], lies: sid === culprit ? [claim] : [] };
+      return { id: sid, name: s.name, role: s.role, persona: s.persona, whereabouts: whereabouts.get(sid)!, means: hasMeans(sid) ? ["m-01"] : [], motives: own ? [own] : [], lies: sid === culprit ? [says(sid)] : [] };
     }),
     assertions,
     evidence,
@@ -203,19 +219,19 @@ export function compilePlot(id: string, skeleton: Skeleton, people: People): Com
         id: `t-${s.slice(2)}`,
         suspect: s,
         label: { en: `Where were you at ${death}?`, zh: `${death} 你在哪里？` },
-        yields: [s === culprit ? claim : at(s)],
+        yields: [says(s)],
       })),
-      inspections: occupied.map((r) => ({
+      inspections: ids.rooms.map((r) => ({
         id: `i-${r.slice(2)}`,
         label: { en: `Check who was in the ${roomName(r).en.toLowerCase()} at ${death}`, zh: `查看 ${death} 谁在${roomName(r).zh}` },
         yields: [`e-room-${r.slice(2)}`],
         // The scene's record is kept by the witness: it opens once the witness has been heard.
-        ...(r === scene ? { requires: [at(witness)] } : {}),
+        ...(r === scene ? { requires: [says(witness)] } : {}),
       })),
     },
     culprit: { suspect: culprit, motive: motiveOf(culprit)! },
     // Enough to hear everyone and look at every record, so one play can both prove the case and catch the lie.
-    sessionCap: ids.suspects.length + occupied.length,
+    sessionCap: ids.suspects.length + ids.rooms.length,
   };
-  return { ok: true, case: c, scene, witness, shortlist };
+  return { ok: true, case: c, scene, witness, shortlist, sharedAlibi: shared !== undefined };
 }

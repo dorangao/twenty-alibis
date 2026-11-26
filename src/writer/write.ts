@@ -4,6 +4,7 @@ import type { Metered, MeteredRequest } from "../metered";
 import { compilePlot } from "./compile";
 import { peopleMessages, peopleRequestSchema, PeopleSchema, plotIds, skeletonMessages, skeletonRequestSchema, SkeletonSchema, type SkeletonBrief } from "./plot";
 import { assessQuality, type Quality } from "./quality";
+import { skeletonProblems } from "./skeleton";
 
 /**
  * One attempt at a new case: two requests to the model, then code.
@@ -13,7 +14,8 @@ import { assessQuality, type Quality } from "./quality";
  * The attempt stops at the first stage that fails and says which one, so a run of attempts
  * can report where plots go wrong. There is no repair here: a failed attempt is a failed
  * attempt. A request that is refused, fails, or comes back with its cost unconfirmed ends
- * the attempt, and the caller should end its run.
+ * the attempt, and the caller should end its run. An attempt with such a problem is never
+ * reported as accepted, even when both replies arrived.
  */
 
 export const WRITER_PROMPT_ID = "writer-v1";
@@ -94,9 +96,9 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
   if (rawSkeleton === null) return stop("skeleton", report.reasons);
   const skeleton = SkeletonSchema.safeParse(rawSkeleton);
   if (!skeleton.success) return stop("skeleton", skeleton.error.issues.slice(0, 8).map((i) => `skeleton: ${i.path.join(".")}: ${i.message}`));
-  if (skeleton.data.suspects.length !== args.brief.suspects) {
-    return stop("skeleton", [`the skeleton has ${skeleton.data.suspects.length} suspects; ${args.brief.suspects} were asked for`]);
-  }
+  // Everything that can be known to be wrong with the skeleton is checked before the second request is spent on it.
+  const flaws = skeletonProblems(skeleton.data, args.brief);
+  if (flaws.length > 0) return stop("skeleton", flaws);
   // The cost of the first request is not confirmed, or the envelope is suspended: send nothing more.
   if (report.problem) return stop("skeleton", [`stopped after the skeleton: ${report.problem}`]);
 
@@ -106,6 +108,9 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
   if (rawPeople === null) return stop("people", report.reasons);
   const people = PeopleSchema.safeParse(rawPeople);
   if (!people.success) return stop("people", people.error.issues.slice(0, 8).map((i) => `people: ${i.path.join(".")}: ${i.message}`));
+  // The reply is here, but its cost is not confirmed or the envelope is suspended. Until
+  // that is reconciled the attempt is not counted as anything: not accepted, not judged.
+  if (report.problem) return stop("people", [`the people reply came back, but the attempt is not judged: ${report.problem}`]);
 
   // ---- Code from here on. ----
   const compiled = compilePlot(args.attemptId, skeleton.data, people.data);

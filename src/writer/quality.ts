@@ -1,7 +1,7 @@
-import { nameForms } from "../agents/line-guard";
 import { proofRules } from "../case/proof";
 import type { Case } from "../case/schema";
 import { solve } from "../case/solver";
+import { nameProblems } from "./names";
 
 /**
  * The quality gate: what a case needs beyond being solvable.
@@ -14,13 +14,6 @@ import { solve } from "../case/solver";
 /** The fewest suspects the briefing must show with both means and motive. With one, the briefing names the culprit. */
 export const MIN_SHORTLIST = 3;
 
-/** English words that are also names. A suspect called May gets "May I go now?" refused. */
-const EVERYDAY = new Set(
-  "may will grace mark bill rose art hope joy faith dawn april june august summer autumn frank pat sue guy don rob rich drew chase hunter mason page penny ray rod sandy skip stone wade ward lane hall room hill park lake bell wood field west north south east young old long short white black brown green gray grey king queen prince lord lady major miles max norm bob jack tom dick harry sky rain storm star moon sun son man men boy girl miss lee low high day night dean earl duke".split(
-    " ",
-  ),
-);
-
 export interface Quality {
   /** Suspects the briefing shows with both the means and a motive. */
   shortlist: string[];
@@ -29,32 +22,10 @@ export interface Quality {
   /** Actions in the solver's proof, and how many of them are questions to a suspect. */
   proofActions: number;
   interviews: number;
+  /** Reasons the case is refused. */
   problems: string[];
-}
-
-/** Names the line guard cannot keep apart, or cannot see. */
-export function nameProblems(c: Case): string[] {
-  const problems: string[] = [];
-  const forms = nameForms(c);
-  for (const f of forms) {
-    if (f.kind !== "suspect") continue;
-    if (f.en.length === 0) problems.push(`the guard cannot see the English name "${f.name.en}": no word of it has three letters`);
-    if (f.zh.length === 0) problems.push(`the guard cannot see the Chinese name "${f.name.zh}": it needs at least two characters`);
-    for (const word of f.en) if (EVERYDAY.has(word)) problems.push(`"${word}" in the name "${f.name.en}" is an everyday word, so ordinary lines would be refused`);
-  }
-  for (let i = 0; i < forms.length; i++) {
-    for (let j = i + 1; j < forms.length; j++) {
-      const a = forms[i]!;
-      const b = forms[j]!;
-      // A means may share a word with a place ("a key to the archive"); the guard allows for that.
-      if ((a.kind === "location" && b.kind === "means") || (a.kind === "means" && b.kind === "location")) continue;
-      const shared = a.en.find((word) => b.en.includes(word));
-      if (shared) problems.push(`"${a.name.en}" and "${b.name.en}" share the word "${shared}", so naming one would cover the other`);
-      const inside = a.zh.find((piece) => b.name.zh.includes(piece)) ?? b.zh.find((piece) => a.name.zh.includes(piece));
-      if (inside) problems.push(`“${a.name.zh}”和“${b.name.zh}”都含有“${inside}”，说到一个就会被当成也说了另一个`);
-    }
-  }
-  return problems;
+  /** Weaknesses that do not refuse the case but should be looked at before it is released. */
+  notes: string[];
 }
 
 export function assessQuality(c: Case): Quality {
@@ -75,5 +46,23 @@ export function assessQuality(c: Case): Quality {
   // One play must have room both to prove the case and to hear the culprit's lie.
   if (proof && proof.actions.length + 1 > c.sessionCap) problems.push(`proving the case and hearing the culprit takes ${proof.actions.length + 1} actions, but a session allows ${c.sessionCap}`);
 
-  return { shortlist, openAtBriefing, proofActions: proof?.actions.length ?? 0, interviews, problems };
+  // The culprit's statement should not stand alone. This check, unlike the ones above, reads
+  // the answer: it asks whether anyone else under suspicion states the room the culprit
+  // states. If nobody does, a player who knows how cases are built can pick out the liar
+  // from the statements, before any record.
+  const notes: string[] = [];
+  const prop = new Map(c.assertions.map((a) => [a.id, a.prop]));
+  const stated = new Map<string, string>();
+  for (const topic of c.actions.topics) {
+    for (const id of topic.yields) {
+      const p = prop.get(id);
+      if (p?.kind === "at" && p.subject === topic.suspect && p.slot === c.victim.death.slot) stated.set(topic.suspect, p.location);
+    }
+  }
+  const claim = stated.get(c.culprit.suspect);
+  if (claim && !shortlist.some((s) => s !== c.culprit.suspect && stated.get(s) === claim)) {
+    notes.push("no other shortlisted suspect states the room the culprit states, so the statements alone can mark the liar");
+  }
+
+  return { shortlist, openAtBriefing, proofActions: proof?.actions.length ?? 0, interviews, problems, notes };
 }

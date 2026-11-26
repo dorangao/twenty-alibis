@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { guardLine } from "../src/agents/line-guard";
 import { renderAssertion } from "../src/agents/render";
+import { recallResult, recallTool, suspectSystemMessages } from "../src/agents/suspect-prompt";
+import { startingHeld } from "../src/case/access";
 import type { Case } from "../src/case/schema";
 import { checkCase } from "../src/case/solver";
 import { accuse, ask, inspect, inspectionMenu, notebook, startSession } from "../src/game/session";
@@ -12,8 +14,10 @@ import { usdToNano } from "../src/spend/pricing";
 import { MemorySpendStore } from "../src/spend/store";
 import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
-import { NO_MOTIVE, peopleRequestSchema, plotIds, skeletonMessages, type People, type Skeleton } from "../src/writer/plot";
-import { assessQuality, MIN_SHORTLIST, nameProblems } from "../src/writer/quality";
+import { NO_MOTIVE, peopleRequestSchema, plotIds, skeletonMessages, SkeletonSchema, type People, type Skeleton } from "../src/writer/plot";
+import { nameProblems } from "../src/writer/names";
+import { assessQuality, MIN_SHORTLIST } from "../src/writer/quality";
+import { skeletonProblems } from "../src/writer/skeleton";
 import { writeCase } from "../src/writer/write";
 
 const compiled = (skeleton: Skeleton = lighthouseSkeleton, people: People = lighthousePeople): Case => {
@@ -44,7 +48,7 @@ describe("a handwritten 20-person plot compiles to a case the gates accept", () 
     expect(checked.reasons).toEqual([]);
     expect(checked.accepted).toBe(true);
     expect(checked.solve!.proven).toEqual(["s-03"]);
-    expect(checked.solve!.caughtLies).toEqual([{ suspect: "s-03", assertion: "a-03-claim", statedBy: "t-03", contradictedBy: "e-room-01" }]);
+    expect(checked.solve!.caughtLies).toEqual([{ suspect: "s-03", assertion: "a-03-says", statedBy: "t-03", contradictedBy: "e-room-01" }]);
     expect(c.suspects).toHaveLength(20);
   });
 
@@ -61,9 +65,9 @@ describe("a handwritten 20-person plot compiles to a case the gates accept", () 
   it("takes the hidden truth from the plot and nothing else", () => {
     expect(c.culprit).toEqual({ suspect: "s-03", motive: "mo-02" });
     expect(c.victim.death).toEqual({ slot: "22:20", location: "l-01" });
-    expect(c.suspects[2]).toMatchObject({ id: "s-03", whereabouts: { "22:00": "l-02", "22:20": "l-01", "22:40": "l-02" }, means: ["m-01"], motives: ["mo-02"], lies: ["a-03-claim"] });
+    expect(c.suspects[2]).toMatchObject({ id: "s-03", whereabouts: { "22:00": "l-02", "22:20": "l-01", "22:40": "l-02" }, means: ["m-01"], motives: ["mo-02"], lies: ["a-03-says"] });
     // The culprit claims the room next to the scene.
-    expect(c.assertions.find((a) => a.id === "a-03-claim")!.prop).toEqual({ kind: "at", subject: "s-03", slot: "22:20", location: "l-02" });
+    expect(c.assertions.find((a) => a.id === "a-03-says")!.prop).toEqual({ kind: "at", subject: "s-03", slot: "22:20", location: "l-02" });
     // Doors work both ways, whichever room listed them.
     expect(c.locations.find((l) => l.id === "l-04")!.adjacent).toEqual(["l-03"]);
   });
@@ -166,7 +170,7 @@ describe("the proof needs an interview", () => {
     s = (await ask(metered, c, s, { suspect: "s-02", topic: "t-02" })).session;
     for (const id of ["i-01", "i-02", "i-04", "i-05"]) s = inspect(c, s, id).session;
     expect(s.actions).toBeLessThanOrEqual(c.sessionCap);
-    expect(notebook(c, s).contradictions).toEqual([{ suspect: "s-03", assertion: "a-03-claim", evidence: "e-room-01" }]);
+    expect(notebook(c, s).contradictions).toEqual([{ suspect: "s-03", assertion: "a-03-says", evidence: "e-room-01" }]);
     expect(accuse(c, s, { suspect: "s-03", evidence: s.evidence }).verdict.outcome).toBe("solved");
   });
 
@@ -204,7 +208,7 @@ describe("a plot that cannot be compiled is refused with its reasons", () => {
     expect(c.locations.find((l) => l.id === "l-01")!.adjacent).toEqual(["l-02"]);
     expect(c.locations.find((l) => l.id === "l-04")!.adjacent).toEqual(["l-03"]);
     // The culprit still has the gallery to claim, and the case is still accepted.
-    expect(c.assertions.find((a) => a.id === "a-03-claim")!.prop).toMatchObject({ location: "l-02" });
+    expect(c.assertions.find((a) => a.id === "a-03-says")!.prop).toMatchObject({ location: "l-02" });
     expect(checkCase(c).accepted).toBe(true);
   });
 
@@ -253,7 +257,7 @@ describe("names are checked with the line guard's own word rules", () => {
     const c = compiled(rename(3, { en: "May Linden", zh: "林梅" }));
     expect(nameProblems(c)).toEqual(['"may" in the name "May Linden" is an everyday word, so ordinary lines would be refused']);
     // The reason: a harmless line by someone else is refused because it "names" her.
-    const foyer = c.assertions.filter((a) => a.id === "a-01-at");
+    const foyer = c.assertions.filter((a) => a.id === "a-01-says");
     expect(guardLine(c, "s-01", foyer, "I was in the gallery at 22:20. May I go now?", "en")).toMatchObject({ ok: false, reason: "uncovered", detail: "may" });
   });
 
@@ -277,6 +281,140 @@ describe("names are checked with the line guard's own word rules", () => {
       'the guard cannot see the English name "Li Wu": no word of it has three letters',
       'the guard cannot see the Chinese name "吴": it needs at least two characters',
     ]);
+  });
+});
+
+describe("nothing a suspect or a player sees depends on who did it", () => {
+  // The same plot twice: once Cormac Brandt did it, once Aldric Varga did, and the two swap where they were.
+  const a = lighthousePeople.suspects.find((s) => s.id === "s-01")!;
+  const b = lighthousePeople.suspects.find((s) => s.id === "s-03")!;
+  const other: People = { ...withRow("s-01", { whereabouts: b.whereabouts }, withRow("s-03", { whereabouts: a.whereabouts })), culprit: "s-01" };
+  const first = compiled();
+  const second = compiled(lighthouseSkeleton, other);
+
+  it("recall returns the same bytes to every suspect in both cases", () => {
+    expect(checkCase(second).accepted).toBe(true);
+    for (const c of [first, second]) expect(c.suspects.find((s) => s.lies.length > 0)!.id).toBe(c.culprit.suspect);
+    for (const s of first.suspects) {
+      const topic = `t-${s.id.slice(2)}`;
+      expect(recallResult(second, s.id, topic, startingHeld(second)), s.id).toBe(recallResult(first, s.id, topic, startingHeld(first)));
+      expect(JSON.stringify(recallTool(second, s.id, startingHeld(second))), s.id).toBe(JSON.stringify(recallTool(first, s.id, startingHeld(first))));
+      expect(JSON.stringify(suspectSystemMessages(second, s.id)), s.id).toBe(JSON.stringify(suspectSystemMessages(first, s.id)));
+    }
+    // Both under suspicion say the gallery, with the same id pattern, whoever is lying.
+    expect(recallResult(first, "s-03", "t-03", startingHeld(first))).toBe('{"topic":"t-03","statements":[{"id":"a-03-says","en":"I was in the gallery at 22:20.","zh":"22:20 我在回廊。"}]}');
+    expect(recallResult(first, "s-01", "t-01", startingHeld(first))).toBe('{"topic":"t-01","statements":[{"id":"a-01-says","en":"I was in the gallery at 22:20.","zh":"22:20 我在回廊。"}]}');
+  });
+
+  it("names statements and recorded facts by kind, never by truth", () => {
+    for (const c of [first, second]) {
+      const ids = c.assertions.map((x) => x.id);
+      expect(ids.filter((id) => /claim|lie|true|false/.test(id))).toEqual([]);
+      for (const s of c.suspects) {
+        expect(ids).toContain(`a-${s.id.slice(2)}-says`);
+        expect(ids).toContain(`a-${s.id.slice(2)}-was`);
+      }
+    }
+  });
+
+  it("offers every room for inspection, in the skeleton's order, occupied or empty", async () => {
+    const [, , KITCHEN] = plotIds(lighthouseSkeleton).rooms;
+    // Leonie Eklund was the only one in the cellar. Move her to the kitchen: the cellar is now empty.
+    const emptyCellar = compiled(lighthouseSkeleton, withRow("s-12", { whereabouts: stays(KITCHEN!) }));
+    expect(checkCase(emptyCellar).accepted).toBe(true);
+    expect(emptyCellar.actions.inspections.map((i) => i.id)).toEqual(["i-01", "i-02", "i-03", "i-04", "i-05"]);
+    // Before anything is inspected the menu is the same as in the case where the cellar was occupied.
+    const menu = (c: Case) => inspectionMenu(c, startSession(c, "s1")).map((i) => [i.id, i.label.en]);
+    expect(menu(emptyCellar)).toEqual(menu(first));
+    expect(emptyCellar.evidence.find((e) => e.id === "e-room-04")).toMatchObject({ authoritative: true, proves: [], text: { en: "Cellar, 22:20: nobody was recorded here.", zh: "地窖，22:20：没有人在这里的记录。" } });
+    // The cap counts every room.
+    expect(emptyCellar.sessionCap).toBe(25);
+  });
+
+  it("has the culprit claim a room that another suspect under suspicion also claims, and says so when it cannot", () => {
+    const shared = compilePlot("x", lighthouseSkeleton, lighthousePeople);
+    expect(shared.ok && shared.sharedAlibi).toBe(true);
+    expect(assessQuality(first).notes).toEqual([]);
+
+    // Give the lamp room a second door, to the kitchen, and put Aldric Varga in the kitchen.
+    // The gallery comes first among the scene's neighbours, but the kitchen is where another
+    // suspect really was, so the culprit claims the kitchen.
+    const [, , K] = plotIds(lighthouseSkeleton).rooms;
+    const twoDoors: Skeleton = { ...lighthouseSkeleton, rooms: lighthouseSkeleton.rooms.map((r) => (r.name.en === "Lamp room" ? { ...r, doors: ["Gallery", "Kitchen"] } : r)) };
+    const viaKitchen = compilePlot("x", twoDoors, withRow("s-01", { whereabouts: stays(K!) }));
+    expect(viaKitchen.ok && viaKitchen.sharedAlibi).toBe(true);
+    if (!viaKitchen.ok) throw new Error("expected a case");
+    expect(viaKitchen.case.assertions.find((x) => x.id === "a-03-says")!.prop).toMatchObject({ location: K });
+    expect(assessQuality(viaKitchen.case).notes).toEqual([]);
+
+    // Aldric Varga leaves the gallery for the kitchen. The gallery is the scene's only neighbour, so the culprit still claims it, alone.
+    const [, , KITCHEN] = plotIds(lighthouseSkeleton).rooms;
+    const alone = compilePlot("x", lighthouseSkeleton, withRow("s-01", { whereabouts: stays(KITCHEN!) }));
+    expect(alone.ok && alone.sharedAlibi).toBe(false);
+    if (!alone.ok) throw new Error("expected a case");
+    expect(checkCase(alone.case).accepted).toBe(true);
+    const quality = assessQuality(alone.case);
+    expect(quality.problems).toEqual([]);
+    expect(quality.notes).toEqual(["no other shortlisted suspect states the room the culprit states, so the statements alone can mark the liar"]);
+  });
+});
+
+describe("what is wrong with a skeleton is known before the second request", () => {
+  const brief = { theme: "a lighthouse during a storm", suspects: 20, rooms: 5 };
+
+  it("accepts the handwritten skeleton", () => {
+    expect(skeletonProblems(lighthouseSkeleton, brief)).toEqual([]);
+    expect(SkeletonSchema.safeParse(lighthouseSkeleton).success).toBe(true);
+  });
+
+  it("refuses the wrong number of people or rooms", () => {
+    expect(skeletonProblems(lighthouseSkeleton, { ...brief, rooms: 6 })).toEqual(["the skeleton has 5 rooms; 6 were asked for"]);
+    expect(skeletonProblems(lighthouseSkeleton, { ...brief, suspects: 12 })).toEqual(["the skeleton has 20 suspects; 12 were asked for"]);
+  });
+
+  it("refuses a room that no door leads to", () => {
+    const cut: Skeleton = { ...lighthouseSkeleton, rooms: lighthouseSkeleton.rooms.map((r) => (r.name.en === "Boathouse" ? { ...r, doors: [] } : { ...r, doors: r.doors.filter((d) => d !== "Boathouse") })) };
+    expect(skeletonProblems(cut, brief)).toEqual(['room "Boathouse" cannot be reached from "Lamp room" through any doors']);
+  });
+
+  it("refuses times that are not clock times, or not in order", () => {
+    const issues = (slots: string[]) => {
+      const parsed = SkeletonSchema.safeParse({ ...lighthouseSkeleton, slots });
+      return parsed.success ? [] : parsed.error.issues.map((i) => i.message);
+    };
+    expect(issues(["29:88", "29:98", "30:10"])).toContain("a time slot must be a clock time such as 21:00");
+    expect(issues(["22:00", "22:60", "23:00"])).toContain("a time slot must be a clock time such as 21:00");
+    expect(issues(["22:40", "22:20", "22:00"])).toEqual(["time slots must be in order, each later than the last"]);
+    expect(issues(["22:00", "22:00", "22:20"])).toEqual(["time slots must be in order, each later than the last"]);
+    expect(issues(["23:20", "23:40", "23:59"])).toEqual([]);
+  });
+
+  it("refuses a clear mix-up of the two languages", () => {
+    const issues = (change: Partial<Skeleton>) => {
+      const parsed = SkeletonSchema.safeParse({ ...lighthouseSkeleton, ...change });
+      return parsed.success ? [] : parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+    };
+    expect(issues({ setting: { en: "A lighthouse.", zh: "A lighthouse." } })).toEqual(["setting.zh: the Chinese text must be in Chinese"]);
+    expect(issues({ title: { en: "灯灭之夜", zh: "灯灭之夜" } })).toEqual(["title.en: the English text must be in English"]);
+    expect(issues({ means: { en: "A key to the lamp room 钥匙", zh: "灯室钥匙" } })).toEqual(["means.en: the English text must be in English"]);
+  });
+
+  it("refuses a role or a manner that names someone or somewhere from the case", () => {
+    const role = (en: string, zh: string): Skeleton => ({ ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 0 ? { ...s, role: { en, zh } } : s)) });
+    expect(skeletonProblems(role("Assistant to Cormac", "柏康默的助手"), brief)).toEqual([
+      'the role of "Aldric Varga" names something from the case (cormac, 柏康, 康默, 柏康默): "Assistant to Cormac" / “柏康默的助手”',
+    ]);
+    expect(skeletonProblems(role("Keeper of the lamp room", "灯室看守"), brief)[0]).toContain("names something from the case (lamp, room, 灯室)");
+    const persona: Skeleton = { ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 0 ? { ...s, persona: { en: "Speaks warmly of Helena.", zh: "说起林海伦总是很亲切。" } } : s)) };
+    expect(skeletonProblems(persona, brief)[0]).toContain('the persona of "Aldric Varga" names something from the case');
+  });
+
+  it("and even if such a role slipped through, the guard would not let it cover a name", () => {
+    const skeleton: Skeleton = { ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 0 ? { ...s, role: { en: "Assistant to Cormac", zh: "柏康默的助手" } } : s)) };
+    const c = compiled(skeleton);
+    const said = c.assertions.filter((x) => x.id === "a-01-says");
+    expect(guardLine(c, "s-01", said, "I was in the gallery at 22:20 with Cormac.", "en")).toMatchObject({ ok: false, reason: "uncovered", detail: "cormac" });
+    expect(guardLine(c, "s-01", said, "I was in the gallery at 22:20.", "en")).toEqual({ ok: true });
   });
 });
 
@@ -348,6 +486,44 @@ describe("the writer: two requests, then code", () => {
     const report = await writeCase({ metered: missing.metered, attemptId: "w-1", brief });
     expect(report).toMatchObject({ accepted: false, failedAt: "skeleton", requests: 1 });
     expect(report.reasons[0]).toContain("skeleton: means.zh");
+  });
+
+  it("does not spend the second request on a skeleton that is already known to be bad", async () => {
+    const cut: Skeleton = { ...lighthouseSkeleton, rooms: lighthouseSkeleton.rooms.map((r) => (r.name.en === "Boathouse" ? { ...r, doors: [] } : { ...r, doors: r.doors.filter((d) => d !== "Boathouse") })) };
+    const named: Skeleton = { ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 3 ? { ...s, name: { en: "May Linden", zh: "林梅" } } : s)) };
+    for (const [skeleton, askFor, reason] of [
+      [lighthouseSkeleton, { ...brief, rooms: 6 }, "the skeleton has 5 rooms; 6 were asked for"],
+      [cut, brief, 'room "Boathouse" cannot be reached from "Lamp room" through any doors'],
+      [named, brief, '"may" in the name "May Linden" is an everyday word, so ordinary lines would be refused'],
+    ] as const) {
+      const { provider, metered } = setup([json(skeleton), json(lighthousePeople)]);
+      const report = await writeCase({ metered, attemptId: "w-1", brief: askFor });
+      expect(report, reason).toMatchObject({ accepted: false, failedAt: "skeleton", reasons: [reason], requests: 1 });
+      expect(provider.dispatched, reason).toBe(1);
+    }
+    const bad = setup([json({ ...lighthouseSkeleton, slots: ["29:88", "29:98", "30:10"] }), json(lighthousePeople)]);
+    expect(await writeCase({ metered: bad.metered, attemptId: "w-1", brief })).toMatchObject({ accepted: false, failedAt: "skeleton", requests: 1 });
+    expect(bad.provider.dispatched).toBe(1);
+  });
+
+  it("never reports an attempt as accepted when the last request's cost is unconfirmed", async () => {
+    for (const [settled, breached, problem, costNano] of [
+      [false, false, "unconfirmed:not-settled", 12],
+      [true, true, "envelope-suspended", 24],
+    ] as const) {
+      const replies = [json(lighthouseSkeleton), json(lighthousePeople)];
+      let sent = 0;
+      // The skeleton settles cleanly; the people reply arrives, good in every other way, but unconfirmed.
+      const metered: Metered = async (request) => {
+        const first = sent === 0;
+        return { ok: true, attemptId: request.attemptId, response: replies[sent++]!, costNano: 12, settled: first ? true : settled, breached: first ? false : breached };
+      };
+      const report = await writeCase({ metered, attemptId: "w-1", brief });
+      expect(report, problem).toMatchObject({ accepted: false, failedAt: "people", requests: 2, costNano, problem });
+      expect(report.reasons, problem).toEqual([`the people reply came back, but the attempt is not judged: ${problem}`]);
+      expect(report.case, problem).toBeUndefined();
+      expect(sent).toBe(2);
+    }
   });
 
   it("says which later stage refused the plot, and keeps the case it got to", async () => {

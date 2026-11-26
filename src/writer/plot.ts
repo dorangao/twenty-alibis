@@ -16,14 +16,28 @@ import type { ChatMessage } from "../provider/types";
  * code from the plot: see compile.ts.
  */
 
-const Text = z.object({ en: z.string().trim().min(1), zh: z.string().trim().min(1) }).strict();
+const HAN = /\p{Script=Han}/u;
+/** The same thing said twice. A clear mix-up of the two languages is refused; whether the prose is good is a person's call. */
+const Text = z
+  .object({
+    en: z.string().trim().min(1).refine((v) => /[A-Za-z]/.test(v) && !HAN.test(v), "the English text must be in English"),
+    zh: z.string().trim().min(1).refine((v) => HAN.test(v), "the Chinese text must be in Chinese"),
+  })
+  .strict();
+
+/** A real clock time, "00:00" to "23:59". */
+const Clock = z.string().refine((v) => /^([01]\d|2[0-3]):[0-5]\d$/.test(v), "a time slot must be a clock time such as 21:00");
 
 export const SkeletonSchema = z
   .object({
     title: Text,
     setting: Text,
     /** Clock times, in order. The death is in the second. */
-    slots: z.array(z.string().regex(/^\d{2}:\d{2}$/)).min(3).max(5),
+    slots: z
+      .array(Clock)
+      .min(3)
+      .max(5)
+      .refine((slots) => slots.every((slot, i) => i === 0 || slot > slots[i - 1]!), "time slots must be in order, each later than the last"),
     /** `doors` lists the English names of the rooms this room opens onto. */
     rooms: z.array(z.object({ name: Text, doors: z.array(z.string()) }).strict()).min(3).max(8),
     victim: z.object({ name: Text, cause: Text }).strict(),
@@ -168,6 +182,7 @@ export function peopleMessages(skeleton: Skeleton, ids: PlotIds): ChatMessage[] 
         `3. Pick the culprit. At ${death} the culprit is in a room that has at least one door. The victim dies in that room.`,
         "4. The culprit holds the means and has a motive.",
         "5. At least three other people also hold the means and have a motive. This matters: the detective must have several people to suspect.",
+        `   At ${death}, at least one of those other people is in a room that has a door to the culprit's room.`,
         `6. Nobody else who holds the means and has a motive is in the culprit's room at ${death}.`,
         "7. At least one person who does not have both the means and a motive is somewhere in the building, for the detective to talk to.",
         `8. Use "${NO_MOTIVE}" for a person with no motive.`,

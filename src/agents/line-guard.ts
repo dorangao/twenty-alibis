@@ -53,6 +53,17 @@ export function languageOf(text: string): Lang {
 
 // ---- The case's closed vocabulary ----
 
+/**
+ * The part of a case the word rules read: who and what has a name, and the time slots. A
+ * whole `Case` fits, and so does a plot that has not been compiled yet.
+ */
+export interface Names {
+  suspects: readonly { id: string; name: { en: string; zh: string } }[];
+  locations: readonly { id: string; name: { en: string; zh: string } }[];
+  means: readonly { id: string; name: { en: string; zh: string } }[];
+  slots: readonly string[];
+}
+
 const FUNCTION_WORDS = new Set(["the", "and", "for", "with", "from", "into", "onto", "that", "this", "its", "his", "her"]);
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -74,7 +85,7 @@ const piecesOf = (name: string): string[] => {
  * The Chinese pieces of a means name, with any place name inside it taken out first:
  * "档案室钥匙" (the archive key) is heard as "钥匙", and "档案室" is already a place.
  */
-const meansPieces = (c: Case, name: string): string[] => {
+const meansPieces = (c: Names, name: string): string[] => {
   let rest = name;
   for (const l of c.locations) rest = rest.split(l.name.zh).join("\n");
   return rest.split("\n").flatMap(piecesOf);
@@ -85,7 +96,7 @@ const meansPieces = (c: Case, name: string): string[] => {
  * Chinese pieces it matches on. A case writer uses this to refuse names the guard would
  * confuse, with the very rules the guard applies.
  */
-export function nameForms(c: Case): { kind: "suspect" | "location" | "means"; id: string; name: { en: string; zh: string }; en: string[]; zh: string[] }[] {
+export function nameForms(c: Names): { kind: "suspect" | "location" | "means"; id: string; name: { en: string; zh: string }; en: string[]; zh: string[] }[] {
   return [
     ...c.suspects.map((s) => ({ kind: "suspect" as const, id: s.id, name: s.name, en: wordsOf(s.name.en), zh: piecesOf(s.name.zh) })),
     ...c.locations.map((l) => ({ kind: "location" as const, id: l.id, name: l.name, en: wordsOf(l.name.en), zh: [l.name.zh] })),
@@ -100,7 +111,7 @@ interface Vocabulary {
   zh: string[];
 }
 
-const cache = new WeakMap<Case, Vocabulary>();
+const cache = new WeakMap<Names, Vocabulary>();
 
 /**
  * Every way the case's people, places, means and non-clock time slots are named, in both
@@ -109,7 +120,7 @@ const cache = new WeakMap<Case, Vocabulary>();
  * the code-rendered sentence, which is always right. The victim is not in the vocabulary:
  * the victim is public and no statement is about them.
  */
-function vocabulary(c: Case): Vocabulary {
+function vocabulary(c: Names): Vocabulary {
   const known = cache.get(c);
   if (known) return known;
   const en = new Set<string>();
@@ -260,7 +271,7 @@ function isCovered(mention: string, allowed: ReadonlySet<string>): boolean {
 }
 
 /** Every piece of the case's vocabulary, and every clock time, that a text mentions. */
-export function mentions(c: Case, text: string): string[] {
+export function mentions(c: Names, text: string): string[] {
   const v = vocabulary(c);
   return [...v.en.filter((e) => e.pattern.test(text)).map((e) => e.form), ...v.zh.filter((form) => text.includes(form)), ...timesIn(text)];
 }
@@ -327,13 +338,14 @@ function motiveHeard(c: Case, motiveId: string, text: string): boolean {
   return new Set([...text].filter((ch) => chars.has(ch))).size >= 2;
 }
 
-/** What the suspect may be taken to have named: its own statements as code words them, its own name and its role. */
+/**
+ * What the suspect may be taken to have named: its own statements as code words them, and
+ * its own name. Not its role: a role such as "Assistant to Cormac" would let a line name
+ * Cormac for free.
+ */
 function coveredText(c: Case, speaker: string, accepted: readonly Assertion[]): string {
   const self = c.suspects.find((s) => s.id === speaker);
-  return [
-    ...accepted.flatMap((a) => [renderAssertion(c, speaker, a, "en"), renderAssertion(c, speaker, a, "zh")]),
-    self ? `${self.name.en} ${self.name.zh} ${self.role.en} ${self.role.zh}` : "",
-  ].join("\n");
+  return [...accepted.flatMap((a) => [renderAssertion(c, speaker, a, "en"), renderAssertion(c, speaker, a, "zh")]), self ? `${self.name.en} ${self.name.zh}` : ""].join("\n");
 }
 
 /**
