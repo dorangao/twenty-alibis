@@ -2,7 +2,7 @@ import { playDetective, type DetectiveReply, type DetectiveReport } from "../age
 import type { Case } from "../case/schema";
 import type { Metered } from "../metered";
 import type { SkeletonBrief } from "./plot";
-import { planTrial, readSaved, replyPath, savedReply, writeAttempt, writeWhole, type Standing, type StoredAttempt, type TrialAttempt, type TrialConfig } from "./trial";
+import { planTrial, readSaved, readStored, replyPath, savedReply, withRunLock, writeAttempt, writeWhole, type Standing, type StoredAttempt, type StoredSource, type TrialAttempt, type TrialConfig } from "./trial";
 import { rebuildCase, SHUFFLE_VERSION, type WriteReport } from "./write";
 
 /**
@@ -22,8 +22,9 @@ import { rebuildCase, SHUFFLE_VERSION, type WriteReport } from "./write";
  *    rebuilt at any time, by any run, from the replies and the store alone.
  *  - A game that has been started is never started again: a game cannot be picked up in the
  *    middle.
- *  - A run that did not send a request writes nothing about it. Two runs at once cannot
- *    send the same request, and the one that lost cannot write over the other's results.
+ *  - One runner at a time. A run takes a lock on the folder before it reads the store or
+ *    makes its plan, and a second run is turned away. So a run that finds trouble stops the
+ *    pilot, not just itself, and no run can write over another's results.
  *  - A run stops at the first request that is refused, fails, or comes back unconfirmed.
  */
 
@@ -107,13 +108,23 @@ export interface PilotRun {
   /** What this run did. It is not the state of the pilot: for that, see `pilotTotals`. */
   entries: PilotEntry[];
   stoppedBy?: string;
+  /** True when nothing was sent: requests of this pilot are unresolved, or another run holds the lock. */
   blocked: boolean;
+  /** Set when another run was already working in this folder. */
+  lockedBy?: string;
 }
 
 /** Run what the plan says. The caller has made sure paid requests are authorized; the spend guard refuses them otherwise. */
-export async function runPilot(config: PilotConfig, deps: { metered: Metered; stored: readonly StoredAttempt[]; onEntry?: (entry: PilotEntry) => void; now?: () => number }): Promise<PilotRun> {
+export async function runPilot(config: PilotConfig, deps: { metered: Metered; stored: StoredSource; onEntry?: (entry: PilotEntry) => void; now?: () => number }): Promise<PilotRun> {
+  // One runner at a time: see `withRunLock`. A second run is turned away before it reads or sends anything.
+  const locked = await withRunLock(config.dir, () => runPilotLocked(config, deps));
+  return locked.ok ? locked.value : { entries: [], blocked: true, lockedBy: locked.heldBy };
+}
+
+async function runPilotLocked(config: PilotConfig, deps: { metered: Metered; stored: StoredSource; onEntry?: (entry: PilotEntry) => void; now?: () => number }): Promise<PilotRun> {
   const now = deps.now ?? Date.now;
-  const plan = planPilot(config, deps.stored);
+  // Read after the lock is held: nothing else is writing now, so this is the state to plan from.
+  const plan = planPilot(config, await readStored(deps.stored));
   if (plan.unresolved.length > 0) return { entries: [], blocked: true };
   const run: PilotRun = { entries: [], blocked: false };
   for (const row of plan.rows) {
@@ -145,7 +156,7 @@ export async function runPilot(config: PilotConfig, deps: { metered: Metered; st
       entry.game = game;
       // A run whose first detective request was refused has no game to report, and must not
       // write over the report of the run that did play it.
-      if (replies.length > 0) {
+      if (replies.length > 0 && game.problem !== "refused:duplicate-attempt") {
         writeWhole(
           gamePath(config, row.attempt.id),
           `${JSON.stringify({ outcome: game.outcome, verdict: game.verdict ?? null, problem: game.problem ?? null, turns: game.turns, actions: game.actions, requests: game.requests, costNano: game.costNano, detectiveCostNano: game.detectiveCostNano, suspectCostNano: game.suspectCostNano, steps: game.steps }, null, 2)}\n`,

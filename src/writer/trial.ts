@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import type { Metered } from "../metered";
 import type { SkeletonBrief } from "./plot";
 import { checkSkeleton, SHUFFLE_VERSION, writeCase, type ReplyRecord, type WriteReport } from "./write";
@@ -67,6 +67,79 @@ export interface TrialPlan {
 const briefOf = (config: TrialConfig, attempt: TrialAttempt): SkeletonBrief => ({ theme: attempt.theme, suspects: config.suspects, rooms: config.rooms });
 export const replyPath = (config: TrialConfig, id: string, stage: "skeleton" | "people") => `${config.dir}/${id}.${stage}.json`;
 export const reportPath = (config: TrialConfig, id: string) => `${config.dir}/${id}.json`;
+
+/** The store's records, given as they are or fetched when asked for. A run fetches them after it holds the lock. */
+export type StoredSource = readonly StoredAttempt[] | (() => readonly StoredAttempt[] | Promise<readonly StoredAttempt[]>);
+export const readStored = async (source: StoredSource): Promise<readonly StoredAttempt[]> => (typeof source === "function" ? source() : source);
+
+/**
+ * One runner at a time.
+ *
+ * The request ids stop two runs from sending the same request. They do not stop two runs
+ * from working on the same trial at once, and that breaks two promises: a run that finds a
+ * request refused could write over the results of the run that sent it, and a run could go
+ * on sending after another run's request had failed. So a run takes a lock on the folder
+ * first, and only then reads the store and makes its plan. A second run is turned away
+ * before it reads or sends anything.
+ *
+ * The lock is a file created with "fail if it exists", holding the owner's process id. If
+ * the owner is no longer running (it crashed), the next run takes the lock over. It is
+ * released when the run ends, however it ends.
+ */
+export async function withRunLock<T>(dir: string, work: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; heldBy: string }> {
+  mkdirSync(dir, { recursive: true });
+  const path = `${dir}/.run.lock`;
+  const mine = JSON.stringify({ pid: process.pid, token: `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}` });
+  const take = (): boolean => {
+    try {
+      const fd = openSync(path, "wx");
+      writeFileSync(fd, mine);
+      closeSync(fd);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
+  };
+  if (!take()) {
+    const held = readSaved(path) ?? "";
+    let pid: number | undefined;
+    try {
+      pid = (JSON.parse(held) as { pid?: number }).pid;
+    } catch {
+      pid = undefined;
+    }
+    // Is the owner still running? Signal 0 only asks; it sends nothing.
+    let alive = true;
+    if (typeof pid === "number" && pid !== process.pid) {
+      try {
+        process.kill(pid, 0);
+      } catch (error) {
+        alive = (error as NodeJS.ErrnoException).code !== "ESRCH";
+      }
+    }
+    if (alive) return { ok: false, heldBy: typeof pid === "number" ? `process ${pid}` : "another run" };
+    // The owner is gone. Take the lock over: remove the stale file, then create it as before, so
+    // that of two runs doing this at once only one succeeds.
+    try {
+      unlinkSync(path);
+    } catch {
+      // someone else removed it first
+    }
+    if (!take()) return { ok: false, heldBy: "another run" };
+  }
+  try {
+    return { ok: true, value: await work() };
+  } finally {
+    if (readSaved(path) === mine) {
+      try {
+        unlinkSync(path);
+      } catch {
+        // already gone
+      }
+    }
+  }
+}
 
 /** Write a file whole or not at all: to a temporary name first, then renamed into place. */
 export function writeWhole(path: string, text: string): void {
@@ -174,9 +247,10 @@ export async function writeAttempt(config: TrialConfig, attempt: TrialAttempt, s
     onReply: (reply) => writeWhole(replyPath(config, attempt.id, reply.stage), `${JSON.stringify({ ...reply, brief, shuffleVersion: SHUFFLE_VERSION } satisfies SavedReply, null, 2)}\n`),
   });
   // Only a run that sent something for this attempt has anything to report. A run whose
-  // request was refused before it left (another run already sent it, say) must not write over
-  // what the run that did send it saved.
-  if (report.requests > 0) {
+  // request was refused because another run had already sent it must not write over what
+  // that run saved, even if it sent an earlier request of the attempt itself. The run lock
+  // keeps two runs apart; this is the second line.
+  if (report.requests > 0 && report.problem !== "refused:duplicate-attempt") {
     writeWhole(
       reportPath(config, attempt.id),
       `${JSON.stringify({ accepted: report.accepted, failedAt: report.failedAt ?? null, problem: report.problem ?? null, reasons: report.reasons, notes: report.notes, quality: report.quality ?? null, usage: report.usage, salt: report.salt, shuffleVersion: SHUFFLE_VERSION, case: report.case ?? null }, null, 2)}\n`,
@@ -189,17 +263,25 @@ export interface TrialRun {
   reports: { attempt: TrialAttempt; resumed: boolean; ms: number; report: WriteReport }[];
   /** Set when the run ended early because a request was refused, failed or came back unconfirmed. */
   stoppedBy?: string;
-  /** True when nothing was sent because requests of this trial are unresolved. */
+  /** True when nothing was sent: requests of this trial are unresolved, or another run holds the lock. */
   blocked: boolean;
+  /** Set when another run was already working in this folder. */
+  lockedBy?: string;
 }
 
 /**
  * Run what the plan says. The caller has already made sure paid requests are authorized; the
  * spend guard refuses them otherwise. `onAttempt` is called after each attempt, for printing.
  */
-export async function runTrial(config: TrialConfig, deps: { metered: Metered; stored: readonly StoredAttempt[]; onAttempt?: (entry: TrialRun["reports"][number]) => void; now?: () => number }): Promise<TrialRun> {
+export async function runTrial(config: TrialConfig, deps: { metered: Metered; stored: StoredSource; onAttempt?: (entry: TrialRun["reports"][number]) => void; now?: () => number }): Promise<TrialRun> {
+  const locked = await withRunLock(config.dir, () => runTrialLocked(config, deps));
+  return locked.ok ? locked.value : { reports: [], blocked: true, lockedBy: locked.heldBy };
+}
+
+async function runTrialLocked(config: TrialConfig, deps: { metered: Metered; stored: StoredSource; onAttempt?: (entry: TrialRun["reports"][number]) => void; now?: () => number }): Promise<TrialRun> {
   const now = deps.now ?? Date.now;
-  const plan = planTrial(config, deps.stored);
+  // Read after the lock is held: nothing else is writing now, so this is the state to plan from.
+  const plan = planTrial(config, await readStored(deps.stored));
   if (plan.unresolved.length > 0) return { reports: [], blocked: true };
   const run: TrialRun = { reports: [], blocked: false };
   for (const { attempt, standing } of plan.rows) {

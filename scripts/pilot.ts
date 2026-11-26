@@ -92,7 +92,8 @@ say(`Envelope "${envelope}": ${usd(before.committedNano)} committed before the r
 
 const run = await runPilot(config, {
   metered: runtime.metered,
-  stored,
+  // Read again once this run holds the lock: the plan printed above was made before it.
+  stored: () => runtime.store.attempts(envelope),
   onEntry: ({ attempt, writer, game, ms }) => {
     console.log(`\n${attempt.id}  ${attempt.theme}  (${ms} ms)`);
     if (writer) {
@@ -109,6 +110,16 @@ const run = await runPilot(config, {
     }
   },
 });
+if (run.lockedBy) {
+  say(`Another run of this pilot is already working in this folder (${run.lockedBy}). Nothing was sent.`, `另一个试跑进程正在这个文件夹里运行（${run.lockedBy}）。未发送任何内容。`);
+  await runtime.close();
+  process.exit(1);
+}
+if (run.blocked) {
+  say("Requests of this pilot became unresolved before this run was admitted. Nothing was sent.", "在本次运行获准之前，本试跑已有请求结果不明。未发送任何内容。");
+  await runtime.close();
+  process.exit(1);
+}
 if (run.stoppedBy) say(`STOPPED: ${run.stoppedBy}. No further attempt was started.`, `已停止：${run.stoppedBy}。没有再开始后面的尝试。`);
 
 console.log();

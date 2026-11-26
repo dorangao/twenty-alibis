@@ -109,7 +109,8 @@ say(`Envelope "${envelope}": ${usd(before.committedNano)} committed before the r
 
 const run = await runTrial(config, {
   metered: runtime.metered,
-  stored,
+  // Read again once this run holds the lock: the plan printed above was made before it.
+  stored: () => runtime.store.attempts(envelope),
   onAttempt: ({ attempt, resumed, ms, report }) => {
     console.log(`\n${attempt.id}  ${attempt.theme}${resumed ? `  ${both("(from its saved skeleton)", "（从已保存的骨架继续）")}` : ""}`);
     for (const u of report.usage) console.log(`  ${u.step.padEnd(16)} in ${u.inputTokens} (cached ${u.cachedTokens}) | out ${u.outputTokens} (reasoning ${u.reasoningTokens ?? "?"}) | finish ${u.finishReason ?? "?"}`);
@@ -124,6 +125,16 @@ const run = await runTrial(config, {
     }
   },
 });
+if (run.lockedBy) {
+  say(`Another run of this trial is already working in this folder (${run.lockedBy}). Nothing was sent.`, `另一个试验进程正在这个文件夹里运行（${run.lockedBy}）。未发送任何内容。`);
+  await runtime.close();
+  process.exit(1);
+}
+if (run.blocked) {
+  say("Requests of this trial became unresolved before this run was admitted. Nothing was sent.", "在本次运行获准之前，本试验已有请求结果不明。未发送任何内容。");
+  await runtime.close();
+  process.exit(1);
+}
 if (run.stoppedBy) say(`STOPPED: ${run.stoppedBy}. No further attempt was started.`, `已停止：${run.stoppedBy}。没有再开始后面的尝试。`);
 
 console.log();

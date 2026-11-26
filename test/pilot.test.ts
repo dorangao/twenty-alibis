@@ -4,14 +4,14 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { DetectiveReply } from "../src/agents/detective";
 import { archivePass } from "../src/case/fixtures/archive";
-import { createMetered, type TraceEvent } from "../src/metered";
+import { createMetered, type Metered, type TraceEvent } from "../src/metered";
 import { FakeProvider } from "../src/provider/fake";
 import type { ProviderRequest, ProviderResponse } from "../src/provider/types";
 import { usdToNano } from "../src/spend/pricing";
 import { MemorySpendStore } from "../src/spend/store";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
 import { detectivePath, gamePath, pilotTotals, planPilot, runCounts, runPilot, savedCase, savedGame, type PilotConfig } from "../src/writer/pilot";
-import type { SavedReply, StoredAttempt } from "../src/writer/trial";
+import { planTrial, withRunLock, writeAttempt, type SavedReply, type StoredAttempt } from "../src/writer/trial";
 
 const usage = { inputTokens: 1_000, cachedTokens: 0, outputTokens: 500 };
 const done = (value: unknown): ProviderResponse => ({ text: JSON.stringify(value), toolCalls: [], usage, finishReason: "stop" });
@@ -351,5 +351,126 @@ describe("a pilot: write a case, then let the detective play it", () => {
     expect(run.entries.every((e) => e.writer!.failedAt === "gate" && e.game === undefined)).toBe(true);
     expect(provider.dispatched).toBe(4);
     expect(shape(t.config, t.stored())).toEqual(["closed+closed=0", "closed+closed=0"]);
+  });
+});
+
+describe("one runner at a time", () => {
+  /** A wrapper that holds one request back until it is released, and says when it has been reached. */
+  function holding(inner: Metered, attemptId: string) {
+    let release!: () => void;
+    let arrived!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const reached = new Promise<void>((resolve) => (arrived = resolve));
+    const metered: Metered = async (request) => {
+      if (request.attemptId === attemptId) {
+        arrived();
+        await gate;
+      }
+      return inner(request);
+    };
+    return { metered, reached, release };
+  }
+
+  it("turns a second run away while the first is working, before it reads the store or sends anything", async () => {
+    const t = setup();
+    // The first run has sent the skeleton and is held just before its people request.
+    const a = holding(t.metered, "p-1:people");
+    const first = runPilot(t.config, { metered: a.metered, stored: () => t.stored() });
+    await a.reached;
+    expect(t.provider.dispatched).toBe(1);
+
+    // A second run starts now. The store shows a settled skeleton and a saved one: without the lock it would resume it.
+    let storeReads = 0;
+    const second = await runPilot(t.config, {
+      metered: t.metered,
+      stored: () => {
+        storeReads++;
+        return t.stored();
+      },
+    });
+    expect(second).toEqual({ entries: [], blocked: true, lockedBy: `process ${process.pid}` });
+    expect(storeReads).toBe(0);
+    expect(t.provider.dispatched).toBe(1);
+
+    // Released, the first run finishes everything, and its results stand.
+    a.release();
+    const done = await first;
+    expect(runCounts(done)).toEqual({ attempted: 2, accepted: 2, played: 2, solved: 2 });
+    expect(JSON.parse(readFileSync(`${t.dir}/p-1.json`, "utf8"))).toMatchObject({ accepted: true });
+    expect(await pilotTotals(t.config, t.stored())).toMatchObject({ attempted: 2, accepted: 2, played: 2, solved: 2 });
+    // The lock is gone, and a later run is admitted (and finds nothing to do).
+    expect(readdirSync(t.dir)).not.toContain(".run.lock");
+    expect(await runPilot(t.config, { metered: t.metered, stored: () => t.stored() })).toEqual({ entries: [], blocked: false });
+  });
+
+  it("so a request that fails stops the pilot: no other run sends anything after it", async () => {
+    // The second detective request of the first game fails.
+    let detectiveRequests = 0;
+    const t = setup({ fail: (request) => request.responseSchema?.name === "detective_action" && ++detectiveRequests === 2 });
+    const a = holding(t.metered, "p-1:d2");
+    const first = runPilot(t.config, { metered: a.metered, stored: () => t.stored() });
+    await a.reached;
+    expect(t.provider.dispatched).toBe(3); // skeleton, people, d1
+
+    // A second run starts while the first is held before the request that is about to fail.
+    const second = await runPilot(t.config, { metered: t.metered, stored: () => t.stored() });
+    expect(second.blocked).toBe(true);
+    expect(second.lockedBy).toBeDefined();
+    expect(t.provider.dispatched).toBe(3);
+
+    a.release();
+    const done = await first;
+    expect(done.stoppedBy).toBe("failed:outcome-unknown");
+    expect(t.provider.dispatched).toBe(4);
+    // From here on every run finds the unresolved request and sends nothing: the second case is never started.
+    for (let i = 0; i < 2; i++) expect(await runPilot(t.config, { metered: t.metered, stored: () => t.stored() })).toEqual({ entries: [], blocked: true });
+    expect(t.provider.dispatched).toBe(4);
+    expect(t.stored().some((r) => r.attemptId.startsWith("p-2:"))).toBe(false);
+  });
+
+  it("and, as a second line, a run refused as a duplicate does not write over the run that sent the request", async () => {
+    // Without the lock: A sends the skeleton and is held before the people request; B resumes from the saved
+    // skeleton and finishes; then A's people request is refused as a duplicate.
+    const t = setup();
+    const attempt = t.config.attempts[0]!;
+    const a = holding(t.metered, "p-1:people");
+    const first = writeAttempt(t.config, attempt, { kind: "fresh", most: 2 }, a.metered);
+    await a.reached;
+    const resume = planTrial(t.config, t.stored()).rows[0]!.standing;
+    expect(resume.kind).toBe("resume");
+    if (resume.kind === "closed") throw new Error("expected a resumable attempt");
+    const winner = await writeAttempt(t.config, attempt, resume, t.metered);
+    expect(winner).toMatchObject({ accepted: true, requests: 1 });
+    const saved = readFileSync(`${t.dir}/p-1.json`, "utf8");
+
+    a.release();
+    const loser = await first;
+    // The loser did send one request of its own, and was refused the other.
+    expect(loser).toMatchObject({ accepted: false, requests: 1, problem: "refused:duplicate-attempt" });
+    expect(readFileSync(`${t.dir}/p-1.json`, "utf8")).toBe(saved);
+    expect(t.provider.dispatched).toBe(2);
+  });
+
+  it("takes over a lock whose owner is gone, refuses one whose owner is running, and lets go when the work throws", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lock-"));
+    const lock = `${dir}/.run.lock`;
+    // A lock left by a process that no longer exists.
+    writeFileSync(lock, JSON.stringify({ pid: 2_147_483_646, token: "stale" }));
+    expect(await withRunLock(dir, async () => "ran")).toEqual({ ok: true, value: "ran" });
+    expect(readdirSync(dir)).toEqual([]);
+    // A lock held by a run that is still going.
+    let inner: unknown;
+    const outer = await withRunLock(dir, async () => {
+      inner = await withRunLock(dir, async () => "should not run");
+      return "outer";
+    });
+    expect(outer).toEqual({ ok: true, value: "outer" });
+    expect(inner).toEqual({ ok: false, heldBy: `process ${process.pid}` });
+    // Work that throws still releases the lock.
+    await expect(withRunLock(dir, async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
+    expect(readdirSync(dir)).toEqual([]);
+    // A lock file that cannot be read as a lock is not taken over.
+    writeFileSync(lock, "not json");
+    expect(await withRunLock(dir, async () => "ran")).toEqual({ ok: false, heldBy: "another run" });
   });
 });
