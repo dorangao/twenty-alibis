@@ -37,7 +37,7 @@ const HELP: Record<Lang, string[]> = {
     "  inspect <n>            inspect record number n",
     "  notebook               what you hold: evidence, statements, contradictions",
     "  accuse <person> <n…>   name the culprit and cite the evidence that proves it, by number",
-    "  accuse <person> all    the same, citing everything in your notebook",
+    "  accuse <person> all    the same, citing every numbered item of evidence you hold",
     "  reveal                 the truth, after you have accused",
     "  lang en|zh             change language",
     "  quit",
@@ -53,7 +53,7 @@ const HELP: Record<Lang, string[]> = {
     "  inspect <n>            查看第 n 项",
     "  notebook               笔记本：证据、陈述、矛盾",
     "  accuse <人> <n…>       指认凶手，并按编号引用能证明的证据",
-    "  accuse <人> all        同上，引用笔记本里的全部条目",
+    "  accuse <人> all        同上，引用你手里所有带编号的证据条目",
     "  reveal                 指认之后公开真相",
     "  lang en|zh             切换语言",
     "  quit",
@@ -125,6 +125,12 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
   };
   const noSuchPerson = () => [say("Which person? Type `people` for the list.", "哪一位？输入 people 查看名单。")];
 
+  /**
+   * An item of evidence as the player reads it, wherever it is shown: at the briefing, when it
+   * is found, and in the notebook. One that proves nothing carries the mark the rules name.
+   */
+  const asEvidence = (e: { text: Text; authoritative: boolean }): string => `${t(e.text)}${e.authoritative ? "" : `  ${t(NOTE_MARK)}`}`;
+
   const opening = (): string[] => {
     const scene = c.locations.find((l) => l.id === c.victim.death.location);
     return [
@@ -136,7 +142,7 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
       ),
       t(c.victim.cause),
       say("You have been given:", "你手里已有："),
-      ...notebook(c, s).evidence.map((e, i) => `  ${i + 1}. ${t(e.text)}`),
+      ...notebook(c, s).evidence.map((e, i) => `  ${i + 1}. ${asEvidence(e)}`),
       say("How a case is proven:", "怎样才算证明："),
       ...PROOF_RULES.map((rule, i) => `  ${i + 1}. ${t(rule)}`),
       left(),
@@ -157,7 +163,7 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
   };
   const book = () => {
     const b = notebook(c, s);
-    const lines = [say("Evidence:", "证据："), ...b.evidence.map((e, i) => `  ${i + 1}. ${t(e.text)}${e.authoritative ? "" : `  ${t(NOTE_MARK)}`}`)];
+    const lines = [say("Evidence:", "证据："), ...b.evidence.map((e, i) => `  ${i + 1}. ${asEvidence(e)}`)];
     lines.push(say("Statements:", "陈述："));
     if (b.statements.length === 0) lines.push(say("  none yet", "  暂无"));
     for (const st of b.statements) lines.push(`  ${nameOf(st.suspect)}: “${st[lang]}”`);
@@ -237,7 +243,7 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
         if (!item) return [say("Which record? Type `records` for the list.", "哪一项？输入 records 查看。")];
         const result = inspect(c, s, item.id);
         s = result.session;
-        return [...result.evidence.map((e) => `  ${t(e.text)}`), ...(result.repeated ? [] : [left()])];
+        return [...result.evidence.map((e) => `  ${asEvidence(e)}`), ...(result.repeated ? [] : [left()])];
       }
       case "notebook":
       case "笔记":

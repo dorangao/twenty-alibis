@@ -82,10 +82,36 @@ describe("the game in a terminal, with the model off", () => {
       const marked = lines.filter((l) => l.includes(NOTE_MARK[language]));
       expect(marked).toHaveLength(1);
       expect(marked[0]).toContain(note.text[language]);
+      // The same mark where the player first receives the item: at the briefing.
+      const first = game.opening().filter((l) => l.includes(NOTE_MARK[language]));
+      expect(first).toHaveLength(1);
+      expect(first[0]).toContain(note.text[language]);
       // Rule 1 names the mark by the word the notebook uses.
       expect(game.opening().join("\n")).toContain(language === "en" ? "marked as a note" : "标为“备注”");
     }
     expect(NOTE_MARK).toEqual({ en: "(a note, not evidence)", zh: "（备注，不算证据）" });
+  });
+
+  it("marks such an item when it is found by inspecting, too, and marks no item that proves", async () => {
+    // A case whose first inspection yields a note: the handwritten case, with one found item made a note.
+    const inspected = c.actions.inspections[0]!;
+    const found = inspected.yields[0]!;
+    const asNote = { ...c, evidence: c.evidence.map((e) => (e.id === found ? { ...e, authoritative: false, proves: [] } : e)) };
+    const text = c.evidence.find((e) => e.id === found)!.text;
+    for (const language of ["en", "zh"] as const) {
+      const marked = await createGame(asNote, off, "t1", { language, modelOff: true }).handle("inspect 1");
+      expect(marked[0]).toBe(`  ${text[language]}  ${NOTE_MARK[language]}`);
+      const plain = createGame(c, off, "t1", { language, modelOff: true });
+      expect((await plain.handle("inspect 1"))[0]).toBe(`  ${text[language]}`);
+      // Nothing that proves is ever marked: the handwritten case has no note at the briefing.
+      expect([...plain.opening(), ...(await plain.handle("notebook"))].join("\n")).not.toContain(NOTE_MARK[language]);
+    }
+  });
+
+  it("says exactly what `accuse … all` cites: the numbered evidence, not the statements", async () => {
+    const help = (await createGame(c, off, "t1").handle("help")).join("\n");
+    expect(help).toContain("citing every numbered item of evidence you hold");
+    expect((await createGame(c, off, "t1", { language: "zh", modelOff: true }).handle("help")).join("\n")).toContain("引用你手里所有带编号的证据条目");
   });
 
   it("can be played from the briefing to a proven accusation and the reveal", async () => {

@@ -221,6 +221,8 @@ describe("a detective that does not make progress is stopped", () => {
     // Then the detective's own: numbered on from there, and pointing back at the right rules.
     expect(lines.slice(start + 4, start + 8).map((l) => l.slice(0, 2))).toEqual(["5.", "6.", "7.", "8."]);
     expect(lines[start + 6]).toContain("Do not accuse until your evidence does all of rules 2 to 5.");
+    // What to cite is named by its handle: the R items, not the statements the notebook also holds.
+    expect(lines[start + 6]).toContain("When you accuse, cite every R item you hold.");
     expect(lines[start + 8]).toBe("");
     // The rules are the same for every case.
     expect(detectiveBriefing(archivePass).split("THE CASE")[0]).toBe(detectiveBriefing(lighthouse).split("THE CASE")[0]);

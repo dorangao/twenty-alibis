@@ -114,7 +114,7 @@ export function detectiveBriefing(c: Case): string {
     ...PROOF_RULES.map((rule, i) => `${i + 1}. ${rule.en}`),
     `${n + 1}. A person no evidence rules out is still open, even when nothing points at them. So before you accuse, check every other person against your evidence, and keep inspecting while anyone is still open.`,
     `${n + 2}. You have a limited number of actions. Asking a topic or inspecting costs one. Accusing ends the game.`,
-    `${n + 3}. Do not accuse until your evidence does all of rules 2 to ${n + 1}. If you are out of actions, accuse with what you have. When you accuse, cite everything in your notebook.`,
+    `${n + 3}. Do not accuse until your evidence does all of rules 2 to ${n + 1}. If you are out of actions, accuse with what you have. When you accuse, cite every R item you hold.`,
     `${n + 4}. Decide and answer. You do not need to explain your choice.`,
     "",
     "THE CASE",
