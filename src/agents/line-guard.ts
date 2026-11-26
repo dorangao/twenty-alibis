@@ -9,8 +9,9 @@ import { renderAssertion, type Lang } from "./render";
  *
  * What the guard can do: it works on words. It knows the case's closed vocabulary (people,
  * places, times, the means) and refuses a line that names any of it beyond what the accepted
- * statements already say. It also refuses a line that leaves a statement's place, object or
- * motive out, flips a statement with a "not", names the wrong half of the day ("09:00" for
+ * statements already say. It also refuses a line that leaves a statement's place, time, object
+ * or motive out, puts someone beside or outside a place instead of in it, flips a statement
+ * with a "not", names the wrong half of the day ("09:00" for
  * 21:00), claims to have been alone, is in the wrong language, is too long, or steps out of
  * character.
  *
@@ -31,6 +32,8 @@ export type GuardReason =
   | "omits"
   /** Puts a "not" beside a case fact that the statements assert, or drops the "not" of a denial. */
   | "polarity"
+  /** Puts someone beside, outside or on the way to a place instead of in it: "outside the foyer", "门厅外". */
+  | "displaced"
   /** Says something about everyone else: "alone", "nobody else", "就我一个". */
   | "exclusive"
   /** Mentions being an AI, a model or a prompt. */
@@ -267,6 +270,31 @@ const clauses = (line: string): string[] =>
 
 const isNegative = (a: Assertion) => a.prop.kind !== "at" && !a.prop.value;
 
+const BESIDE_EN = "outside|near|nearby|beside|behind|above|below|opposite|toward|towards|leaving|left|entering|next to|close to|across from|out of|away from|just off|on (?:my|the|his|her) way (?:to|from|into)|heading (?:to|for|into)";
+const BEFORE_ZH = "离开|前往|走向|走出|出了|赶往|去往|去|往";
+const AFTER_ZH = "外|旁|附近|对面|隔壁|门口|楼上|楼下|后面|前面|上面|下面";
+
+/** A phrase that names a place of the case but puts the person beside it, outside it or on the way to it. Null when there is none. */
+function displacedPhrase(c: Case, text: string): string | null {
+  for (const l of c.locations) {
+    for (const word of wordsOf(l.name.en)) {
+      const found = new RegExp(`\\b(?:${BESIDE_EN})\\s+(?:of\\s+)?(?:(?:the|that|this|a|an)\\s+)?(?:[a-z]+\\s+)?${escapeRegex(word)}(?![a-z])`, "i").exec(text);
+      if (found) return found[0];
+    }
+    const name = escapeRegex(l.name.zh);
+    const found = new RegExp(`(?:${BEFORE_ZH})${name}|${name}(?:${AFTER_ZH})`).exec(text);
+    if (found) return found[0];
+  }
+  return null;
+}
+
+/** Does the line say the time of this slot? A slot that is not a clock time must appear as written. */
+function slotHeard(text: string, slot: string): boolean {
+  const wanted = new Set(timesIn(slot));
+  if (wanted.size === 0) return text.toLowerCase().includes(slot.toLowerCase());
+  return timesIn(text).some((time) => isCovered(time, wanted));
+}
+
 const MOTIVE_STOP = new Set(["that", "this", "with", "from", "have", "been", "were", "about", "would", "could", "their", "there", "which", "will", "into", "they", "them", "what", "when", "your", "victim"]);
 const ZH_COMMON = new Set([..."的一是了我他她你被将即不没有这那个在和与也就都而及着过吗呢啊死者"]);
 
@@ -348,7 +376,12 @@ export function guardLine(c: Case, speaker: string, accepted: readonly Assertion
   for (const a of accepted) {
     if (!requiredNames(c, speaker, a).every((group) => group.some(heard))) return fail("omits", a.id);
     if (a.prop.kind === "motive" && !motiveHeard(c, a.prop.motive, text)) return fail("omits", a.id);
+    // A statement about where someone was is about one time. A line that leaves the time out
+    // can be heard as an answer about another.
+    if (a.prop.kind === "at" && !slotHeard(text, a.prop.slot)) return fail("omits", `${a.id} (time)`);
   }
+  const beside = displacedPhrase(c, text);
+  if (beside) return fail("displaced", beside);
   const motives = accepted.flatMap((a) => (a.prop.kind === "motive" ? [a.prop.motive] : []));
   const namesCase = (clause: string) => mentions(c, clause).length > 0 || motives.some((id) => motiveHeard(c, id, clause));
 
