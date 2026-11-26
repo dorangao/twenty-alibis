@@ -10,22 +10,37 @@ type Why = [en: string, zh: string];
  * Nothing in the file is taken at its word: whatever a report says about itself, the case in
  * it goes through the same gate as every case before anyone plays it (the schema, the truth
  * and evidence checks, and the solver). A file that does not pass is not played.
+ *
+ * A refusal says which kind of failure it was and nothing more. The gate's own reasons name
+ * the people and facts of the hidden truth ("the hidden truth points at A, but the culprit is
+ * B"), and whoever runs this command is a player. The details are for the author, from the
+ * gate itself (`checkCase`).
  */
-export function loadCase(text: string): { ok: true; c: Case } | { ok: false; why: Why } {
+export type Refusal = "not-json" | "not-a-case" | "malformed" | "inconsistent" | "unprovable";
+
+const REFUSALS: Record<Refusal, Why> = {
+  "not-json": ["the file is not JSON", "文件不是 JSON"],
+  "not-a-case": ["the file does not hold a case", "文件里没有案件"],
+  malformed: ["the case in the file is not in the form a case must have", "文件里的案件格式不符合要求"],
+  inconsistent: ["the case in the file does not hold together", "文件里的案件自相矛盾"],
+  unprovable: ["the case in the file cannot be proven by a player", "文件里的案件无法由玩家证明"],
+};
+
+export function loadCase(text: string): { ok: true; c: Case } | { ok: false; refusal: Refusal; why: Why } {
+  const refuse = (refusal: Refusal) => ({ ok: false as const, refusal, why: REFUSALS[refusal] });
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { ok: false, why: ["the file is not JSON", "文件不是 JSON"] };
+    return refuse("not-json");
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { ok: false, why: ["the file does not hold a case", "文件里没有案件"] };
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return refuse("not-a-case");
   const inner = (parsed as { case?: unknown }).case;
   const candidate = inner && typeof inner === "object" ? inner : parsed;
   const gate = checkCase(candidate);
-  if (!gate.accepted || !gate.validation.ok) {
-    const first = gate.reasons[0] ?? "it did not pass the gate";
-    return { ok: false, why: [`the case in the file is refused: ${first}`, `文件里的案件未通过检查：${first}`] };
-  }
+  // Which layer refused it, and no more: see the note above.
+  if (!gate.validation.ok) return refuse(gate.validation.issues.some((issue) => issue.layer === "schema") ? "malformed" : "inconsistent");
+  if (!gate.accepted) return refuse("unprovable");
   return { ok: true, c: gate.validation.case };
 }
 
