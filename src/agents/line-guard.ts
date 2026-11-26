@@ -74,23 +74,36 @@ const wordsOf = (name: string): string[] =>
 /** What can stand between the parts of a Chinese name that is written in parts: a space, a middle dot, a hyphen. */
 const NAME_SEPARATORS = /[\s·•‧・\-]+/u;
 
-/**
- * How a Chinese name is heard.
- *
- * A name written as one word (马艾达) is heard in any two or more of its characters in a
- * row, so its last two (艾达) name the person too. A name written in parts (艾德里克 塔莫林,
- * a transliteration) is heard by each whole part and nothing shorter: such names share
- * syllables freely, and the separator is not a character of the name.
- */
-const piecesOf = (name: string): string[] => {
-  const parts = name.split(NAME_SEPARATORS).filter(Boolean);
-  if (parts.length > 1) return parts.filter((part) => [...part].length >= 2);
-  const chars = [...(parts[0] ?? "")];
+/** The parts of a Chinese name: one for 马艾达, two for 艾德里克 塔莫林. The separator is not a character of the name. */
+const partsOf = (name: string): string[] => name.split(NAME_SEPARATORS).filter(Boolean);
+
+/** Every run of two or more characters inside one word. */
+const runsOf = (word: string): string[] => {
+  const chars = [...word];
   const out: string[] = [];
   for (let size = 2; size <= chars.length; size++) {
     for (let i = 0; i + size <= chars.length; i++) out.push(chars.slice(i, i + size).join(""));
   }
   return out;
+};
+
+/**
+ * How a Chinese name is heard in a line: in any two or more characters in a row of any of
+ * its parts. 马艾达 is heard in 艾达, and 艾德里克 塔莫林 in 莫林. This is deliberately
+ * generous: a line that uses a piece of someone's name is taken to name them.
+ */
+const piecesOf = (name: string): string[] => partsOf(name).flatMap(runsOf);
+
+/**
+ * What identifies a Chinese name, for telling two people apart. A name written as one word
+ * is identified by any two characters in a row, so two such names may share none. A name
+ * written in parts (a transliteration) is identified by its whole parts only: such names
+ * share syllables freely (里克, 尔), and refusing every roster that does would refuse them all.
+ * The price is stated where it is paid: see `nameProblems`.
+ */
+const identifiersOf = (name: string): string[] => {
+  const parts = partsOf(name);
+  return parts.length > 1 ? parts.filter((part) => [...part].length >= 2) : runsOf(parts[0] ?? "");
 };
 
 /**
@@ -108,11 +121,20 @@ const meansPieces = (c: Names, name: string): string[] => {
  * Chinese pieces it matches on. A case writer uses this to refuse names the guard would
  * confuse, with the very rules the guard applies.
  */
-export function nameForms(c: Names): { kind: "suspect" | "location" | "means"; id: string; name: { en: string; zh: string }; en: string[]; zh: string[] }[] {
+export function nameForms(c: Names): {
+  kind: "suspect" | "location" | "means";
+  id: string;
+  name: { en: string; zh: string };
+  en: string[];
+  /** Every Chinese piece the guard hears this thing in. */
+  zh: string[];
+  /** The Chinese pieces that must be this thing's alone. */
+  zhOwn: string[];
+}[] {
   return [
-    ...c.suspects.map((s) => ({ kind: "suspect" as const, id: s.id, name: s.name, en: wordsOf(s.name.en), zh: piecesOf(s.name.zh) })),
-    ...c.locations.map((l) => ({ kind: "location" as const, id: l.id, name: l.name, en: wordsOf(l.name.en), zh: [l.name.zh] })),
-    ...c.means.map((m) => ({ kind: "means" as const, id: m.id, name: m.name, en: wordsOf(m.name.en), zh: meansPieces(c, m.name.zh) })),
+    ...c.suspects.map((s) => ({ kind: "suspect" as const, id: s.id, name: s.name, en: wordsOf(s.name.en), zh: piecesOf(s.name.zh), zhOwn: identifiersOf(s.name.zh) })),
+    ...c.locations.map((l) => ({ kind: "location" as const, id: l.id, name: l.name, en: wordsOf(l.name.en), zh: [l.name.zh], zhOwn: [l.name.zh] })),
+    ...c.means.map((m) => ({ kind: "means" as const, id: m.id, name: m.name, en: wordsOf(m.name.en), zh: meansPieces(c, m.name.zh), zhOwn: meansPieces(c, m.name.zh) })),
   ];
 }
 

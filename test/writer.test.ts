@@ -18,7 +18,7 @@ import { NO_MOTIVE, peopleRequestSchema, plotIds, skeletonMessages, SkeletonSche
 import { nameProblems, roleNotes } from "../src/writer/names";
 import { assessQuality, MIN_SHORTLIST } from "../src/writer/quality";
 import { skeletonProblems } from "../src/writer/skeleton";
-import { writeCase } from "../src/writer/write";
+import { writeCase, type ReplyRecord } from "../src/writer/write";
 
 const compiled = (skeleton: Skeleton = lighthouseSkeleton, people: People = lighthousePeople): Case => {
   const result = compilePlot("lighthouse", skeleton, people);
@@ -449,12 +449,24 @@ describe("what is wrong with a skeleton is known before the second request", () 
     expect(skeletonProblems(skeleton, brief)).toEqual([]);
     const c = compiled(skeleton);
     expect(checkCase(c).accepted).toBe(true);
-    expect(nameForms(c).find((f) => f.id === "s-01")!.zh).toEqual(["艾德里克", "塔莫林"]);
-    // The guard hears a part, and only a whole one.
+    // What must be his alone is each whole part. What the guard hears is any two characters in a row of a part.
+    const forms = nameForms(c).find((f) => f.id === "s-01")!;
+    expect(forms.zhOwn).toEqual(["艾德里克", "塔莫林"]);
+    expect(forms.zh).toContain("莫林");
+    expect(forms.zh).toContain("里克");
+    expect(forms.zh).not.toContain("克 ");
+    expect(forms.zh).not.toContain("克塔");
+    // The guard hears a part, or a piece of one.
     const said = c.assertions.filter((x) => x.id === "a-02-says");
-    expect(guardLine(c, "s-02", said, "22:20 我在厨房，和塔莫林在一起。", "zh")).toMatchObject({ ok: false, reason: "uncovered", detail: "塔莫林" });
-    expect(guardLine(c, "s-02", said, "22:20 我在厨房，和艾德里克在一起。", "zh")).toMatchObject({ ok: false, reason: "uncovered", detail: "艾德里克" });
+    expect(guardLine(c, "s-02", said, "22:20 我在厨房，和塔莫林在一起。", "zh")).toMatchObject({ ok: false, reason: "uncovered", detail: "塔莫, 莫林, 塔莫林" });
+    const given = guardLine(c, "s-02", said, "22:20 我在厨房，和艾德里克在一起。", "zh");
+    expect(given).toMatchObject({ ok: false, reason: "uncovered" });
+    expect(given.ok ? "" : given.detail).toContain("艾德里克");
+    expect(guardLine(c, "s-02", said, "22:20 我在厨房，莫林也在。", "zh")).toMatchObject({ ok: false, reason: "uncovered", detail: "莫林" });
     expect(guardLine(c, "s-02", said, "22:20 我在厨房。", "zh")).toEqual({ ok: true });
+    // A role that uses a piece of someone's name names that person.
+    const helper: Skeleton = { ...skeleton, suspects: skeleton.suspects.map((s, i) => (i === 10 ? { ...s, role: { en: s.role.en, zh: "莫林的助手" } } : s)) };
+    expect(skeletonProblems(helper, brief)).toEqual([`the role of "${skeleton.suspects[10]!.name.en}" names a person (莫林): "${skeleton.suspects[10]!.role.en}" / “莫林的助手”`]);
     // The rendered sentence, which carries the whole name, still passes.
     expect(guardLine(c, "s-02", said, renderAssertion(c, "s-02", said[0]!, "zh"), "zh")).toEqual({ ok: true });
 
@@ -463,7 +475,7 @@ describe("what is wrong with a skeleton is known before the second request", () 
     expect(skeletonProblems(clash, brief)).toEqual(["“艾德里克 塔莫林”和“乌尔夫 塔莫林”都含有“塔莫林”，说到一个就会被当成也说了另一个"]);
     // A middle dot separates parts too.
     const dotted: Skeleton = { ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 0 ? { ...s, name: { en: s.name.en, zh: "艾德里克·塔莫林" } } : s)) };
-    expect(nameForms(compiled(dotted)).find((f) => f.id === "s-01")!.zh).toEqual(["艾德里克", "塔莫林"]);
+    expect(nameForms(compiled(dotted)).find((f) => f.id === "s-01")!.zhOwn).toEqual(["艾德里克", "塔莫林"]);
   });
 
   it("and even if such a role slipped through, the guard would not let it cover a name", () => {
@@ -600,28 +612,44 @@ describe("the writer: two requests, then code", () => {
     expect(await writeCase({ metered: few.metered, attemptId: "w-1", brief })).toMatchObject({ accepted: false, failedAt: "skeleton", reasons: ["the skeleton has 19 suspects; 20 were asked for"], requests: 1 });
   });
 
-  it("hands every reply to the caller the moment it arrives, whatever becomes of it", async () => {
-    const seen: [string, unknown][] = [];
+  it("hands every reply to the caller as it arrived, before anything parses or judges it", async () => {
+    const seen: ReplyRecord[] = [];
     const good = setup([json(lighthouseSkeleton), json(lighthousePeople)]);
-    await writeCase({ metered: good.metered, attemptId: "w-1", brief, onReply: (stage, value) => seen.push([stage, value]) });
+    await writeCase({ metered: good.metered, attemptId: "w-1", brief, onReply: (reply) => seen.push(reply) });
     expect(seen).toEqual([
-      ["skeleton", lighthouseSkeleton],
-      ["people", lighthousePeople],
+      { attemptId: "w-1:skeleton", stage: "skeleton", text: JSON.stringify(lighthouseSkeleton), finishReason: "stop", usage, settled: true, breached: false },
+      { attemptId: "w-1:people", stage: "people", text: JSON.stringify(lighthousePeople), finishReason: "stop", usage, settled: true, breached: false },
     ]);
+  });
 
-    // A skeleton that is then refused has still been handed over: it was paid for.
-    const refused: [string, unknown][] = [];
+  it("hands over a reply that is cut off, is not JSON, is JSON null, or is later refused", async () => {
     const named = { ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 3 ? { ...s, name: { en: "May Linden", zh: "林梅" } } : s)) };
-    const bad = setup([json(named), json(lighthousePeople)]);
-    const report = await writeCase({ metered: bad.metered, attemptId: "w-1", brief, onReply: (stage, value) => refused.push([stage, value]) });
-    expect(report).toMatchObject({ accepted: false, failedAt: "skeleton", requests: 1 });
-    expect(refused).toEqual([["skeleton", named]]);
+    for (const [reply, finishReason, reason] of [
+      ['{"suspects":', "length", "the skeleton reply was cut off at the output limit"],
+      ["not json", "stop", "the skeleton reply is not JSON"],
+      ["null", "stop", "skeleton: (the whole reply): Invalid input: expected object, received null"],
+      [JSON.stringify(named), "stop", '"may" in the name "May Linden" is an everyday word, so ordinary lines would be refused'],
+    ] as const) {
+      const seen: ReplyRecord[] = [];
+      const { provider, metered } = setup([{ text: reply, toolCalls: [], usage, finishReason }, json(lighthousePeople)]);
+      const report = await writeCase({ metered, attemptId: "w-1", brief, onReply: (r) => seen.push(r) });
+      expect(report, reason).toMatchObject({ accepted: false, failedAt: "skeleton", reasons: [reason], requests: 1 });
+      expect(seen, reason).toEqual([{ attemptId: "w-1:skeleton", stage: "skeleton", text: reply, finishReason, usage, settled: true, breached: false }]);
+      expect(provider.dispatched, reason).toBe(1);
+    }
+  });
+
+  it("hands over a reply whose cost was not confirmed, marked as such", async () => {
+    const seen: ReplyRecord[] = [];
+    const unsettled: Metered = async (request) => ({ ok: true, attemptId: request.attemptId, response: json(lighthouseSkeleton), costNano: 12, settled: false, breached: false });
+    await writeCase({ metered: unsettled, attemptId: "w-1", brief, onReply: (r) => seen.push(r) });
+    expect(seen).toMatchObject([{ attemptId: "w-1:skeleton", settled: false, breached: false }]);
   });
 
   it("runs stage 2 from a saved skeleton, spending only the people request", async () => {
     const { provider, metered } = setup([json(lighthousePeople)]);
     const seen: string[] = [];
-    const report = await writeCase({ metered, attemptId: "w-1", brief, skeleton: JSON.parse(JSON.stringify(lighthouseSkeleton)), onReply: (stage) => seen.push(stage) });
+    const report = await writeCase({ metered, attemptId: "w-1", brief, skeleton: JSON.parse(JSON.stringify(lighthouseSkeleton)), onReply: (reply) => seen.push(reply.stage) });
     expect(report).toMatchObject({ accepted: true, requests: 1, costNano: PRICE });
     expect(report.usage.map((u) => u.step)).toEqual(["writer.people"]);
     expect(provider.dispatched).toBe(1);

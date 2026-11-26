@@ -1,8 +1,9 @@
 import type { Case } from "../case/schema";
 import { checkCase } from "../case/solver";
 import type { Metered, MeteredRequest } from "../metered";
+import type { Usage } from "../spend/pricing";
 import { compilePlot } from "./compile";
-import { peopleMessages, peopleRequestSchema, PeopleSchema, plotIds, skeletonMessages, skeletonRequestSchema, SkeletonSchema, type SkeletonBrief } from "./plot";
+import { peopleMessages, peopleRequestSchema, PeopleSchema, plotIds, skeletonMessages, skeletonRequestSchema, SkeletonSchema, type Skeleton, type SkeletonBrief } from "./plot";
 import { assessQuality, type Quality } from "./quality";
 import { skeletonProblems } from "./skeleton";
 
@@ -36,6 +37,24 @@ export type WriteStage =
   /** The case is solvable but not worth releasing. */
   | "quality";
 
+/**
+ * One reply exactly as it arrived: the text before anyone parsed it, how it ended, what it
+ * used, and whether its cost was confirmed. A caller that pays for replies saves these.
+ */
+export interface ReplyRecord {
+  attemptId: string;
+  stage: "skeleton" | "people";
+  /** The reply's text, untouched. Null when the model sent none. */
+  text: string | null;
+  /** "length" means it was cut off at the output limit. */
+  finishReason: string | undefined;
+  usage: Usage | undefined;
+  /** False when the store did not confirm the cost. */
+  settled: boolean;
+  /** True when the reply suspended the envelope. */
+  breached: boolean;
+}
+
 export interface WriteReport {
   /** True only when the case passed every stage. */
   accepted: boolean;
@@ -62,33 +81,49 @@ export interface WriteArgs {
   attemptId: string;
   brief: SkeletonBrief;
   /**
-   * A skeleton saved from an earlier run. When given, stage 1 is skipped and nothing is sent
-   * for it: the attempt spends only the people request. It is checked again, as a new one would be.
+   * A skeleton saved from an earlier run, already read as JSON. When given, stage 1 is
+   * skipped and nothing is sent for it: the attempt spends only the people request. It is
+   * checked again, exactly as a new one would be.
    */
   skeleton?: unknown;
   /**
-   * Called with every reply the moment it has been read as JSON, before anything judges it.
-   * A caller that pays for replies should save them here: a reply that fails a gate today
-   * may pass tomorrow's, and stage 2 can be run later from a saved skeleton.
+   * Called with every reply the moment it arrives, before it is parsed or judged: complete
+   * or cut off, JSON or not. A reply that fails a gate today may pass tomorrow's, and stage 2
+   * can be run later from a saved skeleton.
    */
-  onReply?: (stage: "skeleton" | "people", value: unknown) => void;
+  onReply?: (reply: ReplyRecord) => void;
 }
 
-/** The reply with its list of suspects cut to the number asked for, and how many were cut. */
-function surplusSuspects(raw: unknown, wanted: number): { value: unknown; dropped: number } {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { value: raw, dropped: 0 };
-  const suspects = (raw as { suspects?: unknown }).suspects;
-  if (!Array.isArray(suspects) || suspects.length <= wanted) return { value: raw, dropped: 0 };
-  return { value: { ...raw, suspects: suspects.slice(0, wanted) }, dropped: suspects.length - wanted };
+/**
+ * Everything code can tell about a skeleton before the second request: it has the right
+ * shape, the right number of people and rooms, rooms that connect, and names the line guard
+ * can tell apart. Surplus suspects are dropped here, where no answer exists yet; too few is
+ * a refusal. A new reply and a saved one go through this same check.
+ */
+export function checkSkeleton(raw: unknown, brief: SkeletonBrief): { ok: true; skeleton: Skeleton; notes: string[] } | { ok: false; reasons: string[] } {
+  const notes: string[] = [];
+  let value = raw;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const suspects = (raw as { suspects?: unknown }).suspects;
+    if (Array.isArray(suspects) && suspects.length > brief.suspects) {
+      notes.push(`the skeleton had ${suspects.length} suspects; the last ${suspects.length - brief.suspects} were dropped`);
+      value = { ...raw, suspects: suspects.slice(0, brief.suspects) };
+    }
+  }
+  const parsed = SkeletonSchema.safeParse(value);
+  if (!parsed.success) return { ok: false, reasons: parsed.error.issues.slice(0, 8).map((i) => `skeleton: ${i.path.join(".") || "(the whole reply)"}: ${i.message}`) };
+  const flaws = skeletonProblems(parsed.data, brief);
+  return flaws.length > 0 ? { ok: false, reasons: flaws } : { ok: true, skeleton: parsed.data, notes };
 }
 
 export async function writeCase(args: WriteArgs): Promise<WriteReport> {
   const report: WriteReport = { accepted: false, reasons: [], notes: [], requests: 0, costNano: 0, usage: [] };
   const stop = (failedAt: WriteStage, reasons: string[]): WriteReport => ({ ...report, failedAt, reasons });
 
-  /** Send one request and read its reply as JSON. Null when the attempt must stop; the reason is already recorded. */
-  const ask = async (stage: "skeleton" | "people", request: Omit<MeteredRequest, "attemptId" | "promptId" | "step">): Promise<unknown | null> => {
-    const result = await args.metered({ ...request, step: `writer.${stage}`, promptId: WRITER_PROMPT_ID, attemptId: `${args.attemptId}:${stage}` });
+  /** Send one request and read its reply as JSON. Null when the attempt must stop; the reason is then in `report.reasons`. */
+  const ask = async (stage: "skeleton" | "people", request: Omit<MeteredRequest, "attemptId" | "promptId" | "step">): Promise<{ value: unknown } | null> => {
+    const attemptId = `${args.attemptId}:${stage}`;
+    const result = await args.metered({ ...request, step: `writer.${stage}`, promptId: WRITER_PROMPT_ID, attemptId });
     if (!result.ok) {
       if (result.sent) report.requests++;
       report.problem = result.sent ? "failed:outcome-unknown" : `refused:${result.reason}`;
@@ -96,6 +131,8 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
       return null;
     }
     report.requests++;
+    // First of all, hand the reply over as it is. Nothing below can lose it.
+    args.onReply?.({ attemptId, stage, text: result.response.text, finishReason: result.response.finishReason, usage: result.response.usage, settled: result.settled, breached: result.breached });
     if (result.settled) report.costNano += result.costNano;
     if (result.breached) report.problem = "envelope-suspended";
     else if (!result.settled) report.problem = "unconfirmed:not-settled";
@@ -105,48 +142,40 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
       report.reasons = [`the ${stage} reply was cut off at the output limit`];
       return null;
     }
-    let value: unknown;
     try {
-      value = JSON.parse(result.response.text ?? "") as unknown;
+      return { value: JSON.parse(result.response.text ?? "") as unknown };
     } catch {
       report.reasons = [`the ${stage} reply is not JSON`];
       return null;
     }
-    args.onReply?.(stage, value);
-    return value;
   };
 
   // ---- Stage 1: the skeleton, written now or saved from an earlier run. ----
-  const rawSkeleton = args.skeleton !== undefined ? args.skeleton : await ask("skeleton", { messages: skeletonMessages(args.brief), responseSchema: skeletonRequestSchema, maxOutputTokens: SKELETON_OUTPUT_TOKENS });
-  if (rawSkeleton === null) return stop("skeleton", report.reasons);
-  // More people than were asked for is harmless here: no answer exists yet, so the surplus is
-  // dropped. Too few is refused below.
-  const surplus = surplusSuspects(rawSkeleton, args.brief.suspects);
-  if (surplus.dropped > 0) report.notes.push(`the skeleton had ${args.brief.suspects + surplus.dropped} suspects; the last ${surplus.dropped} were dropped`);
-  const skeleton = SkeletonSchema.safeParse(surplus.value);
-  if (!skeleton.success) return stop("skeleton", skeleton.error.issues.slice(0, 8).map((i) => `skeleton: ${i.path.join(".")}: ${i.message}`));
+  const first = args.skeleton !== undefined ? { value: args.skeleton } : await ask("skeleton", { messages: skeletonMessages(args.brief), responseSchema: skeletonRequestSchema, maxOutputTokens: SKELETON_OUTPUT_TOKENS });
+  if (first === null) return stop("skeleton", report.reasons);
   // Everything that can be known to be wrong with the skeleton is checked before the second request is spent on it.
-  const flaws = skeletonProblems(skeleton.data, args.brief);
-  if (flaws.length > 0) return stop("skeleton", flaws);
+  const checked = checkSkeleton(first.value, args.brief);
+  if (!checked.ok) return stop("skeleton", checked.reasons);
+  report.notes.push(...checked.notes);
   // The cost of the first request is not confirmed, or the envelope is suspended: send nothing more.
   if (report.problem) return stop("skeleton", [`stopped after the skeleton: ${report.problem}`]);
 
   // ---- Stage 2: the people. The schema offers only the ids code gave to the skeleton. ----
-  const ids = plotIds(skeleton.data);
-  const rawPeople = await ask("people", { messages: peopleMessages(skeleton.data, ids), responseSchema: peopleRequestSchema(ids), maxOutputTokens: PEOPLE_OUTPUT_TOKENS });
-  if (rawPeople === null) return stop("people", report.reasons);
-  const people = PeopleSchema.safeParse(rawPeople);
-  if (!people.success) return stop("people", people.error.issues.slice(0, 8).map((i) => `people: ${i.path.join(".")}: ${i.message}`));
+  const ids = plotIds(checked.skeleton);
+  const second = await ask("people", { messages: peopleMessages(checked.skeleton, ids), responseSchema: peopleRequestSchema(ids), maxOutputTokens: PEOPLE_OUTPUT_TOKENS });
+  if (second === null) return stop("people", report.reasons);
+  const people = PeopleSchema.safeParse(second.value);
+  if (!people.success) return stop("people", people.error.issues.slice(0, 8).map((i) => `people: ${i.path.join(".") || "(the whole reply)"}: ${i.message}`));
   // The reply is here, but its cost is not confirmed or the envelope is suspended. Until
   // that is reconciled the attempt is not counted as anything: not accepted, not judged.
   if (report.problem) return stop("people", [`the people reply came back, but the attempt is not judged: ${report.problem}`]);
 
   // ---- Code from here on. ----
-  const compiled = compilePlot(args.attemptId, skeleton.data, people.data);
+  const compiled = compilePlot(args.attemptId, checked.skeleton, people.data);
   if (!compiled.ok) return stop("compile", compiled.problems);
   report.case = compiled.case;
-  const checked = checkCase(compiled.case);
-  if (!checked.accepted) return stop("gate", checked.reasons);
+  const gate = checkCase(compiled.case);
+  if (!gate.accepted) return stop("gate", gate.reasons);
   const quality = assessQuality(compiled.case);
   report.quality = quality;
   report.notes.push(...quality.notes);

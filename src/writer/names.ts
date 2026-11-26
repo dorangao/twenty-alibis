@@ -39,7 +39,12 @@ export function nameProblems(c: Roster): string[] {
       // Compared the way the guard matches, not word for word: it hears "collin" in "Collins".
       const shared = a.en.find((word) => hearsWord(word, b.name.en)) ?? b.en.find((word) => hearsWord(word, a.name.en));
       if (shared) problems.push(`"${a.name.en}" and "${b.name.en}" share the word "${shared}", so naming one would cover the other`);
-      const inside = a.zh.find((piece) => b.name.zh.includes(piece)) ?? b.zh.find((piece) => a.name.zh.includes(piece));
+      // Chinese: what identifies one must not appear inside the other. For a name written in
+      // parts that is each whole part, so 艾德里克 and 乌尔夫里克 may both be in a roster though
+      // they share 里克. The guard still hears 里克 as a name: someone else who says it is
+      // refused. What it cannot do is tell which of the two was meant, so either of them, or
+      // a line about either, may use it. That is the price of admitting transliterated names.
+      const inside = a.zhOwn.find((piece) => b.name.zh.includes(piece)) ?? b.zhOwn.find((piece) => a.name.zh.includes(piece));
       if (inside) problems.push(`“${a.name.zh}”和“${b.name.zh}”都含有“${inside}”，说到一个就会被当成也说了另一个`);
     }
   }
