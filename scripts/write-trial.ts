@@ -29,6 +29,7 @@
  * were refused at the skeleton stage and their replies were not saved, so that batch is
  * closed. This file now runs batch b.
  */
+import { parseRunArgs } from "../src/run-args";
 import { createRuntime } from "../src/runtime";
 import { nanoToUsd } from "../src/spend/pricing";
 import { planTrial, runTrial, type TrialConfig } from "../src/writer/trial";
@@ -48,6 +49,14 @@ const config: TrialConfig = {
   dir: "cases/generated",
 };
 const usd = (nano: number) => `$${nanoToUsd(nano).toFixed(6)}`;
+
+// The arguments are read whole before anything is connected. "--plan" is the only one there is:
+// a mistyped one must not turn a dry run into a real one.
+const args = parseRunArgs(process.argv.slice(2), { allowGame: false });
+if (!args.ok) {
+  say(`${args.why[0]}. Usage: [--plan]. Nothing was sent.`, `${args.why[1]}。用法：[--plan]。未发送任何内容。`);
+  process.exit(1);
+}
 
 const runtime = await createRuntime(process.env);
 const envelope = runtime.config.envelope;
@@ -95,9 +104,9 @@ if (plan.unresolved.length > 0) {
   say(`A run now would send at most ${most} request(s).`, `现在运行最多发送 ${most} 个请求。`);
 }
 
-if (process.argv.includes("--plan") || plan.unresolved.length > 0) {
+if (args.plan || plan.unresolved.length > 0) {
   await runtime.close();
-  process.exit(process.argv.includes("--plan") ? 0 : 1);
+  process.exit(args.plan ? 0 : 1);
 }
 if (!paidOpen) {
   say("Paid requests are not authorized on this envelope. Nothing was sent.", "该额度未授权付费请求。未发送任何内容。");

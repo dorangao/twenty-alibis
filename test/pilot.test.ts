@@ -13,7 +13,7 @@ import { connectRedis } from "../src/spend/redis-client";
 import { memoryRunLock, redisRunLock, type RunLock } from "../src/spend/run-lock";
 import { MemorySpendStore } from "../src/spend/store";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
-import { detectivePath, gamePath, pilotTotals, planPilot, runCounts, runPilot, savedCase, savedGame, type PilotConfig } from "../src/writer/pilot";
+import { detectivePath, gameIdOf, gamePath, pilotTotals, planPilot, runCounts, runPilot, savedCase, savedGame, type PilotConfig } from "../src/writer/pilot";
 import { asOnlyRunner, planTrial, writeAttempt, type SavedReply, type StoredAttempt } from "../src/writer/trial";
 
 const usage = { inputTokens: 1_000, cachedTokens: 0, outputTokens: 500 };
@@ -354,6 +354,147 @@ describe("a pilot: write a case, then let the detective play it", () => {
     expect(run.entries.every((e) => e.writer!.failedAt === "gate" && e.game === undefined)).toBe(true);
     expect(provider.dispatched).toBe(4);
     expect(shape(t.config, t.stored())).toEqual(["closed+closed=0", "closed+closed=0"]);
+  });
+});
+
+describe("a saved case played again, as a numbered game", () => {
+  const cutOff: ProviderResponse = { text: "", toolCalls: [], usage, finishReason: "length" };
+  const open = (t: ReturnType<typeof setup>) => createMetered({ inputBound: { tokensPerByte: 100 }, provider: t.provider, store: new MemorySpendStore(), envelope: "e2", limitNano: usdToNano(5), trace: (e) => t.trace.push(e) });
+
+  it("plays under new request ids and into new files, and leaves game 1 exactly as it was", async () => {
+    // Game 1: every reply of the detective's is cut off, so both games end after two turns with no accusation.
+    let room = false;
+    const t = setup({ detective: (request) => (room ? readingDetective(request) : cutOff) });
+    const first = await runPilot(t.config, { metered: t.metered, stored: t.stored() });
+    expect(runCounts(first)).toEqual({ attempted: 2, accepted: 2, played: 2, solved: 0 });
+    expect(t.provider.dispatched).toBe(2 * (2 + 2));
+    const game1 = ["p-1", "p-2"].map((id) => [readFileSync(detectivePath(t.config, id), "utf8"), readFileSync(gamePath(t.config, id), "utf8")]);
+    const before = readdirSync(t.dir).sort();
+    expect(shape(t.config, t.stored())).toEqual(["closed+closed=0", "closed+closed=0"]);
+
+    // Game 2 of the same two cases, with a detective that has room to answer.
+    room = true;
+    const again: PilotConfig = { ...t.config, game: 2 };
+    expect(shape(again, t.stored())).toEqual(["closed+play=27", "closed+play=27"]);
+    expect(planPilot(again, t.stored()).most).toBe(2 * 27);
+    const second = await runPilot(again, { metered: t.metered, stored: t.stored() });
+    // No case was written: every request of this run was a detective turn.
+    expect(second.entries.every((e) => e.writer === undefined)).toBe(true);
+    expect(runCounts(second)).toMatchObject({ played: 2, solved: 2 });
+    expect(t.provider.dispatched).toBe(2 * (2 + 2) + 2 * 7);
+    expect(t.provider.requests.slice(8).every((r) => r.responseSchema?.name === "detective_action")).toBe(true);
+    const turns = (id: string) => [1, 2, 3, 4, 5, 6, 7].map((n) => `${id}:g2:d${n}`);
+    expect(t.stored().map((a) => a.attemptId).filter((id) => id.includes(":g2:"))).toEqual([...turns("p-1"), ...turns("p-2")]);
+
+    // New files beside the old ones, and the old ones untouched, byte for byte.
+    expect(readdirSync(t.dir).sort()).toEqual([...before, "p-1.g2.detective.json", "p-1.g2.game.json", "p-2.g2.detective.json", "p-2.g2.game.json"].sort());
+    expect(["p-1", "p-2"].map((id) => [readFileSync(detectivePath(t.config, id), "utf8"), readFileSync(gamePath(t.config, id), "utf8")])).toEqual(game1);
+    expect(JSON.parse(readFileSync(gamePath(again, "p-1"), "utf8"))).toMatchObject({ outcome: "solved", turns: 7 });
+
+    // Each game is counted by itself, rebuilt from its own saved replies.
+    expect(await pilotTotals(t.config, t.stored())).toMatchObject({ attempted: 2, accepted: 2, played: 2, solved: 0 });
+    expect(await pilotTotals(again, t.stored())).toMatchObject({ attempted: 2, accepted: 2, played: 2, solved: 2 });
+
+    // A later game's saved replies are held to the same checks, against its own request ids.
+    const path = detectivePath(again, "p-2");
+    const good = readFileSync(path, "utf8");
+    writeFileSync(path, JSON.stringify((JSON.parse(good) as DetectiveReply[]).slice(0, 3)));
+    expect((await pilotTotals(again, t.stored())).rows.map((r) => `${r.id} ${r.game}: ${r.note}`)).toEqual(["p-1 solved: ", "p-2 not played: the store knows of a later turn whose reply was not saved"]);
+    writeFileSync(path, readFileSync(detectivePath(t.config, "p-2"), "utf8"));
+    expect((await pilotTotals(again, t.stored())).rows[1]).toMatchObject({ game: "not played", note: "saved detective reply 1 is not this game's turn 1" });
+    writeFileSync(path, good);
+
+    // Game 2 has been started and cannot be started again. Game 3 has not.
+    expect(shape(again, t.stored())).toEqual(["closed+closed=0", "closed+closed=0"]);
+    expect((await runPilot(again, { metered: t.metered, stored: t.stored() })).entries).toEqual([]);
+    expect(t.provider.dispatched).toBe(2 * (2 + 2) + 2 * 7);
+    expect(shape({ ...t.config, game: 3 }, t.stored())).toEqual(["closed+play=27", "closed+play=27"]);
+  });
+
+  it("never writes a case: an attempt whose writing is unfinished gets nothing from a later game", async () => {
+    // The first run is stopped right after the first skeleton: one attempt half written, one not begun.
+    let sent = 0;
+    const t = setup({ killSwitch: () => sent >= 1 });
+    const original = t.provider.send.bind(t.provider);
+    t.provider.send = async (body: string) => {
+      sent++;
+      return original(body);
+    };
+    await runPilot(t.config, { metered: t.metered, stored: t.stored() });
+    expect(t.provider.dispatched).toBe(1);
+    // Game 1 would finish the writing. A later game sends nothing at all, not even the missing people request.
+    expect(shape(t.config, t.stored())).toEqual(["resume+play=28", "fresh+play=29"]);
+    const again: PilotConfig = { ...t.config, game: 2 };
+    expect(shape(again, t.stored())).toEqual(["closed+closed=0", "closed+closed=0"]);
+    expect(planPilot(again, t.stored()).most).toBe(0);
+    expect(await runPilot(again, { metered: open(t), stored: t.stored() })).toEqual({ entries: [], blocked: false });
+    expect(t.provider.dispatched).toBe(1);
+  });
+
+  it("a later game does not use up the first: each has its own once", async () => {
+    // The first run is stopped right after the first case is written, before any game.
+    let sent = 0;
+    const t = setup({ killSwitch: () => sent >= 2 });
+    const original = t.provider.send.bind(t.provider);
+    t.provider.send = async (body: string) => {
+      sent++;
+      return original(body);
+    };
+    await runPilot(t.config, { metered: t.metered, stored: t.stored() });
+    const again: PilotConfig = { ...t.config, game: 2 };
+    const second = await runPilot(again, { metered: open(t), stored: t.stored() });
+    expect(second.entries.map((e) => [e.attempt.id, e.writer?.requests ?? 0, e.game?.outcome])).toEqual([["p-1", 0, "solved"]]);
+    // Game 2 of the first case is spent. Game 1 of it is still to play, and the second case is still to write.
+    expect(shape(again, t.stored())).toEqual(["closed+closed=0", "closed+closed=0"]);
+    expect(shape(t.config, t.stored())).toEqual(["closed+play=27", "fresh+play=29"]);
+    expect(await pilotTotals(t.config, t.stored())).toMatchObject({ attempted: 1, accepted: 1, played: 0, solved: 0 });
+    expect(await pilotTotals(again, t.stored())).toMatchObject({ attempted: 1, accepted: 1, played: 1, solved: 1 });
+  });
+
+  it("an unresolved request of any game blocks every game", async () => {
+    // Game 2's third detective request does not come back.
+    const t = setup();
+    await runPilot(t.config, { metered: t.metered, stored: t.stored() });
+    const sent = t.provider.dispatched;
+    const failing = new FakeProvider((request, index) => {
+      if (index === 2) throw new Error("socket closed");
+      return readingDetective(request);
+    });
+    const metered = createMetered({ inputBound: { tokensPerByte: 100 }, provider: failing, store: new MemorySpendStore(), envelope: "e2", limitNano: usdToNano(5), trace: (e) => t.trace.push(e) });
+    const again: PilotConfig = { ...t.config, game: 2 };
+    const run = await runPilot(again, { metered, stored: t.stored() });
+    expect(run.stoppedBy).toBe("failed:outcome-unknown");
+    expect(failing.dispatched).toBe(3);
+    for (const config of [again, t.config, { ...t.config, game: 3 }]) {
+      expect(planPilot(config, t.stored())).toMatchObject({ most: 0, unresolved: [{ attemptId: "p-1:g2:d3" }] });
+      expect(await runPilot(config, { metered, stored: t.stored() })).toEqual({ entries: [], blocked: true });
+    }
+    expect(failing.dispatched).toBe(3);
+    expect(t.provider.dispatched).toBe(sent);
+  });
+
+  it("refuses a game number that is not a whole number from 1 up, and an attempt id that is not plain", async () => {
+    const t = setup();
+    expect(gameIdOf(t.config, "p-1")).toBe("p-1");
+    expect(gameIdOf({ ...t.config, game: 1 }, "p-1")).toBe("p-1");
+    expect(gameIdOf({ ...t.config, game: 2 }, "p-1")).toBe("p-1:g2");
+    expect(detectivePath({ ...t.config, game: 12 }, "p-1")).toBe(`${t.dir}/p-1.g12.detective.json`);
+    for (const game of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => planPilot({ ...t.config, game }, [])).toThrow(RangeError);
+      await expect(runPilot({ ...t.config, game }, { metered: t.metered, stored: [] })).rejects.toThrow(RangeError);
+    }
+    // "p-1:g2" as an attempt of its own would share request ids with game 2 of "p-1", and
+    // "p-1.g2" would share its files: p-1.g2.detective.json and p-1.g2.game.json.
+    const withId = (...ids: string[]): PilotConfig => ({ ...t.config, attempts: ids.map((id) => ({ id, theme: "x" })) });
+    expect(gamePath({ ...withId("p-1"), game: 2 }, "p-1")).toBe(`${t.dir}/p-1.g2.game.json`);
+    for (const id of ["p-1:g2", "p-1.g2", "p-1.skeleton", "P-1", "p--1", "-p1", "p1-", "p 1", "p/1", "../p1", ""]) {
+      expect(() => planPilot(withId("p-1", id), []), id).toThrow(RangeError);
+      expect(() => planTrial(withId(id), []), id).toThrow(RangeError);
+      await expect(runPilot(withId(id), { metered: t.metered, stored: [] }), id).rejects.toThrow(RangeError);
+    }
+    expect(() => planPilot(withId("p-1", "p-1"), [])).toThrow(/share the id/);
+    for (const id of ["p-1", "pilot-a-3", "writer-b-12", "x", "7"]) expect(() => planPilot(withId(id), []), id).not.toThrow();
+    expect(t.provider.dispatched).toBe(0);
   });
 });
 

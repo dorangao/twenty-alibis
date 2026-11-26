@@ -22,7 +22,7 @@ import { rebuildCase, SHUFFLE_VERSION, type WriteReport } from "./write";
  *    is worked out again from the saved detective replies. So the totals of a pilot can be
  *    rebuilt at any time, by any run, from the replies and the store alone.
  *  - A game that has been started is never started again: a game cannot be picked up in the
- *    middle.
+ *    middle. A case can be played again only as a new, separately numbered game.
  *  - One runner at a time. A run takes a lease on the envelope before it reads the store or
  *    makes its plan, and a second run is turned away, whichever terminal or checkout it was
  *    started from. So a run that finds trouble stops the pilot, not just itself, and no run
@@ -33,7 +33,25 @@ import { rebuildCase, SHUFFLE_VERSION, type WriteReport } from "./write";
 export interface PilotConfig extends TrialConfig {
   /** The most turns one detective game may take. The plan counts on exactly this many. */
   maxTurns: number;
+  /**
+   * Which game of each case this is: 1 by default. A case may be played again as game 2, 3,
+   * and so on, for instance after the detective's prompt or limits have changed. Each game
+   * has its own request ids ("<id>:g2:d1" …) and its own files, so an earlier game's
+   * records are never touched and each game can be started once.
+   */
+  game?: number;
 }
+
+/** The game number of a config. Anything but a whole number from 1 up is refused, so two games can never share ids or files. */
+export function gameNumber(config: PilotConfig): number {
+  const n = config.game ?? 1;
+  if (!Number.isSafeInteger(n) || n < 1) throw new RangeError(`a game number is a whole number from 1 up, not ${String(n)}`);
+  return n;
+}
+
+/** The id of one game of a case: the case's id for game 1, "<id>:g<n>" after that. */
+export const gameIdOf = (config: PilotConfig, id: string): string => (gameNumber(config) === 1 ? id : `${id}:g${gameNumber(config)}`);
+const gameFile = (config: PilotConfig, id: string, kind: "game" | "detective") => `${config.dir}/${id}${gameNumber(config) === 1 ? "" : `.g${gameNumber(config)}`}.${kind}.json`;
 
 export type GameStanding =
   /** The detective would play, if there is an accepted case when its turn comes. */
@@ -48,8 +66,8 @@ export interface PilotPlan {
   most: number;
 }
 
-export const gamePath = (config: TrialConfig, id: string) => `${config.dir}/${id}.game.json`;
-export const detectivePath = (config: TrialConfig, id: string) => `${config.dir}/${id}.detective.json`;
+export const gamePath = (config: PilotConfig, id: string) => gameFile(config, id, "game");
+export const detectivePath = (config: PilotConfig, id: string) => gameFile(config, id, "detective");
 
 const briefOf = (config: TrialConfig, attempt: TrialAttempt): SkeletonBrief => ({ theme: attempt.theme, suspects: config.suspects, rooms: config.rooms });
 const settled = (stored: readonly StoredAttempt[], id: string) => stored.some((a) => a.attemptId === id && a.state === "settled");
@@ -81,11 +99,18 @@ export function savedCase(config: TrialConfig, attempt: TrialAttempt, stored: re
 }
 
 export function planPilot(config: PilotConfig, stored: readonly StoredAttempt[]): PilotPlan {
+  const later = gameNumber(config) > 1;
   const mine = stored.filter((a) => config.attempts.some((t) => a.attemptId.startsWith(`${t.id}:`)));
+  // planTrial refuses attempt ids that are not plain: "case.g2" as an attempt of its own would
+  // share files with game 2 of "case", and "case:g2" its request ids.
   const writers = planTrial(config, stored);
-  const rows = writers.rows.map(({ attempt, standing }) => {
+  const rows = writers.rows.map(({ attempt, standing: written }) => {
+    // A later game plays a case that is already written and saved. It never writes one: an
+    // attempt whose writing is unfinished gets nothing from it, not even the missing request.
+    // With the writing closed, the game is offered only if the saved replies rebuild a case.
+    const standing: Standing = later && written.kind !== "closed" ? { kind: "closed", most: 0, why: ["a later game does not write cases", "后续对局不写案件"] } : written;
     let game: GameStanding;
-    if (mine.some((a) => a.attemptId.startsWith(`${attempt.id}:d`))) game = { kind: "closed", most: 0, why: ["a game was already started for this case", "这个案件已经开过一局"] };
+    if (mine.some((a) => a.attemptId.startsWith(`${gameIdOf(config, attempt.id)}:d`))) game = { kind: "closed", most: 0, why: ["this game of the case was already started", "这个案件的这一局已经开过"] };
     else if (standing.kind !== "closed") game = { kind: "play", most: config.maxTurns };
     else {
       const saved = savedCase(config, attempt, stored);
@@ -152,7 +177,7 @@ async function runPilotAdmitted(config: PilotConfig, deps: RunDeps & { onEntry?:
       const game = await playDetective({
         metered: deps.metered,
         c,
-        gameId: row.attempt.id,
+        gameId: gameIdOf(config, row.attempt.id),
         maxTurns: config.maxTurns,
         cacheKey: `case:${row.attempt.id}`,
         // Saved before it is read or acted on: the whole list so far, written whole each turn.
@@ -213,12 +238,12 @@ export async function savedGame(config: PilotConfig, attempt: TrialAttempt, c: C
     return { ok: false, why: "the saved detective replies are damaged" };
   }
   for (const [i, reply] of replies.entries()) {
-    const id = `${attempt.id}:d${i + 1}`;
+    const id = `${gameIdOf(config, attempt.id)}:d${i + 1}`;
     if (reply?.attemptId !== id || reply.turn !== i + 1) return { ok: false, why: `saved detective reply ${i + 1} is not this game's turn ${i + 1}` };
     if (reply.settled !== true || reply.breached !== false || !settled(stored, id)) return { ok: false, why: `the cost of detective reply ${i + 1} is not confirmed` };
   }
   // A game the store knows more turns of than were saved cannot be worked out again.
-  if (stored.some((a) => a.attemptId === `${attempt.id}:d${replies.length + 1}`)) return { ok: false, why: "the store knows of a later turn whose reply was not saved" };
+  if (stored.some((a) => a.attemptId === `${gameIdOf(config, attempt.id)}:d${replies.length + 1}`)) return { ok: false, why: "the store knows of a later turn whose reply was not saved" };
   let next = 0;
   const replay: Metered = async (request) => {
     const reply = replies[next];
@@ -226,7 +251,7 @@ export async function savedGame(config: PilotConfig, attempt: TrialAttempt, c: C
     next++;
     return { ok: true, attemptId: request.attemptId, response: { text: reply.text, toolCalls: [], ...(reply.usage ? { usage: reply.usage } : {}), ...(reply.finishReason ? { finishReason: reply.finishReason } : {}) }, costNano: 0, settled: true, breached: false };
   };
-  const game = await playDetective({ metered: replay, c, gameId: attempt.id, maxTurns: config.maxTurns });
+  const game = await playDetective({ metered: replay, c, gameId: gameIdOf(config, attempt.id), maxTurns: config.maxTurns });
   // Replayed to the end of what was saved, and the game must not have asked for more.
   if (next !== replies.length) return { ok: false, why: "the saved replies do not replay to the end" };
   return { ok: true, game };
