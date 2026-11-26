@@ -80,6 +80,19 @@ const meansPieces = (c: Case, name: string): string[] => {
   return rest.split("\n").flatMap(piecesOf);
 };
 
+/**
+ * How the guard hears each person, place and means of a case: the English words and the
+ * Chinese pieces it matches on. A case writer uses this to refuse names the guard would
+ * confuse, with the very rules the guard applies.
+ */
+export function nameForms(c: Case): { kind: "suspect" | "location" | "means"; id: string; name: { en: string; zh: string }; en: string[]; zh: string[] }[] {
+  return [
+    ...c.suspects.map((s) => ({ kind: "suspect" as const, id: s.id, name: s.name, en: wordsOf(s.name.en), zh: piecesOf(s.name.zh) })),
+    ...c.locations.map((l) => ({ kind: "location" as const, id: l.id, name: l.name, en: wordsOf(l.name.en), zh: [l.name.zh] })),
+    ...c.means.map((m) => ({ kind: "means" as const, id: m.id, name: m.name, en: wordsOf(m.name.en), zh: meansPieces(c, m.name.zh) })),
+  ];
+}
+
 interface Vocabulary {
   /** English words, matched whole, in any case, with an optional plural or possessive ending. */
   en: { form: string; pattern: RegExp }[];

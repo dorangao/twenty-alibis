@@ -42,6 +42,7 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 | Rules of proof | [`src/case/proof.ts`](src/case/proof.ts) | What proves a suspect and what rules one out. The solver and the accusation scorer use this one object |
 | Session | [`src/game/session.ts`](src/game/session.ts) | One player's game as plain data: questions, inspections, the notebook with its contradictions, the accusation and the reveal |
 | Terminal game | [`src/game/terminal.ts`](src/game/terminal.ts), [`scripts/play.ts`](scripts/play.ts) | The whole game as lines of text, in English and Chinese. Playable with the model off |
+| Case writer | [`src/writer/`](src/writer) | Muse Ember writes a plot in two requests; code compiles it into a full case; the validator, the solver and a quality gate decide whether it is kept |
 
 ### The pair that defines "solvable" · 定义"可解"的一对案件
 
@@ -73,6 +74,18 @@ A player names a suspect and cites evidence from the notebook. Code judges the c
 A session costs at most `sessionCap` actions. Hearing a topic again, asking a suspect the very same question again while it has the same topics open, or looking at a record again is free and sends nothing to the model: the saved result is returned. A question in other words is a new question. A topic heard in one language and asked for in the other is shown as code words it, since the model's own line exists in one language only.
 
 玩家点名一名嫌疑人，并从笔记本里引用证据。代码用求解器接受案件时的同一套规则来判定：引用的证据必须证明被指认者有机会、有手段、有动机，并排除其他所有人。任何满足这些条件的证据组合都被接受；嫌疑人说的话不能证明任何事。只说对名字而没有证明，会判为"说对了但未证明"，并指出缺什么。真相只在指认之后公开。重听一个话题、在话题没变的情况下向同一人问一模一样的问题、或再看一份记录，都不耗行动，也不会再调用模型；换一种说法就算新问题。用一种语言听过的话题换另一种语言重听时，显示的是代码生成的句子，因为模型的台词只有一种语言。
+
+### How a new case is written · 新案件怎么写出来
+
+**Muse Ember writes the plot. Code builds the evidence. The solver judges the result.**
+
+1. **The plot, two requests.** First the skeleton: the setting, the rooms and their doors, the victim, what was needed to do it, the possible motives, and the people with their voices. Then what happened: who did it, where each person was in every time slot, who holds the means and who has which motive. The voices are written before the answer exists, and the second request can only choose among ids that code gave to the first.
+2. **The compiler.** From the plot, code writes everything that is bookkeeping: each suspect's statement about the time of death, with the culprit claiming the room next door; a register of who holds the means and who does not; the victim's papers, saying who had which motive and, for anyone who holds the means, that they had none; one record per room of who was there. The record of the scene opens only after its keeper, named in the briefing, has been heard.
+3. **The gates.** The validator and the solver decide whether the case is fair. A quality gate then asks what they do not: does the briefing leave at least three people to suspect, does the proof need an interview, and can the line guard tell every name apart.
+
+A plot that fails is refused with its reasons. Nothing here calls a model in the test suite; a handwritten twenty-person plot stands in for one.
+
+**剧情由 Muse Ember 写，证据由代码生成，求解器把关。** 模型分两次请求写剧情：先写场景、房间和门、死者、作案所需之物、可能的动机，以及每个人和他们的说话方式；再写发生了什么：谁是凶手、每人每个时段在哪、谁有手段、谁有哪种动机。说话方式写在答案出现之前，第二次请求只能从代码给第一次结果编的编号里选。代码据此生成全部"记账"的部分：每人关于案发时间的陈述（凶手声称在隔壁房间）、手段登记、动机文件（包括"有手段但没有任何动机"的明确记录）、每个房间的在场记录。现场的记录要先听过简报里点名的保管人才能查看。之后由校验器和求解器判断案件是否公平，再由质量关检查三件事：简报是否至少留下三个可怀疑的人、证明是否需要问话、台词守卫能否分清每个名字。
 
 ## Run it · 运行
 
