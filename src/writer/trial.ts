@@ -82,33 +82,53 @@ export function writeWhole(path: string, text: string): void {
  * when there is no file. Every way it can be unusable has its own answer.
  */
 export function savedSkeleton(text: string | null, attemptId: string, brief: SkeletonBrief): { ok: true; skeleton: unknown; salt?: string } | { ok: false; why: [en: string, zh: string] } {
-  const no = (en: string, zh: string) => ({ ok: false as const, why: [en, zh] as [string, string] });
-  if (text === null) return no("the skeleton went out but its reply was not saved", "骨架请求已发出，但回复没有保存");
+  const saved = savedReply(text, attemptId, "skeleton", brief);
+  if (!saved.ok) return saved;
+  const checked = checkSkeleton(saved.value, brief);
+  if (!checked.ok) return { ok: false, why: [`the saved skeleton is refused by the skeleton check: ${checked.reasons[0] ?? ""}`, `保存的骨架未通过骨架检查：${checked.reasons[0] ?? ""}`] };
+  return { ok: true, skeleton: saved.value, ...(typeof saved.reply.salt === "string" && saved.reply.salt !== "" ? { salt: saved.reply.salt } : {}) };
+}
+
+const LABEL = { skeleton: ["skeleton", "骨架"], people: ["people reply", "人物回复"] } as const;
+
+/**
+ * Read one saved reply back and decide whether it can be used: the file is whole, it is this
+ * attempt's reply for this stage and this brief, its cost was confirmed, it ended normally,
+ * and its text is JSON. `text` is the file's contents, or null when there is no file.
+ */
+export function savedReply(
+  text: string | null,
+  attemptId: string,
+  stage: "skeleton" | "people",
+  brief: SkeletonBrief,
+): { ok: true; reply: Partial<SavedReply>; value: unknown } | { ok: false; why: [en: string, zh: string] } {
+  const [en, zh] = LABEL[stage];
+  const no = (e: string, z: string) => ({ ok: false as const, why: [e, z] as [string, string] });
+  if (text === null) return stage === "skeleton" ? no("the skeleton went out but its reply was not saved", "骨架请求已发出，但回复没有保存") : no("the people reply was not saved", "人物回复没有保存");
   let saved: Partial<SavedReply>;
   try {
     const parsed = JSON.parse(text) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     saved = parsed as Partial<SavedReply>;
   } catch {
-    return no("the saved skeleton file is damaged", "保存的骨架文件已损坏");
+    return no(`the saved ${en} file is damaged`, `保存的${zh}文件已损坏`);
   }
   const sameBrief = saved.brief?.theme === brief.theme && saved.brief?.suspects === brief.suspects && saved.brief?.rooms === brief.rooms;
-  if (saved.attemptId !== `${attemptId}:skeleton` || saved.stage !== "skeleton" || !sameBrief) return no("the saved skeleton belongs to another attempt", "保存的骨架属于另一次尝试");
-  if (saved.settled !== true || saved.breached !== false) return no("the saved skeleton's cost was not confirmed", "保存的骨架费用未确认");
-  if (saved.finishReason === "length" || typeof saved.text !== "string") return no("the saved skeleton was cut off", "保存的骨架被截断");
-  if (saved.finishReason !== "stop") return no("the saved skeleton did not end normally", "保存的骨架不是正常结束的");
-  let skeleton: unknown;
+  if (saved.attemptId !== `${attemptId}:${stage}` || saved.stage !== stage || !sameBrief) return no(`the saved ${en} belongs to another attempt`, `保存的${zh}属于另一次尝试`);
+  if (saved.settled !== true || saved.breached !== false) return no(`the saved ${en}'s cost was not confirmed`, `保存的${zh}费用未确认`);
+  if (saved.finishReason === "length" || typeof saved.text !== "string") return no(`the saved ${en} was cut off`, `保存的${zh}被截断`);
+  if (saved.finishReason !== "stop") return no(`the saved ${en} did not end normally`, `保存的${zh}不是正常结束的`);
+  let value: unknown;
   try {
-    skeleton = JSON.parse(saved.text) as unknown;
+    value = JSON.parse(saved.text) as unknown;
   } catch {
-    return no("the saved skeleton is not JSON", "保存的骨架不是 JSON");
+    return no(`the saved ${en} is not JSON`, `保存的${zh}不是 JSON`);
   }
-  const checked = checkSkeleton(skeleton, brief);
-  if (!checked.ok) return no(`the saved skeleton is refused by the skeleton check: ${checked.reasons[0] ?? ""}`, `保存的骨架未通过骨架检查：${checked.reasons[0] ?? ""}`);
-  return { ok: true, skeleton, ...(typeof saved.salt === "string" && saved.salt !== "" ? { salt: saved.salt } : {}) };
+  return { ok: true, reply: saved, value };
 }
 
-const read = (path: string): string | null => {
+/** A file's text, or null when it is not there or cannot be read. */
+export const readSaved = (path: string): string | null => {
   if (!existsSync(path)) return null;
   try {
     return readFileSync(path, "utf8");
@@ -127,7 +147,7 @@ export function planTrial(config: TrialConfig, stored: readonly StoredAttempt[])
     if (known.has(`${attempt.id}:people`)) standing = { kind: "closed", most: 0, why: ["both requests have gone out", "两个请求都已发出"] };
     else if (!known.has(`${attempt.id}:skeleton`)) standing = { kind: "fresh", most: 2 };
     else {
-      const saved = savedSkeleton(read(replyPath(config, attempt.id, "skeleton")), attempt.id, briefOf(config, attempt));
+      const saved = savedSkeleton(readSaved(replyPath(config, attempt.id, "skeleton")), attempt.id, briefOf(config, attempt));
       standing = saved.ok ? { kind: "resume", most: 1, skeleton: saved.skeleton, ...(saved.salt ? { salt: saved.salt } : {}) } : { kind: "closed", most: 0, why: saved.why };
     }
     return { attempt, standing };
@@ -139,6 +159,8 @@ export function planTrial(config: TrialConfig, stored: readonly StoredAttempt[])
 /**
  * One attempt's writing, with everything it produces saved: each reply as it arrives, and
  * at the end whatever the attempt got to. If that is a case, its file holds the answer.
+ * The report file is a convenience for people. Nothing in the code trusts it: a saved case
+ * is always made again from the saved replies.
  */
 export async function writeAttempt(config: TrialConfig, attempt: TrialAttempt, standing: Exclude<Standing, { kind: "closed" }>, metered: Metered): Promise<WriteReport> {
   const brief = briefOf(config, attempt);
@@ -151,10 +173,15 @@ export async function writeAttempt(config: TrialConfig, attempt: TrialAttempt, s
     // Saved before anything parses or judges it.
     onReply: (reply) => writeWhole(replyPath(config, attempt.id, reply.stage), `${JSON.stringify({ ...reply, brief, shuffleVersion: SHUFFLE_VERSION } satisfies SavedReply, null, 2)}\n`),
   });
-  writeWhole(
-    reportPath(config, attempt.id),
-    `${JSON.stringify({ accepted: report.accepted, failedAt: report.failedAt ?? null, problem: report.problem ?? null, reasons: report.reasons, notes: report.notes, quality: report.quality ?? null, usage: report.usage, salt: report.salt, shuffleVersion: SHUFFLE_VERSION, case: report.case ?? null }, null, 2)}\n`,
-  );
+  // Only a run that sent something for this attempt has anything to report. A run whose
+  // request was refused before it left (another run already sent it, say) must not write over
+  // what the run that did send it saved.
+  if (report.requests > 0) {
+    writeWhole(
+      reportPath(config, attempt.id),
+      `${JSON.stringify({ accepted: report.accepted, failedAt: report.failedAt ?? null, problem: report.problem ?? null, reasons: report.reasons, notes: report.notes, quality: report.quality ?? null, usage: report.usage, salt: report.salt, shuffleVersion: SHUFFLE_VERSION, case: report.case ?? null }, null, 2)}\n`,
+    );
+  }
   return report;
 }
 

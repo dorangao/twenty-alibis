@@ -141,6 +141,57 @@ export function checkSkeleton(raw: unknown, brief: SkeletonBrief): { ok: true; s
   return flaws.length > 0 ? { ok: false, reasons: flaws } : { ok: true, skeleton: parsed.data, notes };
 }
 
+/** The skeleton as the people request is shown it: people and motives in the order the private salt gives. */
+export function presentSkeleton(salt: string, skeleton: Skeleton): Skeleton {
+  return shuffleRoster(`${salt}:before`, skeleton);
+}
+
+const peopleIssues = (issues: readonly { path: PropertyKey[]; message: string }[]): string[] => issues.slice(0, 8).map((i) => `people: ${i.path.join(".") || "(the whole reply)"}: ${i.message}`);
+
+/** What code makes of a plot once both replies are in. */
+export interface Judged {
+  /** Where it was refused. Absent when the case passed every gate. */
+  failedAt?: WriteStage;
+  reasons: string[];
+  notes: string[];
+  case?: Case;
+  quality?: Quality;
+}
+
+/**
+ * Everything after the second reply, and none of it uses a model: read the people reply,
+ * reorder once more, compile, and put the case through the gates. `presented` is the
+ * skeleton exactly as the people request was shown it.
+ */
+export function finishCase(attemptId: string, presented: Skeleton, peopleValue: unknown, salt: string): Judged {
+  const people = PeopleSchema.safeParse(peopleValue);
+  if (!people.success) return { failedAt: "people", reasons: peopleIssues(people.error.issues), notes: [] };
+  // Reorder the people and the motives once more, so a place in the finished case says
+  // nothing about the plot either. The private salt seeds both reorderings.
+  const plot = shufflePlot(`${salt}:after`, presented, people.data);
+  const compiled = compilePlot(attemptId, plot.skeleton, plot.people);
+  if (!compiled.ok) return { failedAt: "compile", reasons: compiled.problems, notes: [] };
+  const gate = checkCase(compiled.case);
+  if (!gate.accepted) return { failedAt: "gate", reasons: gate.reasons, notes: [], case: compiled.case };
+  const quality = assessQuality(compiled.case);
+  if (quality.problems.length > 0) return { failedAt: "quality", reasons: quality.problems, notes: quality.notes, case: compiled.case, quality };
+  return { reasons: [], notes: quality.notes, case: compiled.case, quality };
+}
+
+/**
+ * Build a case from two saved replies, sending nothing. It runs exactly what `writeCase`
+ * runs after each reply, with the same salt, so it gives the same case. This is how a saved
+ * case is trusted: not by reading a file that says "accepted", but by making it again from
+ * what the model actually wrote.
+ */
+export function rebuildCase(args: { attemptId: string; brief: SkeletonBrief; skeleton: unknown; people: unknown; salt: string }): Judged & { shown?: string[] } {
+  const checked = checkSkeleton(args.skeleton, args.brief);
+  if (!checked.ok) return { failedAt: "skeleton", reasons: checked.reasons, notes: [] };
+  const presented = presentSkeleton(args.salt, checked.skeleton);
+  const judged = finishCase(args.attemptId, presented, args.people, args.salt);
+  return { ...judged, notes: [...checked.notes, ...judged.notes], shown: presented.suspects.map((x) => x.name.en) };
+}
+
 export async function writeCase(args: WriteArgs): Promise<WriteReport> {
   const salt = args.salt ?? randomUUID();
   const report: WriteReport = { accepted: false, reasons: [], notes: [], requests: 0, costNano: 0, usage: [], salt };
@@ -195,7 +246,7 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
   // ---- Stage 2: the people. The schema offers only the ids code gave to the skeleton. ----
   // The model is shown the people in a seeded order, not the order it named them in: it
   // tends to pick the first one it sees, and the first it named is recognizable by name.
-  const presented = shuffleRoster(`${salt}:before`, checked.skeleton);
+  const presented = presentSkeleton(salt, checked.skeleton);
   const ids = plotIds(presented);
   const second = await ask(
     "people",
@@ -203,24 +254,18 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
     presented.suspects.map((s) => s.name.en),
   );
   if (second === null) return stop("people", report.reasons);
-  const people = PeopleSchema.safeParse(second.value);
-  if (!people.success) return stop("people", people.error.issues.slice(0, 8).map((i) => `people: ${i.path.join(".") || "(the whole reply)"}: ${i.message}`));
   // The reply is here, but its cost is not confirmed or the envelope is suspended. Until
   // that is reconciled the attempt is not counted as anything: not accepted, not judged.
-  if (report.problem) return stop("people", [`the people reply came back, but the attempt is not judged: ${report.problem}`]);
+  if (report.problem) {
+    const shape = PeopleSchema.safeParse(second.value);
+    return stop("people", shape.success ? [`the people reply came back, but the attempt is not judged: ${report.problem}`] : peopleIssues(shape.error.issues));
+  }
 
   // ---- Code from here on. ----
-  // Reorder the people and the motives once more, so a place in the finished case says
-  // nothing about the plot either. The private salt seeds both reorderings.
-  const plot = shufflePlot(`${salt}:after`, presented, people.data);
-  const compiled = compilePlot(args.attemptId, plot.skeleton, plot.people);
-  if (!compiled.ok) return stop("compile", compiled.problems);
-  report.case = compiled.case;
-  const gate = checkCase(compiled.case);
-  if (!gate.accepted) return stop("gate", gate.reasons);
-  const quality = assessQuality(compiled.case);
-  report.quality = quality;
-  report.notes.push(...quality.notes);
-  if (quality.problems.length > 0) return stop("quality", quality.problems);
+  const judged = finishCase(args.attemptId, presented, second.value, salt);
+  if (judged.case) report.case = judged.case;
+  if (judged.quality) report.quality = judged.quality;
+  report.notes.push(...judged.notes);
+  if (judged.failedAt) return stop(judged.failedAt, judged.reasons);
   return { ...report, accepted: true };
 }

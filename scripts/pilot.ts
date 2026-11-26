@@ -20,7 +20,7 @@
  */
 import { createRuntime } from "../src/runtime";
 import { nanoToUsd } from "../src/spend/pricing";
-import { pilotCounts, planPilot, runPilot, type PilotConfig } from "../src/writer/pilot";
+import { pilotTotals, planPilot, runCounts, runPilot, type PilotConfig } from "../src/writer/pilot";
 import { both, say } from "./say";
 
 const PILOT_ENVELOPE = "local";
@@ -113,13 +113,20 @@ if (run.stoppedBy) say(`STOPPED: ${run.stoppedBy}. No further attempt was starte
 
 console.log();
 say("Summary", "汇总");
-const counts = pilotCounts(run);
+const counts = runCounts(run);
 const requests = run.entries.reduce((sum, e) => sum + (e.writer?.requests ?? 0) + (e.game?.requests ?? 0), 0);
 const cost = run.entries.reduce((sum, e) => sum + (e.writer?.costNano ?? 0) + (e.game?.costNano ?? 0), 0);
 say(
-  `Attempted ${counts.attempted}, accepted by the gates ${counts.accepted}, played ${counts.played}, solved ${counts.solved}. ${requests} request(s), ${usd(cost)} confirmed.`,
-  `尝试 ${counts.attempted}，通过关卡 ${counts.accepted}，已对局 ${counts.played}，破案 ${counts.solved}。共 ${requests} 个请求，已确认费用 ${usd(cost)}。`,
+  `THIS RUN ONLY: wrote ${counts.attempted}, of which accepted ${counts.accepted}; played ${counts.played}, of which solved ${counts.solved}. ${requests} request(s), ${usd(cost)} confirmed.`,
+  `仅本次运行：写了 ${counts.attempted} 份，其中通过 ${counts.accepted} 份；对局 ${counts.played} 局，其中破案 ${counts.solved} 局。共 ${requests} 个请求，已确认费用 ${usd(cost)}。`,
 );
+// The state of the pilot, whichever runs did the work: made again from the saved replies and the store's records.
+const totals = await pilotTotals(config, await runtime.store.attempts(envelope));
+say(
+  `THE PILOT SO FAR, rebuilt from the saved replies and the spend store: attempted ${totals.attempted}, accepted by the gates ${totals.accepted}, played ${totals.played}, solved ${totals.solved}.`,
+  `试跑至今（由已保存的回复和额度存储重建）：尝试 ${totals.attempted}，通过关卡 ${totals.accepted}，已对局 ${totals.played}，破案 ${totals.solved}。`,
+);
+for (const row of totals.rows) console.log(`  ${row.id}  ${row.attempted ? "attempted" : "not attempted"}  ${row.accepted ? "accepted" : "not accepted"}  ${row.game}${row.turns ? ` in ${row.turns} turn(s)` : ""}${row.note ? `  (${row.note})` : ""}`);
 const after = await runtime.store.totals(envelope);
 say(
   `Envelope now: settled ${usd(after.settledNano)}, kept for unknown outcomes ${usd(after.retainedNano)}, committed ${usd(after.committedNano)}.${after.suspended ? ` SUSPENDED: ${after.suspended}` : ""}`,
