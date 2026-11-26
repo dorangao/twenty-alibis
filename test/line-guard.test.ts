@@ -112,6 +112,29 @@ describe("the line guard refuses a line that says more than the statements", () 
     refused("polarity", "s-ada", adaNoKey, "I have a key.");
   });
 
+  it("refuses a line that leaves the time of a statement out", () => {
+    // "Foyer." after "Where were you at 21:00?" reads well, but nothing in the line ties it to 21:00.
+    refused("omits", "s-ada", adaFoyer, "I was in the foyer.");
+    refused("omits", "s-ben", benFoyer, "Foyer.");
+    refused("omits", "s-ada", adaFoyer, "我在门厅。");
+    expect(guardLine(c, "s-ada", adaFoyer, "I was in the foyer.", "en")).toEqual({ ok: false, reason: "omits", detail: "a-ada-foyer-2100 (time)" });
+    ok("s-ben", benFoyer, "Foyer. Nine o'clock.");
+    // A bare number word is not read as a time, so this one falls back to code's sentence.
+    refused("omits", "s-ben", benFoyer, "Foyer. Nine.");
+  });
+
+  it("refuses a line that puts the speaker beside the place, not in it", () => {
+    for (const line of ["I was outside the foyer at 21:00.", "I was near the foyer at 21:00.", "At 21:00 I was leaving the foyer.", "I left the foyer at 21:00.", "At 21:00 I was on my way to the foyer."]) {
+      refused("displaced", "s-ada", adaFoyer, line);
+    }
+    for (const line of ["21:00 我在门厅外。", "21:00 我在门厅门口。", "21:00 我在门厅附近。", "21:00 我离开门厅。", "21:00 我正去门厅。"]) {
+      refused("displaced", "s-ada", adaFoyer, line);
+    }
+    refused("displaced", "s-clara", the("a-clara-dining-2100"), "I was just outside the dining hall at 21:00.");
+    ok("s-ada", adaFoyer, "At 21:00 I was in the foyer, by the door.");
+    ok("s-ada", adaFoyer, "21:00 我就在门厅里。");
+  });
+
   it("refuses a line that leaves the statement out", () => {
     refused("omits", "s-ada", adaFoyer, "I'd rather not say.");
     refused("omits", "s-ada", benFoyer, "I was in the foyer at 21:00.");

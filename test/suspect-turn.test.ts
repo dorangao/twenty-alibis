@@ -4,7 +4,7 @@ import { deflection, DEFLECTIONS, MAX_TURN_REQUESTS, suspectTurn, type SuspectTu
 import { startingHeld } from "../src/case/access";
 import { archivePass } from "../src/case/fixtures/archive";
 import type { Case } from "../src/case/schema";
-import { createMetered, type TraceEvent } from "../src/metered";
+import { createMetered, type Metered, type TraceEvent } from "../src/metered";
 import { FakeProvider } from "../src/provider/fake";
 import type { ProviderResponse } from "../src/provider/types";
 import { usdToNano } from "../src/spend/pricing";
@@ -345,12 +345,32 @@ describe("a suspect turn: when a reply comes back but its cost is not confirmed"
     expect(bad.provider.dispatched).toBe(1);
   });
 
+  it("counts a cost as confirmed only when it was settled, and stops on unsettled or suspended alike", async () => {
+    // The spend guard can report settled and breached independently, in any combination.
+    for (const [settled, breached, requests, costNano, problem] of [
+      [true, false, 2, 24, undefined],
+      [true, true, 1, 12, "envelope-suspended"],
+      [false, false, 1, 0, "unconfirmed:not-settled"],
+      [false, true, 1, 0, "envelope-suspended"],
+    ] as const) {
+      const replies = [recall("t-ada-2100"), answer(["a-ada-foyer-2100"], GOOD)];
+      let sent = 0;
+      const metered: Metered = async (request) => ({ ok: true, attemptId: request.attemptId, response: replies[sent++]!, costNano: 12, settled, breached });
+      const turn = await suspectTurn({ metered, c, suspect: "s-ada", held: startingHeld(c), question: EN, turnId: "s1:1" });
+      const label = `settled ${settled}, breached ${breached}`;
+      expect(sent, label).toBe(requests);
+      expect(turn, label).toMatchObject({ requests, costNano, line: problem ? RENDERED_EN : GOOD, source: problem ? "rendered" : "model" });
+      expect(turn.problem, label).toBe(problem);
+      expect(turn.statements.map((s) => s.assertion), label).toEqual(["a-ada-foyer-2100"]);
+    }
+  });
+
   it("a reply that suspends the envelope ends the turn", async () => {
     // The reply bills more output than the request's limit allows: the guard suspends the envelope.
     const overLimit: ProviderResponse = { ...recall("t-ada-2100"), usage: { inputTokens: 1_000, cachedTokens: 0, outputTokens: 5_000 } };
     const { ask, provider } = setup([overLimit, answer(["a-ada-foyer-2100"], GOOD)]);
     const turn = await ask();
-    expect(turn).toMatchObject({ line: RENDERED_EN, source: "rendered", requests: 1, costNano: 0, problem: "unconfirmed:envelope-suspended" });
+    expect(turn).toMatchObject({ line: RENDERED_EN, source: "rendered", requests: 1, problem: "envelope-suspended" });
     expect(provider.dispatched).toBe(1);
   });
 });

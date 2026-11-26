@@ -291,6 +291,21 @@ describe("hearing something again", () => {
     expect(provider.dispatched).toBe(3);
   });
 
+  it("does not take a stored record without a menu for the same question", async () => {
+    const { metered, provider } = setup();
+    const first = await ask(metered, c, startSession(c, "s1"), { suspect: "s-ben", question: "So where were you?" });
+    // A session saved by an earlier version: its turn records carry no menu.
+    const old = JSON.parse(JSON.stringify(first.session)) as Session;
+    for (const record of old.turns) delete (record as { menu?: string[] }).menu;
+    const again = await ask(metered, c, old, { suspect: "s-ben", question: "So where were you?" });
+    expect(again.replayed).toBe(false);
+    expect(again.session.turns).toHaveLength(2);
+    expect(again.session.turns[1]!.menu).toEqual(["t-ben-2100"]);
+    expect(provider.dispatched).toBe(4);
+    // The topic itself is still replayed from the old record.
+    expect((await ask(metered, c, old, { suspect: "s-ben", topic: "t-ben-2100" })).replayed).toBe(true);
+  });
+
   it("does not replay a question whose request failed", async () => {
     let fail = true;
     const { metered, provider } = setup({

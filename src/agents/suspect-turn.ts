@@ -89,7 +89,7 @@ export interface SuspectTurn {
   costNano: number;
   /**
    * Set when a request was refused ("refused:envelope-exhausted"), failed ("failed:outcome-unknown"),
-   * or came back with its cost unconfirmed ("unconfirmed:not-settled", "unconfirmed:envelope-suspended").
+   * came back with its cost unconfirmed ("unconfirmed:not-settled"), or suspended the envelope ("envelope-suspended").
    * Nothing was sent after it.
    */
   problem?: string;
@@ -174,13 +174,12 @@ export async function suspectTurn(args: SuspectTurnArgs): Promise<SuspectTurn> {
       return null;
     }
     requests++;
-    if (!result.settled || result.breached) {
-      // The reply is real and may be used, but its cost is not confirmed, or the envelope was
-      // suspended. Nothing more is sent this turn, and the cost is not reported as confirmed.
-      problem = result.breached ? "unconfirmed:envelope-suspended" : "unconfirmed:not-settled";
-      return result.response;
-    }
-    costNano += result.costNano;
+    // A cost counts as confirmed if and only if the store settled it.
+    if (result.settled) costNano += result.costNano;
+    // The reply is real and may be used. But if its cost is not confirmed, or it suspended
+    // the envelope, nothing more is sent this turn. The two can happen together.
+    if (result.breached) problem = "envelope-suspended";
+    else if (!result.settled) problem = "unconfirmed:not-settled";
     return result.response;
   };
 
