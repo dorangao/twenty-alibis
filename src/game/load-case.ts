@@ -1,0 +1,59 @@
+import { checkCase } from "../case/solver";
+import type { Case } from "../case/schema";
+
+type Why = [en: string, zh: string];
+
+/**
+ * A case read from a file, for playing.
+ *
+ * The file may be a bare case or a case writer's report, which holds the case under "case".
+ * Nothing in the file is taken at its word: whatever a report says about itself, the case in
+ * it goes through the same gate as every case before anyone plays it (the schema, the truth
+ * and evidence checks, and the solver). A file that does not pass is not played.
+ */
+export function loadCase(text: string): { ok: true; c: Case } | { ok: false; why: Why } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, why: ["the file is not JSON", "文件不是 JSON"] };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { ok: false, why: ["the file does not hold a case", "文件里没有案件"] };
+  const inner = (parsed as { case?: unknown }).case;
+  const candidate = inner && typeof inner === "object" ? inner : parsed;
+  const gate = checkCase(candidate);
+  if (!gate.accepted || !gate.validation.ok) {
+    const first = gate.reasons[0] ?? "it did not pass the gate";
+    return { ok: false, why: [`the case in the file is refused: ${first}`, `文件里的案件未通过检查：${first}`] };
+  }
+  return { ok: true, c: gate.validation.case };
+}
+
+export type PlayArgs = { ok: true; language: "en" | "zh"; live: boolean; casePath: string | null } | { ok: false; why: Why };
+
+/**
+ * The arguments of the terminal game, read whole. `--live` can spend, so nothing is guessed:
+ * an argument this does not know, or one given twice, is refused.
+ */
+export function parsePlayArgs(argv: readonly string[]): PlayArgs {
+  let zh = false;
+  let live = false;
+  let casePath: string | null = null;
+  const refuse = (en: string, zh: string): PlayArgs => ({ ok: false, why: [en, zh] });
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === "--zh") {
+      if (zh) return refuse("--zh was given twice", "--zh 出现了两次");
+      zh = true;
+    } else if (token === "--live") {
+      if (live) return refuse("--live was given twice", "--live 出现了两次");
+      live = true;
+    } else if (token === "--case" || token.startsWith("--case=")) {
+      if (casePath !== null) return refuse("--case was given twice", "--case 出现了两次");
+      const value = token === "--case" ? argv[++i] : token.slice("--case=".length);
+      if (!value || value.startsWith("--")) return refuse("--case takes the path of a case file", "--case 后面要跟案件文件的路径");
+      casePath = value;
+    } else return refuse(`unknown argument "${token}"`, `无法识别的参数 "${token}"`);
+  }
+  return { ok: true, language: zh ? "zh" : "en", live, casePath };
+}
