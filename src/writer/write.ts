@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Case } from "../case/schema";
 import { checkCase } from "../case/solver";
 import type { Metered, MeteredRequest } from "../metered";
@@ -5,12 +6,13 @@ import type { Usage } from "../spend/pricing";
 import { compilePlot } from "./compile";
 import { peopleMessages, peopleRequestSchema, PeopleSchema, plotIds, skeletonMessages, skeletonRequestSchema, SkeletonSchema, type Skeleton, type SkeletonBrief } from "./plot";
 import { assessQuality, type Quality } from "./quality";
+import { shufflePlot, shuffleRoster } from "./shuffle";
 import { skeletonProblems } from "./skeleton";
 
 /**
  * One attempt at a new case: two requests to the model, then code.
  *
- *   skeleton request -> parse -> people request -> parse -> compile -> checkCase -> quality gate
+ *   skeleton request -> parse -> reorder the roster -> people request -> parse -> reorder again -> compile -> checkCase -> quality gate
  *
  * The attempt stops at the first stage that fails and says which one, so a run of attempts
  * can report where plots go wrong. There is no repair here: a failed attempt is a failed
@@ -53,7 +55,18 @@ export interface ReplyRecord {
   settled: boolean;
   /** True when the reply suspended the envelope. */
   breached: boolean;
+  /** The attempt's private salt. Saved with the reply so the case can be rebuilt; never part of the case. */
+  salt: string;
+  /**
+   * For a people reply: the English names in the order the request showed them, so its
+   * "s-01", "s-02" can be read later without redoing the reordering. A people reply saved
+   * without this was written against the skeleton's own order.
+   */
+  shown?: string[];
 }
+
+/** The reordering rule in use. Saved with replies so a later change of rule cannot misread an old one. */
+export const SHUFFLE_VERSION = 1;
 
 export interface WriteReport {
   /** True only when the case passed every stage. */
@@ -73,6 +86,12 @@ export interface WriteReport {
   usage: { step: string; inputTokens: number; cachedTokens: number; outputTokens: number; reasoningTokens: number | undefined; finishReason: string | undefined }[];
   /** Set when a request was refused, failed, or came back unconfirmed. The caller should stop its run. */
   problem?: string;
+  /**
+   * The private salt that seeded both reorderings. Keep it with the saved replies: the
+   * people reply names people by their place in the order the salt gave. It is not in the
+   * case and must not be published with it.
+   */
+  salt: string;
 }
 
 export interface WriteArgs {
@@ -92,6 +111,12 @@ export interface WriteArgs {
    * can be run later from a saved skeleton.
    */
   onReply?: (reply: ReplyRecord) => void;
+  /**
+   * The private salt for the two reorderings. Random when not given. Pass the saved one to
+   * rebuild a case from saved replies. It is deliberately not derived from the attempt id:
+   * that id becomes the case's public id, and a seed anyone can compute hides nothing.
+   */
+  salt?: string;
 }
 
 /**
@@ -117,11 +142,12 @@ export function checkSkeleton(raw: unknown, brief: SkeletonBrief): { ok: true; s
 }
 
 export async function writeCase(args: WriteArgs): Promise<WriteReport> {
-  const report: WriteReport = { accepted: false, reasons: [], notes: [], requests: 0, costNano: 0, usage: [] };
+  const salt = args.salt ?? randomUUID();
+  const report: WriteReport = { accepted: false, reasons: [], notes: [], requests: 0, costNano: 0, usage: [], salt };
   const stop = (failedAt: WriteStage, reasons: string[]): WriteReport => ({ ...report, failedAt, reasons });
 
   /** Send one request and read its reply as JSON. Null when the attempt must stop; the reason is then in `report.reasons`. */
-  const ask = async (stage: "skeleton" | "people", request: Omit<MeteredRequest, "attemptId" | "promptId" | "step">): Promise<{ value: unknown } | null> => {
+  const ask = async (stage: "skeleton" | "people", request: Omit<MeteredRequest, "attemptId" | "promptId" | "step">, shown?: string[]): Promise<{ value: unknown } | null> => {
     const attemptId = `${args.attemptId}:${stage}`;
     const result = await args.metered({ ...request, step: `writer.${stage}`, promptId: WRITER_PROMPT_ID, attemptId });
     if (!result.ok) {
@@ -132,7 +158,7 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
     }
     report.requests++;
     // First of all, hand the reply over as it is. Nothing below can lose it.
-    args.onReply?.({ attemptId, stage, text: result.response.text, finishReason: result.response.finishReason, usage: result.response.usage, settled: result.settled, breached: result.breached });
+    args.onReply?.({ attemptId, stage, text: result.response.text, finishReason: result.response.finishReason, usage: result.response.usage, settled: result.settled, breached: result.breached, salt, ...(shown ? { shown } : {}) });
     if (result.settled) report.costNano += result.costNano;
     if (result.breached) report.problem = "envelope-suspended";
     else if (!result.settled) report.problem = "unconfirmed:not-settled";
@@ -167,8 +193,15 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
   if (report.problem) return stop("skeleton", [`stopped after the skeleton: ${report.problem}`]);
 
   // ---- Stage 2: the people. The schema offers only the ids code gave to the skeleton. ----
-  const ids = plotIds(checked.skeleton);
-  const second = await ask("people", { messages: peopleMessages(checked.skeleton, ids), responseSchema: peopleRequestSchema(ids), maxOutputTokens: PEOPLE_OUTPUT_TOKENS });
+  // The model is shown the people in a seeded order, not the order it named them in: it
+  // tends to pick the first one it sees, and the first it named is recognizable by name.
+  const presented = shuffleRoster(`${salt}:before`, checked.skeleton);
+  const ids = plotIds(presented);
+  const second = await ask(
+    "people",
+    { messages: peopleMessages(presented, ids), responseSchema: peopleRequestSchema(ids), maxOutputTokens: PEOPLE_OUTPUT_TOKENS },
+    presented.suspects.map((s) => s.name.en),
+  );
   if (second === null) return stop("people", report.reasons);
   const people = PeopleSchema.safeParse(second.value);
   if (!people.success) return stop("people", people.error.issues.slice(0, 8).map((i) => `people: ${i.path.join(".") || "(the whole reply)"}: ${i.message}`));
@@ -177,7 +210,10 @@ export async function writeCase(args: WriteArgs): Promise<WriteReport> {
   if (report.problem) return stop("people", [`the people reply came back, but the attempt is not judged: ${report.problem}`]);
 
   // ---- Code from here on. ----
-  const compiled = compilePlot(args.attemptId, checked.skeleton, people.data);
+  // Reorder the people and the motives once more, so a place in the finished case says
+  // nothing about the plot either. The private salt seeds both reorderings.
+  const plot = shufflePlot(`${salt}:after`, presented, people.data);
+  const compiled = compilePlot(args.attemptId, plot.skeleton, plot.people);
   if (!compiled.ok) return stop("compile", compiled.problems);
   report.case = compiled.case;
   const gate = checkCase(compiled.case);

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { Metered } from "../metered";
 import type { SkeletonBrief } from "./plot";
-import { checkSkeleton, writeCase, type ReplyRecord, type WriteReport } from "./write";
+import { checkSkeleton, SHUFFLE_VERSION, writeCase, type ReplyRecord, type WriteReport } from "./write";
 
 /**
  * A trial of the case writer: a fixed list of attempts, each at most two requests.
@@ -44,13 +44,15 @@ export interface StoredAttempt {
 /** A reply as saved on disk: the reply itself, and the brief it answered. */
 export interface SavedReply extends ReplyRecord {
   brief: SkeletonBrief;
+  /** Which reordering rule the attempt used. */
+  shuffleVersion: number;
 }
 
 export type Standing =
   /** Neither request has gone out: both would be sent. */
   | { kind: "fresh"; most: 2 }
   /** The skeleton went out and its saved reply is good; only the people request would be sent. */
-  | { kind: "resume"; most: 1; skeleton: unknown }
+  | { kind: "resume"; most: 1; skeleton: unknown; salt?: string }
   /** Nothing more can be sent for this attempt. */
   | { kind: "closed"; most: 0; why: [en: string, zh: string] };
 
@@ -79,7 +81,7 @@ export function writeWhole(path: string, text: string): void {
  * Can stage 2 run from this saved skeleton reply? `text` is the file's contents, or null
  * when there is no file. Every way it can be unusable has its own answer.
  */
-export function savedSkeleton(text: string | null, attemptId: string, brief: SkeletonBrief): { ok: true; skeleton: unknown } | { ok: false; why: [en: string, zh: string] } {
+export function savedSkeleton(text: string | null, attemptId: string, brief: SkeletonBrief): { ok: true; skeleton: unknown; salt?: string } | { ok: false; why: [en: string, zh: string] } {
   const no = (en: string, zh: string) => ({ ok: false as const, why: [en, zh] as [string, string] });
   if (text === null) return no("the skeleton went out but its reply was not saved", "骨架请求已发出，但回复没有保存");
   let saved: Partial<SavedReply>;
@@ -103,7 +105,7 @@ export function savedSkeleton(text: string | null, attemptId: string, brief: Ske
   }
   const checked = checkSkeleton(skeleton, brief);
   if (!checked.ok) return no(`the saved skeleton is refused by the skeleton check: ${checked.reasons[0] ?? ""}`, `保存的骨架未通过骨架检查：${checked.reasons[0] ?? ""}`);
-  return { ok: true, skeleton };
+  return { ok: true, skeleton, ...(typeof saved.salt === "string" && saved.salt !== "" ? { salt: saved.salt } : {}) };
 }
 
 const read = (path: string): string | null => {
@@ -126,7 +128,7 @@ export function planTrial(config: TrialConfig, stored: readonly StoredAttempt[])
     else if (!known.has(`${attempt.id}:skeleton`)) standing = { kind: "fresh", most: 2 };
     else {
       const saved = savedSkeleton(read(replyPath(config, attempt.id, "skeleton")), attempt.id, briefOf(config, attempt));
-      standing = saved.ok ? { kind: "resume", most: 1, skeleton: saved.skeleton } : { kind: "closed", most: 0, why: saved.why };
+      standing = saved.ok ? { kind: "resume", most: 1, skeleton: saved.skeleton, ...(saved.salt ? { salt: saved.salt } : {}) } : { kind: "closed", most: 0, why: saved.why };
     }
     return { attempt, standing };
   });
@@ -159,16 +161,17 @@ export async function runTrial(config: TrialConfig, deps: { metered: Metered; st
       metered: deps.metered,
       attemptId: attempt.id,
       brief,
-      ...(standing.kind === "resume" ? { skeleton: standing.skeleton } : {}),
+      // A resumed attempt keeps the salt its skeleton was saved with: one attempt, one salt.
+      ...(standing.kind === "resume" ? { skeleton: standing.skeleton, ...(standing.salt ? { salt: standing.salt } : {}) } : {}),
       // Saved before anything parses or judges it.
-      onReply: (reply) => writeWhole(replyPath(config, attempt.id, reply.stage), `${JSON.stringify({ ...reply, brief } satisfies SavedReply, null, 2)}\n`),
+      onReply: (reply) => writeWhole(replyPath(config, attempt.id, reply.stage), `${JSON.stringify({ ...reply, brief, shuffleVersion: SHUFFLE_VERSION } satisfies SavedReply, null, 2)}\n`),
     });
     const entry = { attempt, resumed: standing.kind === "resume", ms: now() - started, report };
     run.reports.push(entry);
     // Whatever the attempt got to. If that is a case, the file holds its answer.
     writeWhole(
       reportPath(config, attempt.id),
-      `${JSON.stringify({ accepted: report.accepted, failedAt: report.failedAt ?? null, problem: report.problem ?? null, reasons: report.reasons, notes: report.notes, quality: report.quality ?? null, usage: report.usage, case: report.case ?? null }, null, 2)}\n`,
+      `${JSON.stringify({ accepted: report.accepted, failedAt: report.failedAt ?? null, problem: report.problem ?? null, reasons: report.reasons, notes: report.notes, quality: report.quality ?? null, usage: report.usage, salt: report.salt, shuffleVersion: SHUFFLE_VERSION, case: report.case ?? null }, null, 2)}\n`,
     );
     deps.onAttempt?.(entry);
     if (report.problem) {
