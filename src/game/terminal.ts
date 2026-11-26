@@ -1,6 +1,7 @@
 import type { Lang } from "../agents/render";
 import type { Case, Text } from "../case/schema";
 import type { Metered } from "../metered";
+import { PROOF_RULES } from "./rules";
 import { accuse, actionsLeft, ask, inspect, inspectionMenu, notebook, reveal, SessionError, startSession, topicMenu, type Session, type Verdict } from "./session";
 
 /**
@@ -136,7 +137,8 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
       t(c.victim.cause),
       say("You have been given:", "你手里已有："),
       ...notebook(c, s).evidence.map((e, i) => `  ${i + 1}. ${t(e.text)}`),
-      say("Only records count as evidence. What a suspect says proves nothing by itself.", "只有记录算证据。嫌疑人说的话本身不能证明任何事。"),
+      say("How a case is proven:", "怎样才算证明："),
+      ...PROOF_RULES.map((rule, i) => `  ${i + 1}. ${t(rule)}`),
       left(),
       say("Type `help` for the commands.", "输入 help 查看命令。"),
     ];

@@ -7,6 +7,7 @@ import { FakeProvider } from "../src/provider/fake";
 import type { ProviderRequest, ProviderResponse } from "../src/provider/types";
 import { usdToNano } from "../src/spend/pricing";
 import { MemorySpendStore } from "../src/spend/store";
+import { PROOF_RULES } from "../src/game/rules";
 import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
 
@@ -208,6 +209,31 @@ describe("a detective that does not make progress is stopped", () => {
     const tight = setup(SOLVE);
     await playDetective({ metered: tight.metered, c: lighthouse, gameId: "g1", maxOutputTokens: 1_200 });
     expect(new Set(tight.provider.requests.map((r) => r.maxOutputTokens))).toEqual(new Set([1_200]));
+  });
+
+  it("is told the rules of proof word for word as a person is, and then how to play", () => {
+    const lines = detectiveBriefing(lighthouse).split("\n");
+    const start = lines.indexOf("RULES") + 1;
+    // The same four sentences, in the same order, with the same numbers.
+    expect(lines.slice(start, start + PROOF_RULES.length)).toEqual(PROOF_RULES.map((rule, i) => `${i + 1}. ${rule.en}`));
+    expect(lines[start + 3]).toContain("It does not show that nobody else was");
+    // Then the detective's own: numbered on from there, and pointing back at the right rules.
+    expect(lines.slice(start + 4, start + 8).map((l) => l.slice(0, 2))).toEqual(["5.", "6.", "7.", "8."]);
+    expect(lines[start + 6]).toContain("Do not accuse until your records do all of rules 2 to 5.");
+    expect(lines[start + 8]).toBe("");
+    // The rules are the same for every case.
+    expect(detectiveBriefing(archivePass).split("THE CASE")[0]).toBe(detectiveBriefing(lighthouse).split("THE CASE")[0]);
+  });
+
+  it("the scene's record is not a roll call: accusing as soon as one person fits is right but unproven", async () => {
+    // After the keeper and the scene, one person in the lamp room holds the means and has a motive.
+    // The others who hold it and have one are not in that record, and that does not rule them out.
+    const early = setup([{ action: "ask", topic: "T2" }, { action: "inspect", inspection: "I5" }, { action: "accuse", person: "P3", cite: ["R1", "R2", "R3", "R4", "R5", "R6", "R7"] }]);
+    const report = await playDetective({ metered: early.metered, c: lighthouse, gameId: "g1" });
+    expect(report.outcome).toBe("right-but-unproven");
+    expect(report.verdict).toMatchObject({ accused: "s-03", missing: [], accusedRuledOut: false });
+    expect(report.verdict!.open.length).toBeGreaterThan(0);
+    expect(report.steps.at(-1)!.did).toBe("accused P3 (s-03) citing 7 record(s)");
   });
 
   it("is told that a person no record rules out is still open", () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { archivePass } from "../src/case/fixtures/archive";
 import { solve } from "../src/case/solver";
+import { PROOF_RULES } from "../src/game/rules";
 import { createGame, noModel, pinAtLaunch, type GameOptions } from "../src/game/terminal";
 import { createMetered, type Metered } from "../src/metered";
 import { FakeProvider } from "../src/provider/fake";
@@ -45,6 +46,27 @@ describe("the game in a terminal, with the model off", () => {
     // The record the player has not found yet, and the answer, are not in it.
     expect(text).not.toContain("door log");
     expect(text).not.toContain("Ada Marlow's key opened");
+  });
+
+  it("tells the player how a case is proven, in the language of the game, room records included", () => {
+    const cjk = /[\u4e00-\u9fff]/;
+    expect(PROOF_RULES).toHaveLength(4);
+    for (const rule of PROOF_RULES) {
+      expect(rule.en).not.toMatch(cjk);
+      expect(rule.zh).toMatch(cjk);
+      expect(rule.zh).not.toMatch(/[A-Za-z]/);
+    }
+    const en = createGame(c, off, "t1").opening();
+    const zh = createGame(c, off, "t1", { language: "zh", modelOff: true }).opening();
+    PROOF_RULES.forEach((rule, i) => {
+      expect(en).toContain(`  ${i + 1}. ${rule.en}`);
+      expect(zh).toContain(`  ${i + 1}. ${rule.zh}`);
+      expect(en.join("\n")).not.toContain(rule.zh);
+      expect(zh.join("\n")).not.toContain(rule.en);
+    });
+    // The decision of Nov 26: a room's record is who was seen, not a roll call.
+    expect(en.join("\n")).toContain("A room's record lists the people who were seen there. It does not show that nobody else was.");
+    expect(zh.join("\n")).toContain("房间记录只列出在那里被看到的人，并不表示当时没有别人。");
   });
 
   it("can be played from the briefing to a proven accusation and the reveal", async () => {

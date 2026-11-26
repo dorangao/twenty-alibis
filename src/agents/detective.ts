@@ -1,4 +1,5 @@
 import type { Case } from "../case/schema";
+import { PROOF_RULES } from "../game/rules";
 import { accuse, actionsLeft, ask, inspect, inspectionMenu, notebook, SessionError, startSession, topicMenu, type Session, type Verdict } from "../game/session";
 import { noModel } from "../game/terminal";
 import type { Metered } from "../metered";
@@ -21,7 +22,7 @@ import type { Usage } from "../spend/pricing";
  * "solved" verdict from the scorer.
  */
 
-export const DETECTIVE_PROMPT_ID = "detective-v2";
+export const DETECTIVE_PROMPT_ID = "detective-v3";
 /** Output limit per turn, reasoning included. */
 // Measured against the real model: with the scene's record in the notebook a turn's reasoning
 // alone passed 800 tokens and the reply was cut off with no answer in it. Reasoning counts
@@ -104,16 +105,17 @@ const NONE = "none";
 /** The part every turn of a game shares: the rules and the public case. */
 export function detectiveBriefing(c: Case): string {
   const scene = c.locations.find((l) => l.id === c.victim.death.location);
+  const n = PROOF_RULES.length;
   return [
     "You are the detective in a murder-mystery game. Each turn you take exactly one action.",
     "",
     "RULES",
-    "1. Only records prove anything. What a suspect says proves nothing by itself, but hearing someone can open a record that was closed.",
-    "2. To solve the case you must accuse one person and cite records that together show three things about them: they were at the scene at the time of death, they held what was needed, and they had a motive.",
-    "3. The records you cite must also rule out everyone else. A person is ruled out by a record that places them somewhere else at that time, or by a record that shows they did not hold what was needed, or by records that show they had none of the motives. A person no record rules out is still open, even when nothing points at them. So before you accuse, check every other person against your records, and keep inspecting while anyone is still open.",
-    "4. You have a limited number of actions. Asking a topic or inspecting a record costs one. Accusing ends the game.",
-    "5. Do not accuse until your records do all of rules 2 and 3. If you are out of actions, accuse with what you have. When you accuse, cite every record you hold.",
-    "6. Decide and answer. You do not need to explain your choice.",
+    // The rules of proof, word for word as a person at the terminal is told them.
+    ...PROOF_RULES.map((rule, i) => `${i + 1}. ${rule.en}`),
+    `${n + 1}. A person no record rules out is still open, even when nothing points at them. So before you accuse, check every other person against your records, and keep inspecting while anyone is still open.`,
+    `${n + 2}. You have a limited number of actions. Asking a topic or inspecting a record costs one. Accusing ends the game.`,
+    `${n + 3}. Do not accuse until your records do all of rules 2 to ${n + 1}. If you are out of actions, accuse with what you have. When you accuse, cite every record you hold.`,
+    `${n + 4}. Decide and answer. You do not need to explain your choice.`,
     "",
     "THE CASE",
     `${c.title.en}. ${c.setting.en}`,
