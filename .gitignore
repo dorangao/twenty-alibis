@@ -12,3 +12,6 @@ coverage/
 # Raw usage traces stay local; only the sanitized summary is published
 traces/
 *.trace.jsonl
+
+# Cases written by the model during trials hold their answers; they stay local until released
+cases/generated/
