@@ -660,3 +660,64 @@ td {
   background: color-mix(in srgb, var(--bad) 12%, transparent);
   font-weight: 600;
 }
+
+/* ---- Replays ---- */
+.replays {
+  margin-top: 2.5rem;
+}
+.replay-card {
+  border-style: dashed;
+}
+.replay-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--night);
+  color: var(--night-ink);
+  padding: 0.6rem 1rem 0.7rem;
+  border-bottom: 2px solid var(--accent);
+}
+.replay-head {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.replay-tag {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-radius: 4px;
+  padding: 0.05rem 0.5rem;
+}
+.replay-by {
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+.replay-controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+.replay-step {
+  min-width: 7.5rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.replay-move {
+  margin: 0.5rem 0 0;
+  font-weight: 600;
+}
+@media (max-width: 700px) {
+  /* The bar stays on screen while the page scrolls; on a phone it keeps to what is needed to step. */
+  .replay-by {
+    display: none;
+  }
+  .replay-bar {
+    padding: 0.4rem 0.75rem 0.5rem;
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "replays": [
+    {
+      "id": "lighthouse",
+      "title": {
+        "en": "The Lamp Went Out",
+        "zh": "灯灭之夜"
+      },
+      "setting": {
+        "en": "A lighthouse on a rock, cut off by a storm.",
+        "zh": "礁石上的一座灯塔，被风暴困住。"
+      },
+      "suspects": 20,
+      "actions": 5,
+      "player": {
+        "kind": "solver"
+      }
+    }
+  ]
+}

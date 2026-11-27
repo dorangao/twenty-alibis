@@ -131,6 +131,26 @@ The server keeps the case and your session. The page is sent only what you have 
 
 案件和你的进度都保存在服务器上。页面只会收到你已经拿到或查到的内容，并且用的是页面自己的编号（P3、T7、I2、E4），不是案件文件里的编号。浏览器会拿到一个页面脚本读不到的 cookie；让你回到自己那一局的是它，而不是网址。
 
+### Watch a replay · 观看回放
+
+The page also lists replays: a solved game played back step by step. A replay is a plain file beside the page, so watching one asks nothing of the server, sends nothing and spends nothing, and it is there when the server is not. Each frame is the view a player would have been sent at that step, made by the same code that makes it for a live game; the answer is in the last frame only. A replay does give its case away.
+
+The repository ships one: the handwritten 20-person lighthouse plot, played along the proof its own solver found (`web/public/replays/`). A test checks that this file is what the maker makes today.
+
+```bash
+npm run replay:make -- --builtin
+npm run replay:make -- --case <case.json> --solver --id <name> --out <folder>
+npm run replay:make -- --case <case.json> --detective <saved-replies.json> --id <name> --out <folder>
+```
+
+The third form replays a game the detective agent played: its saved replies are run through the detective's own code again, with no model, and the moves it made are played back. A replay is only made of a game the scorer calls solved. To look at one before publishing it, write it to `cases/generated/replays/`, which git ignores and no build contains; `npm run dev` lists what is there.
+
+页面还会列出回放：一局已破解的游戏，一步一步重放。回放只是页面旁边的一个普通文件，所以观看时不向服务器要任何东西，不发送请求，也不花钱；服务器不在时它照样能看。每一帧都是玩家在那一步会收到的视图，由生成实时游戏视图的同一段代码生成；答案只在最后一帧。回放会揭示它那个案件的答案。
+
+仓库自带一个回放：手写的 20 人灯塔案，按它自己的求解器找到的证明来走（`web/public/replays/`）。有一项测试检查这个文件与今天生成器的产出一致。
+
+上面第三种用法回放侦探智能体玩过的一局：把它保存下来的回复重新交给侦探自己的代码（不用模型），再把它走过的每一步重放出来。只有判分为"已破解"的一局才会生成回放。想在发布前先看看，就写到 `cases/generated/replays/`：git 忽略这个目录，任何构建都不包含它；`npm run dev` 会列出其中的回放。
+
 ### Build it for a host · 为托管平台构建
 
 ```bash
