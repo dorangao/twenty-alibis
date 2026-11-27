@@ -15,6 +15,7 @@ import { bodyOf, nodeListener } from "../src/web/node";
 import { memorySessions } from "../src/web/sessions";
 import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
+import { supersedes } from "../web/src/latest";
 import { S, victimLine } from "../web/src/strings";
 
 const built = compilePlot("lighthouse", lighthouseSkeleton, lighthousePeople);
@@ -140,7 +141,50 @@ describe("an upload that is too long, or not wanted", () => {
     await tick();
     await tick();
     expect(taken).toBe(whenStopped);
+    // It listens to its source no longer.
+    expect([source.listenerCount("data"), source.listenerCount("end"), source.listenerCount("error")]).toEqual([0, 0, 0]);
     source.destroy();
+  });
+
+  it("the body's ending is told once: an end or an error after the reader has stopped, or twice, does no harm", async () => {
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
+    // Stopped by the reader, then the source ends and errors anyway.
+    const stopped = new Readable({ read() {} });
+    const reader = bodyOf(stopped).getReader();
+    stopped.push(Buffer.from("abc"));
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("abc");
+    await reader.cancel();
+    await reader.cancel();
+    stopped.on("error", () => undefined);
+    stopped.emit("end");
+    stopped.emit("end");
+    stopped.emit("error", new Error("late"));
+    await tick();
+    expect([stopped.listenerCount("data"), stopped.listenerCount("end")]).toEqual([0, 0]);
+
+    // Ended normally: the reader sees the end once, and a second end is ignored.
+    const ended = new Readable({ read() {} });
+    const whole = bodyOf(ended).getReader();
+    ended.push(Buffer.from("xyz"));
+    ended.push(null);
+    expect(new TextDecoder().decode((await whole.read()).value)).toBe("xyz");
+    expect((await whole.read()).done).toBe(true);
+    ended.emit("end");
+    await tick();
+    expect(ended.listenerCount("end")).toBe(0);
+
+    // Broken: the reader is told of the error once.
+    const broken = new Readable({ read() {} });
+    const failing = bodyOf(broken).getReader();
+    const outcome = failing.read().then(
+      () => "read",
+      (error: Error) => error.message,
+    );
+    broken.destroy(new Error("socket hung up"));
+    expect(await outcome).toBe("socket hung up");
+    broken.on("error", () => undefined);
+    broken.emit("error", new Error("again"));
+    await tick();
   });
 
   it("is taken in no further than the handler reads: cut off at the limit, and not read at all from the wrong origin", async () => {
@@ -173,7 +217,8 @@ describe("an upload that is too long, or not wanted", () => {
 
 describe("the dev server hands out the page, and nothing else in the checkout", () => {
   it("refuses case files, traces, the server's source and the tests, however they are asked for", async () => {
-    const dev = await createViteServer({ configFile: "vite.config.ts", logLevel: "silent", server: { port: 0, host: "127.0.0.1", strictPort: false } });
+    // Its own cache folder, so running the tests does not disturb a dev server that is already up.
+    const dev = await createViteServer({ configFile: "vite.config.ts", logLevel: "silent", cacheDir: mkdtempSync(join(tmpdir(), "vite-cache-")), server: { port: 0, host: "127.0.0.1", strictPort: false } });
     await dev.listen();
     const base = `http://127.0.0.1:${(dev.httpServer!.address() as AddressInfo).port}`;
     const repo = process.cwd();
@@ -248,6 +293,18 @@ describe("the page", () => {
       expect(text, name).not.toMatch(/import\(\s*"\.\.\/\.\.\//);
       expect(text, name).not.toMatch(/require\(/);
     }
+  });
+
+  it("shows a view only if it is not older than the one on screen: answers can arrive out of order", () => {
+    const at = (session: string, revision: number) => ({ session, revision });
+    // Nothing on screen yet, or another game: always shown.
+    expect(supersedes(null, at("a", 1))).toBe(true);
+    expect(supersedes(at("a", 7), at("b", 1))).toBe(true);
+    // The same game: newer and equal are shown, older is not.
+    expect(supersedes(at("a", 2), at("a", 3))).toBe(true);
+    expect(supersedes(at("a", 2), at("a", 2))).toBe(true);
+    expect(supersedes(at("a", 3), at("a", 2))).toBe(false);
+    expect(supersedes(at("a", 3), at("a", 1))).toBe(false);
   });
 
   it("says where the body was found when that is not where the victim died", () => {

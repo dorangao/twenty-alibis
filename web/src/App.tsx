@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, GameError, type CasesReply, type View, type ViewReply } from "./api";
+import { supersedes, type Stamp } from "./latest";
 import { dollars, pick, S, victimLine, type Lang, type Text } from "./strings";
 
 type Shown = NonNullable<NonNullable<ViewReply["ask"]>["shown"]>;
@@ -49,6 +50,17 @@ export function App() {
    * for: a late answer about a game the player has left must never bring that game back.
    */
   const generation = useRef(0);
+  /** The newest view shown, and how many views have been shown: answers can arrive out of order. */
+  const newest = useRef<Stamp | null>(null);
+  const shownCount = useRef(0);
+  /** Put a view on screen, unless a newer view of the same game is already there. */
+  const show = useCallback((next: View): boolean => {
+    if (!supersedes(newest.current, next)) return false;
+    newest.current = { session: next.session, revision: next.revision };
+    shownCount.current++;
+    setView(next);
+    return true;
+  }, []);
 
   useEffect(() => {
     document.documentElement.lang = lang === "zh" ? "zh-Hans" : "en";
@@ -57,6 +69,7 @@ export function App() {
 
   const leave = useCallback(() => {
     generation.current++;
+    newest.current = null;
     remembered.set("ta.session", null);
     setView(null);
     setShown(null);
@@ -68,23 +81,26 @@ export function App() {
   const read = useCallback(
     async (session: string, failed: Text, again: Text) => {
       const mine = generation.current;
+      const seen = shownCount.current;
       try {
         const reply = await api.view(session);
         if (generation.current !== mine) return;
-        setView(reply.view);
-        setError(null);
+        // An older view of this game than the one on screen changes nothing, not even the banner.
+        if (show(reply.view)) setError(null);
       } catch (e) {
-        if (generation.current !== mine) return;
+        // A look that failed says nothing once the page has moved on, or has since been shown a view.
+        if (generation.current !== mine || shownCount.current !== seen) return;
         // Forget the game only when the server says it is gone. If the server could not be
         // reached, the game may well still be there: keep its locator and offer to look again.
         if (e instanceof GameError && (e.code === "not-found" || e.code === "expired")) {
           setError({ text: e.text });
+          newest.current = null;
           remembered.set("ta.session", null);
           setView(null);
         } else setError({ text: failed, retry: { label: again, run: () => void read(session, failed, again) } });
       }
     },
-    [],
+    [show],
   );
 
   // On arrival: the library, and the game that was open, if it is still there.
@@ -114,7 +130,7 @@ export function App() {
       try {
         const reply = await work();
         if (generation.current !== mine) return;
-        setView(reply.view);
+        show(reply.view);
         remembered.set("ta.session", reply.view.session);
         if (reply.ask?.notice) setNotice(reply.ask.notice.text);
         if (reply.ask?.replayed && reply.ask.shown) setShown(reply.ask.shown);
@@ -131,7 +147,7 @@ export function App() {
           try {
             const reply = await api.view(current.session);
             if (generation.current !== mine) return;
-            setView(reply.view);
+            show(reply.view);
             // While the earlier action is still at work the view may yet change: offer another look.
             setError({ text: failure.text, ...(failure.code === "stale" ? {} : { retry: refresh }) });
           } catch {
@@ -143,7 +159,7 @@ export function App() {
         setBusy(false);
       }
     },
-    [busy, leave, read],
+    [busy, leave, read, show],
   );
 
   return (

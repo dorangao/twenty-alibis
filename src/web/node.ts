@@ -40,23 +40,44 @@ export function nodeListener(deps: ApiDeps, options: { trustProxy?: boolean } = 
 /** The request's body as a stream that reads from the socket one chunk at a time, on demand. */
 export function bodyOf(req: Readable): ReadableStream<Uint8Array> {
   req.pause();
+  // Once the stream is over, by its end, an error or the reader stopping, it listens to
+  // nothing more. Being told twice, or told of the end after the reader has stopped, is harmless.
+  let over = false;
+  let finish: () => void = () => undefined;
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      req.on("data", (chunk: Buffer) => {
+      const onData = (chunk: Buffer) => {
         // One chunk per pull: stop the socket until the reader asks again.
         req.pause();
         controller.enqueue(new Uint8Array(chunk));
-      });
-      req.on("end", () => controller.close());
-      req.on("error", (error) => controller.error(error));
+      };
+      const onEnd = () => {
+        if (over) return;
+        finish();
+        controller.close();
+      };
+      const onError = (error: Error) => {
+        if (over) return;
+        finish();
+        controller.error(error);
+      };
+      finish = () => {
+        over = true;
+        req.off("data", onData);
+        req.off("end", onEnd);
+        req.off("error", onError);
+      };
+      req.on("data", onData);
+      req.on("end", onEnd);
+      req.on("error", onError);
     },
     pull() {
-      req.resume();
+      if (!over) req.resume();
     },
     cancel() {
       // The reader has had enough. Take nothing more from the socket.
       req.pause();
-      req.removeAllListeners("data");
+      finish();
     },
   });
 }
