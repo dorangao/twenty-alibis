@@ -545,24 +545,19 @@ p {
 
 /* ---- Accusation dialog ---- */
 
-.veil {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: grid;
-  place-items: center;
-  padding: 1rem;
-  z-index: 10;
-}
-
-.dialog {
+dialog.dialog {
   background: var(--card);
+  color: var(--ink);
   border-radius: var(--radius);
   border: 1px solid var(--line);
   padding: 1.2rem;
-  width: min(640px, 100%);
+  width: min(640px, calc(100% - 2rem));
   max-height: 90vh;
   overflow-y: auto;
+}
+
+dialog.dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
 }
 
 .dialog label {

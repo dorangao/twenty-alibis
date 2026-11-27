@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, GameError, type CasesReply, type View, type ViewReply } from "./api";
 import { dollars, pick, S, victimLine, type Lang, type Text } from "./strings";
 
@@ -62,7 +62,12 @@ export function App() {
       api
         .view(session)
         .then((reply) => !gone && setView(reply.view))
-        .catch(() => remembered.set("ta.session", null));
+        .catch((e: unknown) => {
+          // Forget the session only when the server says it is gone. If the server could not
+          // be reached, the game may well still be there: keep its locator and say what happened.
+          if (e instanceof GameError && (e.code === "not-found" || e.code === "expired")) remembered.set("ta.session", null);
+          else if (!gone) setError(e instanceof GameError ? e.text : S.networkError);
+        });
     }
     return () => {
       gone = true;
@@ -391,14 +396,36 @@ function Accuse({ view, lang, busy, onCancel, onAccuse }: { view: View; lang: La
     else next.add(handle);
     setCited(next);
   };
+  // The browser's own modal dialog: it takes the focus, keeps Tab inside, makes the page
+  // behind it inert, closes on Escape, and gives the focus back when it closes.
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const element = dialog.current;
+    // Whatever opened the dialog gets the focus back when it goes: the dialog is removed
+    // from the page as it closes, so the browser cannot do that part itself.
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (element && !element.open) element.showModal();
+    return () => {
+      element?.close();
+      opener?.focus();
+    };
+  }, []);
   return (
-    <div className="veil" role="dialog" aria-modal="true" aria-label={t(S.accuseTitle)}>
-      <div className="dialog">
-        <h2>{t(S.accuseTitle)}</h2>
+    <dialog
+      ref={dialog}
+      className="dialog"
+      aria-labelledby="accuse-title"
+      onCancel={(e) => {
+        e.preventDefault();
+        onCancel();
+      }}
+    >
+      <div>
+        <h2 id="accuse-title">{t(S.accuseTitle)}</h2>
         <p className="warn">{t(S.accuseWarn)}</p>
         <label>
           {t(S.whom)}
-          <select value={who} onChange={(e) => setWho(e.target.value)}>
+          <select value={who} onChange={(e) => setWho(e.target.value)} autoFocus>
             <option value="">{t(S.choose)}</option>
             {view.people.map((p) => (
               <option key={p.handle} value={p.handle}>
@@ -410,10 +437,10 @@ function Accuse({ view, lang, busy, onCancel, onAccuse }: { view: View; lang: La
         <div className="cite-head">
           <span>{t(S.cite)}</span>
           <span>
-            <button className="link" onClick={() => setCited(new Set(view.evidence.map((e) => e.handle)))}>
+            <button type="button" className="link" onClick={() => setCited(new Set(view.evidence.map((e) => e.handle)))}>
               {t(S.citeAll)}
             </button>
-            <button className="link" onClick={() => setCited(new Set())}>
+            <button type="button" className="link" onClick={() => setCited(new Set())}>
               {t(S.citeNone)}
             </button>
           </span>
@@ -438,7 +465,7 @@ function Accuse({ view, lang, busy, onCancel, onAccuse }: { view: View; lang: La
           </button>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }
 
