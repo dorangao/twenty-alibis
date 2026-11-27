@@ -171,6 +171,9 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers } });
 const fail = (code: ErrorCode): Response => json(ERRORS[code].status, { error: { code, text: ERRORS[code].text } } satisfies ApiError);
 
+/** The answer of a server that cannot do its work at all. It says nothing of why. */
+export const serverFailure = (): Response => fail("server");
+
 class Refused extends Error {
   constructor(readonly code: ErrorCode) {
     super(code);

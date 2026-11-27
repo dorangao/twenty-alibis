@@ -4,7 +4,7 @@ import { createMetered, type Metered, type TraceEvent } from "./metered";
 import { EmberProvider } from "./provider/ember";
 import { usdToNano } from "./spend/pricing";
 import { connectRedis } from "./spend/redis-client";
-import { RedisSpendStore } from "./spend/redis-store";
+import { RedisSpendStore, type ScriptRunner } from "./spend/redis-store";
 import { redisRunLock, type RunLock } from "./spend/run-lock";
 
 type Env = Record<string, string | undefined>;
@@ -45,6 +45,30 @@ export function fileTrace(path: string): (event: TraceEvent) => void {
 }
 
 /**
+ * The real provider behind the spend guard, counting in the Redis that `redis` reaches. This
+ * is the one place the two are put together: a local run and the deployed server both get
+ * their model from here, and differ only in where the trace goes.
+ */
+export function guardedModel(options: { env: Env; config: Pick<SpendConfig, "envelope" | "limitNano">; apiKey: string; redis: ScriptRunner; trace: (event: TraceEvent) => void }): { metered: Metered; store: RedisSpendStore } {
+  const { env, config } = options;
+  const store = new RedisSpendStore(options.redis);
+  // No input ratio is read or passed here, on purpose: every real request holds the full
+  // context-window worst case.
+  const metered = createMetered({
+    provider: new EmberProvider({ apiKey: options.apiKey }),
+    store,
+    envelope: config.envelope,
+    limitNano: config.limitNano,
+    // Two switches, both read again right before every send: this process's own setting,
+    // and the envelope's suspension flag in Redis, which any other process can set
+    // (`npm run spend -- suspend "why"`).
+    killSwitch: async () => env.EMBER_DISABLED === "1" || (await store.totals(config.envelope)).suspended !== null,
+    trace: options.trace,
+  });
+  return { metered, store };
+}
+
+/**
  * Everything a paid run needs, wired the one allowed way: the real provider behind the spend
  * guard, counting in Redis. Throws if any piece of configuration is missing.
  */
@@ -61,19 +85,6 @@ export async function createRuntime(env: Env = process.env): Promise<{
   if (!apiKey) throw new Error(`no API key found; set one of ${API_KEY_NAMES.join(", ")} in .env.local`);
 
   const redis = await connectRedis(config.redisUrl);
-  const store = new RedisSpendStore(redis.runner);
-  // No input ratio is read or passed here, on purpose: every real request holds the full
-  // context-window worst case.
-  const metered = createMetered({
-    provider: new EmberProvider({ apiKey: apiKey.key }),
-    store,
-    envelope: config.envelope,
-    limitNano: config.limitNano,
-    // Two switches, both read again right before every send: this process's own setting,
-    // and the envelope's suspension flag in Redis, which any other process can set
-    // (`npm run spend -- suspend "why"`).
-    killSwitch: async () => env.EMBER_DISABLED === "1" || (await store.totals(config.envelope)).suspended !== null,
-    trace: fileTrace(`traces/${config.envelope}.trace.jsonl`),
-  });
+  const { metered, store } = guardedModel({ env, config, apiKey: apiKey.key, redis: redis.runner, trace: fileTrace(`traces/${config.envelope}.trace.jsonl`) });
   return { metered, store, runLock: redisRunLock(redis.runner, `${store.keyOf(config.envelope)}:run-lease`), config, close: redis.close };
 }
