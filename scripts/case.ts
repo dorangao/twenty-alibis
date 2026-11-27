@@ -10,8 +10,9 @@
  *   npm run case -- check <file>
  *       Puts a case file through the gate every case passes before anyone plays it: the
  *       form, that the hidden truth holds together, and that a player can prove it. Says
- *       why if it does not pass. The reasons name the people and facts of the case's
- *       answer: they are for its author. A player is only ever told that a file was refused.
+ *       why if it does not pass, each reason in the gate's own English and then in Chinese
+ *       with the ids involved. The reasons name the people and facts of the case's answer:
+ *       they are for its author. A player is only ever told that a file was refused.
  *
  * Neither sends anything or spends anything. A case that passes can be played
  * (`npm run play -- --case <file>`), is listed by `npm run dev` if it is in
@@ -21,6 +22,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { archivePass } from "../src/case/fixtures/archive";
 import { checkCase } from "../src/case/solver";
+import { idsIn, reasonZh } from "./case-reasons";
 import { say } from "./say";
 
 const repo = resolve(import.meta.dirname, "..");
@@ -44,6 +46,7 @@ if (command === "example") {
   const id = options.get("--id") ?? usage();
   // The name is also the file's name, which is how the dev server finds a case.
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id) || id.length > 60) stop("The name may only have lower-case letters, digits and hyphens. Nothing was written.", "名称只能包含小写字母、数字和连字符。没有写入任何内容。");
+  if (id === "index") stop("\"index\" is the name of the list of replays, so a case called that could not be made into a replay under its own name. Choose another. Nothing was written.", "“index”是回放列表的名称，叫这个名字的案件无法用自己的名字生成回放。请换一个。没有写入任何内容。");
   if (id === archivePass.id) stop("That is the built-in case's own name, and a library lists a name once. Choose another. Nothing was written.", "这是内置案件自己的名称，而案件库里一个名称只列一次。请换一个。没有写入任何内容。");
   const out = resolve(options.get("--out") ?? resolve(repo, "cases/generated", `${id}.json`));
   mkdirSync(dirname(out), { recursive: true });
@@ -69,7 +72,8 @@ if (command === "example") {
   }
   // A case writer's report holds its case under "case"; a bare case is the case itself.
   const inner = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as { case?: unknown }).case : undefined;
-  const gate = checkCase(inner && typeof inner === "object" ? inner : parsed);
+  const candidate = inner && typeof inner === "object" ? inner : parsed;
+  const gate = checkCase(candidate);
   if (gate.accepted) {
     const proof = gate.solve?.proof;
     say(
@@ -78,8 +82,13 @@ if (command === "example") {
     );
   } else {
     say(`Refused, for ${gate.reasons.length} reason(s). They name the case's answer: they are for its author.`, `未通过，共 ${gate.reasons.length} 条原因。原因里会提到案件的答案：这是给作者看的。`);
-    // The gate's own words, which exist in English only.
-    for (const reason of gate.reasons) console.log(`  - ${reason}`);
+    // Each reason in the gate's own words, then in Chinese: what kind of fault it is, and the ids to look for.
+    const ids = idsIn(candidate);
+    const issues = gate.validation.ok ? [] : gate.validation.issues;
+    for (const [i, reason] of gate.reasons.entries()) {
+      console.log(`  - ${reason}`);
+      console.log(`    ${reasonZh(reason, ids, issues[i])}`);
+    }
     process.exit(1);
   }
 } else usage();

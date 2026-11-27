@@ -30,7 +30,7 @@ Every model call in this project is `muse-ember-1.0`. It does three jobs, and co
 
 | Job | What the model does | What code does with it |
 |---|---|---|
-| **Suspect** | Picks which topic a question is about by calling a `recall` tool, then says the statements that topic yields in its own voice | Serves only that suspect's own knowledge; refuses any line that adds, drops or bends a fact; writes the notebook itself |
+| **Suspect** | Picks which topic a question is about by calling a `recall` tool, then says the statements that topic yields in its own voice | Serves only that suspect's own knowledge. The turn's statements come from the case file and the notebook is worded by code, so the model's sentence is never evidence. A guard compares the sentence with the case's known people, places, times and means and refuses one that strays; it works on words and cannot judge every change of meaning |
 | **Case writer** | Writes a 20-person plot in two requests: the setting and people, then what happened | Builds all the evidence, then lets the validator, the solver and a quality gate decide whether the case is kept |
 | **Detective** | Plays a case as a player would: one action a turn, chosen from what is open, in a strict schema | Runs the same game and the same scorer a player gets; a case counts as agent-solved only on a "solved" verdict |
 
@@ -38,22 +38,23 @@ What the runs so far showed. Each line is a measurement from a small batch, on N
 
 | What | Measured |
 |---|---|
-| One answered question (choose the topic, then answer) | $0.0003 to $0.0004, about 1.7 seconds |
-| One 20-suspect case, accepted by every gate | $0.0031 to $0.0040, about 12 seconds |
-| One detective game played to a solved verdict | about $0.004, in 6 to 9 turns |
-| Three cases the model wrote, played by the detective under the final rules | 3 of 3 solved, one game each |
-| Lines told to "say it your way, add no fact" | 7 of 7 in character, with no added time, place, object or person |
-| Reasoning effort "minimal" against "low", same prompt | about a third of the reasoning tokens |
-| A 7,835-token prompt prefix sent again with a cache label | 99% cached; the request cost $0.00018 where the first cost $0.00082 |
+| One typed question: two requests, choose the topic, then answer | $0.00031 and about 1.7 seconds in the first batch; $0.00032 to $0.00045, average $0.00040, in the later batch with the in-character prompt |
+| Writing one 20-suspect case that every gate accepted: two requests | $0.0031 to $0.0040; 11 to 14 seconds for the three that were timed |
+| The detective's own requests for one game played to a solved verdict | $0.0022, $0.0039 and $0.0057, in 6, 7 and 9 turns. The suspects' model was off in these games, and the cases had been written earlier: neither is in these figures |
+| The same three model-written cases, one detective game each under the final rules | 3 of 3 solved |
+| Lines told to "say it your way, add no fact" | of seven lines read, seven were in character with no added time, place, object or person |
+| Reasoning effort "minimal" against "low", on two pairs of gossip prompts | 195 reasoning tokens against 606: about a third |
+| One long request sent a second time with a cache label | 7,796 of its 7,836 input tokens were cached (99.5%); it cost $0.000175 where the first cost $0.000824 |
 
-Why this matters for the game: at these prices every suspect, the author and the detective can each be an agent, and a whole game costs about a cent or less. And the model follows tools and schemas closely enough that code can check everything it says.
+Why this matters for the game: at these prices every suspect, the author and the detective can each be an agent. A typed question, a written case and the detective's side of a solved game each cost a fraction of a cent. What a whole live game costs a player who types every question has not been measured: by the question prices above it is the number of questions times about $0.0004. And the model follows tools and schemas closely enough that code can decide what counts as evidence without ever taking the model's sentence for it.
 
 What these runs do not show, and what the design does about it:
 
 - **A schema is not a guarantee.** One retry came back as text repeated to the output limit, not the object asked for. The turn loop treats any such reply as refused and falls back to a sentence worded by code.
 - **Reasoning counts against the output limit.** With a limit that was too low, replies were cut off with no answer in them. Every request now sets its effort and a limit with room for the reasoning.
 - **The writer has habits.** In six of six plots it made the first person it was shown the culprit. Code reorders the people and motives by a private random salt before and after that request, so a person's place in a finished case says nothing about the plot.
-- **The detective depends on how it is asked.** On the same three cases it solved none with an output limit that was too low, two with a higher limit, and all three once the rules of proof said plainly what a room's record does and does not show. It also asks more than it needs to: one to three questions a game that open nothing.
+- **The line guard reads words, not meaning.** A line could still bend a fact in words the case's vocabulary does not hold. The promise rests on the notebook and the scorer, which never read the model's sentence.
+- **The detective depends on how it is asked.** On the same three cases it solved none in the first setting, where two games ended on replies cut off at the output limit and one accused the right person too early; two after the limit was raised and the rules reworded, both at once; and all three once the rules of proof said plainly what a room's record does and does not show. Which change did what was not separated. It also asks more than it needs to: one to three questions a game that open nothing.
 - **Generated Chinese reads like a translation** in places. The game's own words, the rules and the notebook are written by hand in both languages.
 - These are a handful of runs. They say what happened, not how often it will.
 
@@ -61,7 +62,7 @@ What these runs do not show, and what the design does about it:
 
 | 角色 | 模型做什么 | 代码怎么处理 |
 |---|---|---|
-| **嫌疑人** | 调用 `recall` 工具选出问题对应的话题，再用自己的口吻说出该话题给出的陈述 | 只提供这名嫌疑人自己知道的内容；凡是增、删或歪曲事实的台词一律拒绝；笔记本由代码自己写 |
+| **嫌疑人** | 调用 `recall` 工具选出问题对应的话题，再用自己的口吻说出该话题给出的陈述 | 只提供这名嫌疑人自己知道的内容。这一轮的陈述来自案件文件，笔记本由代码写成，所以模型说的那句话永远不算证据。守卫把这句话和本案已知的人名、地点、时间和手段对照，越界的就拒绝；它只看字词，判断不了每一种含义上的变化 |
 | **案件作者** | 用两次请求写出一个 20 人的剧情：先写场景和人物，再写发生了什么 | 生成全部证据，再由校验器、求解器和质量关决定是否保留 |
 | **侦探** | 像玩家一样玩一个案件：每回合一个行动，只能从当前开放的选项里选，按严格的格式回答 | 走的是玩家的同一套游戏和同一个判分器；只有判为"已破解"才算智能体破案 |
 
@@ -69,22 +70,23 @@ What these runs do not show, and what the design does about it:
 
 | 项目 | 实测 |
 |---|---|
-| 回答一个问题（先选话题，再回答） | $0.0003 到 $0.0004，约 1.7 秒 |
-| 一个通过所有检查的 20 人案件 | $0.0031 到 $0.0040，约 12 秒 |
-| 侦探把一局玩到"已破解" | 约 $0.004，6 到 9 回合 |
-| 模型写的三个案件，由侦探按最终规则来玩 | 3 个全部破解，每个一局 |
-| 要求"用你的方式说，不要添加事实"的台词 | 7 句全部符合角色，没有多出时间、地点、物品或人物 |
-| 同一提示词下推理强度"minimal"对比"low" | 推理 token 约为三分之一 |
-| 一段 7,835 token 的提示词前缀带缓存标签再发一次 | 99% 命中缓存；这次请求花费 $0.00018，第一次是 $0.00082 |
+| 用自己的话问一个问题：两次请求，先选话题，再回答 | 第一批：$0.00031，约 1.7 秒；之后用带角色口吻的提示词那一批：$0.00032 到 $0.00045，平均 $0.00040 |
+| 写出一个通过所有检查的 20 人案件：两次请求 | $0.0031 到 $0.0040；其中计了时的三个用了 11 到 14 秒 |
+| 侦探把一局玩到"已破解"，只算侦探自己的请求 | $0.0022、$0.0039 和 $0.0057，分别用了 6、7、9 回合。这几局里嫌疑人的模型是关闭的，案件也是之前写好的：这两项都不在这些数字里 |
+| 同样三个模型写的案件，按最终规则各由侦探玩一局 | 3 个全部破解 |
+| 要求"用你的方式说，不要添加事实"的台词 | 读过的七句里，七句都符合角色，没有多出时间、地点、物品或人物 |
+| 推理强度"minimal"对比"low"，两组成对的传话提示词 | 推理 token 195 对 606，约三分之一 |
+| 一个很长的请求带缓存标签发第二次 | 它的 7,836 个输入 token 中有 7,796 个命中缓存（99.5%）；这次花费 $0.000175，第一次是 $0.000824 |
 
-这对游戏意味着：按这样的价格，每个嫌疑人、作者和侦探都可以各是一个智能体，一整局的费用大约一美分或更少；而且模型对工具和格式遵守得足够好，代码可以检查它说的每一句话。
+这对游戏意味着：按这样的价格，每个嫌疑人、作者和侦探都可以各是一个智能体。一个自己提的问题、写一个案件、侦探破一局所用的请求，各自都只要一美分的零头。玩家每个问题都自己打字的一整局要花多少，还没有实测过：按上面的单价，就是问题数乘以约 $0.0004。而且模型对工具和格式遵守得足够好，什么算证据可以完全由代码决定，从不以模型说的那句话为准。
 
 这些运行没有说明的事，以及设计上的应对：
 
 - **格式约束不是保证。** 有一次重试返回的是重复到输出上限的文字，而不是要求的对象。回合逻辑把这样的回复一律视为被拒绝，改用代码生成的句子。
 - **推理占用输出上限。** 上限太低时，回复被截断，里面没有答案。现在每个请求都设定推理强度，并给推理留出余量。
 - **作者有习惯。** 六个剧情里有六个把它看到的第一个人写成凶手。代码在那次请求前后各用一个不公开的随机盐把人物和动机重新排序，所以一个人在成品案件里的位置说明不了任何事。
-- **侦探的表现取决于怎么问它。** 同样三个案件，输出上限太低时一个都没破，提高上限后破了两个，把证明规则里“房间记录说明什么、不说明什么”写清楚之后三个全破。它问得也比需要的多：每局有一到三个问题没有打开任何新东西。
+- **台词守卫看的是字词，不是含义。** 一句台词仍然可能用案件词表里没有的说法把事实说歪。我们承诺的是笔记本和判分器，它们从不读模型说的那句话。
+- **侦探的表现取决于怎么问它。** 同样三个案件：第一种设置下一个都没破，其中两局是回复在输出上限处被截断，一局是过早指认了正确的人；同时提高上限并改写规则之后破了两个；把证明规则里“房间记录说明什么、不说明什么”写清楚之后三个全破。哪一项改动起了什么作用，没有分开测。它问得也比需要的多：每局有一到三个问题没有打开任何新东西。
 - **生成的中文有些地方读起来像翻译。** 游戏自己的文字、规则和笔记本是用两种语言手写的。
 - 这只是少量运行，说明的是发生过什么，不是会有多经常发生。
 
@@ -209,7 +211,7 @@ That writes the handwritten eight-suspect case to `cases/generated/my-case.json`
 npm run case -- check cases/generated/my-case.json
 ```
 
-The gate is the same one every case passes: the file is well formed, its hidden truth holds together, and a player can prove it with the actions the case really offers. If it does not pass, the command says why. Those reasons name the answer, so they are for you as the author; a player is only ever told that a file was refused.
+The gate is the same one every case passes: the file is well formed, its hidden truth holds together, and a player can prove it with the actions the case really offers. If it does not pass, the command says why: each reason in the gate's own English, then in Chinese with the ids to look for. Those reasons name the answer, so they are for you as the author; a player is only ever told that a file was refused. One name is taken: `index` is the list of replays, so a case cannot be called that.
 
 A case that passes can be played three ways, all with the model off:
 
@@ -231,7 +233,7 @@ Passing the gate means a case is fair to play. It is not the case writer's quali
 
 案件就是一个 JSON 文件：隐藏的真相、人物、每个人会说什么、各项记录，以及玩家能做的行动（[`src/case/schema.ts`](src/case/schema.ts)）。想试试自己的案件，按上面的命令依次来：
 
-第一条命令把手写的八人案件以你起的名字写到 `cases/generated/my-case.json`，供你修改；它从不覆盖已有文件。改掉人物、房间、凶手和记录之后，用第二条命令过一遍检查。这道检查和所有案件要过的是同一道：文件格式正确、隐藏的真相自洽、玩家用案件真正提供的行动能够证明。没通过时命令会说明原因；原因里会提到答案，所以是给作者看的，玩家只会被告知文件未通过。
+第一条命令把手写的八人案件以你起的名字写到 `cases/generated/my-case.json`，供你修改；它从不覆盖已有文件。改掉人物、房间、凶手和记录之后，用第二条命令过一遍检查。这道检查和所有案件要过的是同一道：文件格式正确、隐藏的真相自洽、玩家用案件真正提供的行动能够证明。没通过时命令会逐条说明原因：先是检查给出的英文原文，再是中文说明和要找的 id。原因里会提到答案，所以是给作者看的，玩家只会被告知文件未通过。有一个名字不能用：`index` 是回放列表的名称，案件不能叫这个。
 
 通过的案件有三种玩法，都不需要模型：第三条命令在终端里玩（加 `--zh` 用中文）；第四条在浏览器里把 `cases/generated/` 中所有通过检查的案件文件和内置案件一起列出来；第五条按案件自己的求解器找到的证明生成一个回放，之后开发服务器会把它列在"回放"里。git 忽略 `cases/generated/`：案件文件包含它自己的答案。
 

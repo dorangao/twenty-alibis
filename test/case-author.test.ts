@@ -8,6 +8,7 @@ import type { Case } from "../src/case/schema";
 import { loadCase } from "../src/game/load-case";
 import { loadLibrary, previewReplayFile } from "../src/web/library";
 import { replayOf } from "../web/src/replay-shape";
+import { idsIn, ISSUE_ZH, REASON_ZH, reasonZh } from "../scripts/case-reasons";
 
 const repo = resolve(import.meta.dirname, "..");
 const dirs: string[] = [];
@@ -73,6 +74,8 @@ describe("bringing a case of your own, by the steps the README gives", () => {
       ["example", "--id", "../x", "--out", out],
       ["example", "--id", "a b", "--out", out],
       ["example", "--id", archivePass.id, "--out", out],
+      // The name of the list of replays: a case called that could not be made into a replay under its own name.
+      ["example", "--id", "index", "--out", out],
       ["example", "--id", "ok", "--id", "twice", "--out", out],
       ["example", "--id", "ok", "--out", out, "--force", "yes"],
       ["example", "--id", "ok", "--out"],
@@ -105,6 +108,18 @@ describe("bringing a case of your own, by the steps the README gives", () => {
     const inconsistent = run("case", "check", wrong);
     expect(inconsistent.status).toBe(1);
     expect(inconsistent.stdout).toContain(archivePass.culprit.suspect);
+    // Each reason comes in the gate's English and then in Chinese, with the ids the author has to find.
+    const lines = inconsistent.stdout.split("\n");
+    const first = lines.findIndex((line) => line.startsWith("  - truth: the hidden truth points at"));
+    expect(first).toBeGreaterThan(-1);
+    expect(lines[first + 1]).toBe(`    ${ISSUE_ZH["culprit-mismatch"]}（涉及：${archivePass.culprit.suspect}、${archivePass.suspects.find((x) => x.id !== archivePass.culprit.suspect)!.id}）`);
+    const twinLines = unprovable.stdout.split("\n");
+    for (const [i, line] of twinLines.entries()) {
+      if (!line.startsWith("  - ")) continue;
+      expect(twinLines[i + 1], line).toMatch(/^    [\u4e00-\u9fff]/);
+      expect(twinLines[i + 1], line).not.toContain("暂时没有中文说明");
+      expect(twinLines[i + 1], line).toContain("（涉及：");
+    }
     // The player's command, given the same file, says only that it was refused.
     const played = run("play", "--case", wrong);
     expect(played.status).toBe(1);
@@ -123,4 +138,47 @@ describe("bringing a case of your own, by the steps the README gives", () => {
     writeFileSync(join(dir, "report.json"), JSON.stringify({ accepted: true, case: { ...archivePass, id: "from-a-report" } }));
     expect(run("case", "check", join(dir, "report.json")).status).toBe(0);
   }, 60_000);
+
+  it("has a Chinese explanation for every kind of reason the gate can give", () => {
+    // Every code the validator uses. Read from its source, so a code added there and not here fails this test.
+    const validator = readFileSync(join(repo, "src/case/validate.ts"), "utf8");
+    const codes = [...new Set([...validator.matchAll(/bad\("([a-z-]+)"/g)].map((m) => m[1]!))].sort();
+    expect(codes.length).toBeGreaterThan(8);
+    expect(Object.keys(ISSUE_ZH).sort()).toEqual(codes);
+    // Every sentence the solver and the gate can give: one example of each, as their source writes them.
+    const examples = [
+      "reachable evidence both places s-ada at the scene and somewhere else",
+      "the proof needs 44 actions, but a session allows 40",
+      "the proof needs more than 40 actions, which is all a session allows",
+      "no suspect has opportunity, means and motive proven by reachable evidence: s-ada (unproven: opportunity)",
+      "more than one suspect is fully proven: [s-ada, s-ben]",
+      "[s-ada, s-ben] all still fit: no reachable evidence rules out 1 of them (another session leaves [s-ada, s-clara])",
+      "reachable evidence rules out every suspect",
+      "the lie a-ada-foyer-2100 by s-ada cannot be caught: no single session holds both the statement and an independent record against it",
+      "the solver reached its work limit before settling this case, so it is refused",
+      "the reachable evidence proves s-ben, but the hidden culprit is s-ada",
+    ];
+    const ids = idsIn(archivePass);
+    const used = new Set<string>();
+    for (const example of examples) {
+      const zh = reasonZh(example, ids);
+      expect(zh, example).not.toContain("暂时没有中文说明");
+      used.add(REASON_ZH.find(([pattern]) => pattern.test(example))![1]);
+    }
+    // Every explanation is reached by an example, and the sources still have as many reasons as there are examples for.
+    expect(used.size).toBe(REASON_ZH.length);
+    const solver = readFileSync(join(repo, "src/case/solver.ts"), "utf8");
+    expect([...solver.matchAll(/reasons\.push\(/g)].length).toBe(9);
+    // The ids a sentence mentions are listed in its order, once each, and only if the case has them.
+    expect(reasonZh("topic t-missing: s-ada states a-ada-foyer-2100, s-ada again, and s-nobody", ids)).toMatch(/（涉及：s-ada、a-ada-foyer-2100）$/);
+    // An id that ends a clause, with a colon after it, is still found: the validator writes "topic <id>: ...".
+    const topic = archivePass.actions.topics[0]!;
+    expect(reasonZh(`topic ${topic.id}: ${topic.suspect} states something false`, ids)).toMatch(new RegExp(`（涉及：${topic.id}、${topic.suspect}）$`));
+    expect(reasonZh("reachable evidence rules out every suspect", ids)).not.toContain("涉及");
+    // A fault in the file's form, and a reason this file has never heard of.
+    expect(reasonZh("sessionCap: expected number", ids, { layer: "schema", code: "invalid_type" })).toContain("格式");
+    expect(reasonZh("something new", ids)).toContain("暂时没有中文说明");
+    // Ids are found wherever the file puts them, whatever its shape.
+    expect([...idsIn({ slots: ["21:00", 7], a: [{ id: "x" }, { b: { id: "y", id2: "no" } }], id: 5 })].sort()).toEqual(["21:00", "x", "y"]);
+  });
 });
