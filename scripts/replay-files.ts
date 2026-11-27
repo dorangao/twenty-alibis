@@ -1,4 +1,4 @@
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cardOf, REPLAY_VERSION, type Replay, type ReplayCard, type ReplayIndex } from "../src/web/replay";
 import { indexOf, isReplayId, replayOf } from "../web/src/replay-shape";
@@ -42,6 +42,14 @@ const isLink = (path: string): boolean => {
   }
 };
 
+/** What the writer does to the disk when it puts its files in place. A test can stand in for it. */
+export interface PublishIo {
+  rename(from: string, to: string): void;
+}
+
+/** The name of the file that says a run is writing to a folder. */
+export const LOCK = ".replays.lock";
+
 /**
  * Put a replay in a folder of replays: its own file, "<id>.json", and its line in the
  * folder's "index.json", which is what a page reads to list them.
@@ -51,25 +59,33 @@ const isLink = (path: string): boolean => {
  * name, a link, or an index.json that belongs to something else is left alone, and then
  * nothing at all is written. Every check comes before the first write.
  *
- * Each file is written whole beside its place and then moved into it, the replay first and
- * the list last: a reader never sees half a file, and the list never names a replay that is
- * not there yet. One run at a time writes to a folder; a second is told so and writes
- * nothing.
+ * The new files are written whole in a folder of this run's own, made for it under a name
+ * nothing else has, and then moved into place, the replay first and the list last: a reader
+ * never sees half a file, and the list never names a replay that is not there yet. That
+ * folder is the only thing this run ever removes. Whatever else is in the replays folder,
+ * whatever it is called, is not touched.
+ *
+ * One run at a time writes to a folder; a second is told so ("busy") and writes nothing. The
+ * sign that a run is writing is the file ".replays.lock". A run that is killed cannot take
+ * it away: if no run is going and the file is still there, delete it by hand. Nothing else
+ * needs repair, because nothing is ever half in place.
  */
-export function writeReplay(dir: string, replay: Replay): { ok: true; files: string[] } | { ok: false; why: WriteRefusal } {
+export function writeReplay(dir: string, replay: Replay, io: PublishIo = { rename: renameSync }): { ok: true; files: string[] } | { ok: false; why: WriteRefusal } {
   if (!isReplayId(replay.id) || replayOf(JSON.parse(JSON.stringify(replay)), replay.id) === null) return { ok: false, why: "bad-replay" };
   mkdirSync(dir, { recursive: true });
   const file = join(dir, `${replay.id}.json`);
   const indexPath = join(dir, "index.json");
-  const lock = join(dir, ".replays.lock");
+  const lock = join(dir, LOCK);
   let held: number;
   try {
     // Made only if it is not there: two runs cannot both have it.
     held = openSync(lock, "wx");
-  } catch {
-    return { ok: false, why: "busy" };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return { ok: false, why: "busy" };
+    throw error;
   }
-  const parts = [`${file}.${process.pid}.part`, `${indexPath}.${process.pid}.part`];
+  /** This run's own folder for the new files. Set once it has been made, and removed at the end. */
+  let staging: string | null = null;
   try {
     let cards: ReplayCard[] = [];
     const index = readOwn(indexPath);
@@ -82,13 +98,16 @@ export function writeReplay(dir: string, replay: Replay): { ok: true; files: str
     if (existing !== undefined && (existing === "not-a-file" || replayOf(existing.data, replay.id) === null)) return { ok: false, why: "not-a-replay" };
 
     cards = [...cards.filter((card) => card.id !== replay.id), cardOf(replay)].sort((a, b) => a.id.localeCompare(b.id));
-    writeFileSync(parts[0]!, replayText(replay), { flag: "wx" });
-    writeFileSync(parts[1]!, indexText({ version: REPLAY_VERSION, replays: cards }), { flag: "wx" });
-    renameSync(parts[0]!, file);
-    renameSync(parts[1]!, indexPath);
+    // In the same folder, so that moving a file out of it is one step on one disk.
+    staging = mkdtempSync(join(dir, ".replay-staging-"));
+    writeFileSync(join(staging, "replay.json"), replayText(replay), { flag: "wx" });
+    writeFileSync(join(staging, "index.json"), indexText({ version: REPLAY_VERSION, replays: cards }), { flag: "wx" });
+    io.rename(join(staging, "replay.json"), file);
+    io.rename(join(staging, "index.json"), indexPath);
     return { ok: true, files: [file, indexPath] };
   } finally {
-    for (const part of parts) rmSync(part, { force: true, recursive: true });
+    // Only what this run made: its own folder, and its lock.
+    if (staging !== null) rmSync(staging, { recursive: true, force: true });
     closeSync(held);
     rmSync(lock, { force: true });
   }

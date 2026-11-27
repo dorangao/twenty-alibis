@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -364,16 +364,63 @@ describe("replay files", () => {
     expect(isReplayId("index-2")).toBe(true);
   });
 
-  it("if a write fails half way, no half-written file, no new replay and no lock are left", async () => {
+  it("removes only what the run itself made: whatever else is in the folder, whatever it is called, survives every outcome", async () => {
     const replay = await solved(lighthouse, "lighthouse");
-    const dir = fresh();
-    // The list cannot be prepared: something already sits where its new text would be written.
-    mkdirSync(join(dir, `index.json.${process.pid}.part`));
-    expect(() => writeReplay(dir, replay)).toThrow();
-    // The replay's own text had been prepared by then. It is gone again, and the replay was never put in place.
-    expect(readdirSync(dir).filter((name) => name.startsWith("lighthouse"))).toEqual([]);
-    expect(readdirSync(dir)).not.toContain(".replays.lock");
-    expect(readdirSync(dir)).not.toContain("index.json");
+    const other = await solved(archivePass, "archive");
+    /** A folder with things in it that look like a writer's leftovers and are not this run's. */
+    const cluttered = () => {
+      const dir = fresh();
+      mkdirSync(join(dir, `index.json.${process.pid}.part`));
+      writeFileSync(join(dir, `index.json.${process.pid}.part`, "inside.txt"), "kept");
+      writeFileSync(join(dir, `lighthouse.json.${process.pid}.part`), "somebody's file");
+      mkdirSync(join(dir, ".replay-staging-older"));
+      writeFileSync(join(dir, ".replay-staging-older", "replay.json"), "left by a run that was killed");
+      writeFileSync(join(dir, "notes.txt"), "mine");
+      return dir;
+    };
+    const foreign = (dir: string) => ({
+      partFolder: readFileSync(join(dir, `index.json.${process.pid}.part`, "inside.txt"), "utf8"),
+      partFile: readFileSync(join(dir, `lighthouse.json.${process.pid}.part`), "utf8"),
+      staging: readFileSync(join(dir, ".replay-staging-older", "replay.json"), "utf8"),
+      notes: readFileSync(join(dir, "notes.txt"), "utf8"),
+    });
+    const kept = { partFolder: "kept", partFile: "somebody's file", staging: "left by a run that was killed", notes: "mine" };
+    const names = (dir: string) => readdirSync(dir).sort();
+    const clutter = [".replay-staging-older", `index.json.${process.pid}.part`, `lighthouse.json.${process.pid}.part`, "notes.txt"];
+
+    // A run that goes through.
+    const fine = cluttered();
+    expect(writeReplay(fine, replay).ok).toBe(true);
+    expect(foreign(fine)).toEqual(kept);
+    expect(names(fine)).toEqual([...clutter, "index.json", "lighthouse.json"].sort());
+
+    // A run that is refused.
+    const refused = cluttered();
+    writeFileSync(join(refused, "index.json"), "{}");
+    expect(writeReplay(refused, replay)).toEqual({ ok: false, why: "bad-index" });
+    expect(foreign(refused)).toEqual(kept);
+    expect(names(refused)).toEqual([...clutter, "index.json"].sort());
+
+    // A run that fails after its first file is in place: the disk refuses the second move.
+    const broken = cluttered();
+    expect(writeReplay(broken, other).ok).toBe(true);
+    let moves = 0;
+    const failing = { rename: (from: string, to: string) => (++moves === 2 ? (() => { throw new Error("the disk is full"); })() : renameSync(from, to)) };
+    expect(() => writeReplay(broken, replay, failing)).toThrow("the disk is full");
+    expect(foreign(broken)).toEqual(kept);
+    // Its own folder and its lock are gone. The replay is in place and the list does not name it yet:
+    // the list never names a replay that is not there, and the next run puts it right.
+    expect(names(broken)).toEqual([...clutter, "archive.json", "index.json", "lighthouse.json"].sort());
+    expect(JSON.parse(readFileSync(join(broken, "index.json"), "utf8"))).toEqual({ version: 1, replays: [cardOf(other)] });
+    expect(writeReplay(broken, replay).ok).toBe(true);
+    expect(JSON.parse(readFileSync(join(broken, "index.json"), "utf8"))).toEqual({ version: 1, replays: [cardOf(other), cardOf(replay)] });
+    expect(foreign(broken)).toEqual(kept);
+
+    // A run that fails before anything is in place.
+    const early = cluttered();
+    expect(() => writeReplay(early, replay, { rename: () => { throw new Error("no"); } })).toThrow("no");
+    expect(foreign(early)).toEqual(kept);
+    expect(names(early)).toEqual(clutter.sort());
   });
 
   it("one run at a time writes to a folder: a second is told so and writes nothing", async () => {
@@ -387,6 +434,15 @@ describe("replay files", () => {
     rmSync(join(dir, ".replays.lock"));
     expect(writeReplay(dir, replay).ok).toBe(true);
     expect(readdirSync(dir).sort()).toEqual(["index.json", "lighthouse.json"]);
+    // Only a lock that is there means "busy". A folder that cannot be written to at all is an error of its own.
+    const sealed = fresh();
+    chmodSync(sealed, 0o555);
+    try {
+      expect(() => writeReplay(sealed, replay)).toThrow();
+    } finally {
+      chmodSync(sealed, 0o755);
+    }
+    expect(readdirSync(sealed)).toEqual([]);
     // A refusal lets go of the folder too.
     writeFileSync(join(dir, "index.json"), "{}");
     expect(writeReplay(dir, replay)).toEqual({ ok: false, why: "bad-index" });
@@ -561,11 +617,18 @@ describe("what the page does with a replay file", () => {
       return typeof target === "object" && target !== null && !Array.isArray(target);
     });
     expect(objects.length).toBeGreaterThan(500);
-    for (const path of objects) {
-      const copy = JSON.parse(JSON.stringify(good)) as unknown;
-      (path.reduce<unknown>((x, key) => (x as Record<string | number, unknown>)[key], copy) as Record<string, unknown>).culprit = "s-03";
-      expect(replayOf(copy, "lighthouse"), `added at ${path.join(".")}`).toBeNull();
+    // "constructor" and "toString" are names every object answers to without having them: they are not parts either.
+    for (const added of ["culprit", "constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      for (const path of objects) {
+        const copy = JSON.parse(JSON.stringify(good)) as unknown;
+        Object.defineProperty(path.reduce<unknown>((x, key) => (x as Record<string | number, unknown>)[key], copy) as object, added, { value: "s-03", enumerable: true, configurable: true, writable: true });
+        expect(replayOf(copy, "lighthouse"), `${added} added at ${path.join(".")}`).toBeNull();
+      }
     }
+    // And a part that is only inherited does not count as being there.
+    const inherited = JSON.parse(JSON.stringify(good)) as Record<string, unknown>;
+    delete inherited.title;
+    expect(replayOf(Object.assign(Object.create({ title: good.title }) as object, inherited), "lighthouse")).toBeNull();
   });
 
   it("steps stay inside the replay", () => {

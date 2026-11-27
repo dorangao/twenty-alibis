@@ -20,7 +20,13 @@ const absent: Check = (x) => x === undefined;
 const oneOf = (...values: readonly unknown[]): Check => (x) => values.includes(x);
 const list = (item: Check): Check => (x) => Array.isArray(x) && x.every(item);
 /** An object with exactly these parts in it, each as it should be. A part that is not named is not allowed. */
-const shape = (parts: Record<string, Check>): Check => (x) => typeof x === "object" && x !== null && !Array.isArray(x) && Object.keys(x).every((key) => key in parts) && Object.entries(parts).every(([key, check]) => check((x as Record<string, unknown>)[key]));
+const shape = (parts: Record<string, Check>): Check => (x) =>
+  typeof x === "object" &&
+  x !== null &&
+  !Array.isArray(x) &&
+  // Its own names only: "constructor" and the like are names every object answers to, and are not parts.
+  Object.keys(x).every((key) => Object.hasOwn(parts, key)) &&
+  Object.entries(parts).every(([key, check]) => check(Object.hasOwn(x, key) ? (x as Record<string, unknown>)[key] : undefined));
 
 const text = shape({ en: str, zh: str });
 const handle = (prefix: string): Check => (x) => typeof x === "string" && new RegExp(`^${prefix}[1-9]\\d{0,3}$`).test(x);

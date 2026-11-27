@@ -131,7 +131,10 @@ if (!written.ok) {
     "bad-replay": ["The replay that was made is not whole.", "生成的回放不完整。"],
     "bad-index": [`${out} has an index.json that is not a list of replays.`, `${out} 里的 index.json 不是回放列表。`],
     "not-a-replay": [`${out} already has a file called ${id}.json that is not this replay.`, `${out} 里已经有一个名为 ${id}.json 的文件，但它不是这个回放。`],
-    busy: [`Another run is writing to ${out} (or left .replays.lock behind).`, `另一次运行正在写入 ${out}（或者留下了 .replays.lock）。`],
+    busy: [
+      `Another run is writing to ${out}. If none is, a run that was killed left ${out}/.replays.lock behind: delete that one file and run this again. Nothing else needs repair.`,
+      `另一次运行正在写入 ${out}。如果并没有，那是被中断的运行留下了 ${out}/.replays.lock：删掉这一个文件再重新运行即可，其他不需要修复。`,
+    ],
   };
   stop(why[written.why][0], why[written.why][1]);
   throw new Error("unreachable");
