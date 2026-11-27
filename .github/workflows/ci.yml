@@ -46,5 +46,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx vitest run test/spend-store.test.ts test/pilot.test.ts
-      # The tests clean up after themselves: no key of theirs may be left in the store.
-      - run: npm run check:redis-clean
+      # The tests clean up after themselves: no key of theirs may be left in the store. This
+      # runs when the tests failed too, which is when a leftover key is most likely; the job
+      # still fails on the tests' own result.
+      - if: ${{ !cancelled() }}
+        run: npm run check:redis-clean

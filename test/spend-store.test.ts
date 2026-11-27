@@ -5,6 +5,7 @@ import { createMetered } from "../src/metered";
 import { FakeProvider, textResponse } from "../src/provider/fake";
 import { worstCaseNano } from "../src/spend/pricing";
 import { connectRedis } from "../src/spend/redis-client";
+import { scanKeys } from "../src/spend/redis-keys";
 import { EnvelopeCorruptError, EnvelopeNotInitializedError, RedisSpendStore } from "../src/spend/redis-store";
 import { MemorySpendStore, type SpendStore } from "../src/spend/store";
 
@@ -182,15 +183,22 @@ contract("in memory", async () => ({ store: new MemorySpendStore(), prepare: asy
 const redisUrl = process.env.TEST_REDIS_URL;
 const prefix = `ta-test-${randomUUID()}`;
 
-// Every key a Redis test in this file writes is under `prefix`. They are removed once, when
-// the whole file is done. Cleaning up inside one group of tests is not enough: the groups
-// after it write under the same prefix, and against a Redis that other things share those
-// keys would stay behind.
+// Every key a Redis test in this file writes is under `prefix`, which is this run's alone.
+// They are removed once, when the whole file is done. Cleaning up inside one group of tests
+// is not enough: the groups after it write under the same prefix. Only this run's prefix is
+// ever removed, and its keys are found in small batches, never with a database-wide KEYS.
+//
+// A run that is killed cannot clean up, and these keys do not expire. So the prefix is said
+// before anything is written: `npm run check:redis-clean -- --remove-run <prefix>` removes
+// exactly that run's keys afterwards.
+beforeAll(() => {
+  if (redisUrl) console.info(`Redis test keys of this run start with ${prefix}`);
+});
 afterAll(async () => {
   if (!redisUrl) return;
   const admin = new Redis(redisUrl);
   try {
-    const keys = await admin.keys(`${prefix}*`);
+    const keys = await scanKeys(admin, `${prefix}:*`);
     if (keys.length) await admin.del(...keys);
   } finally {
     admin.disconnect();
@@ -247,7 +255,7 @@ describe.skipIf(!redisUrl)("Redis spend store", () => {
     await store.init({ envelope, limitNano: 1_000 });
     await store.reserve({ envelope, attemptId: "a", amountNano: 300, limitNano: 1_000 });
     await store.reserve({ envelope, attemptId: "b", amountNano: 300, limitNano: 1_000 });
-    expect(await admin.keys(`${store.keyOf(envelope)}*`)).toEqual([store.keyOf(envelope)]);
+    expect(await scanKeys(admin, `${store.keyOf(envelope)}*`)).toEqual([store.keyOf(envelope)]);
     expect(await admin.ttl(store.keyOf(envelope))).toBe(-1);
   });
 

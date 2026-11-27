@@ -257,7 +257,7 @@ describe("the dev server hands out the page, and nothing else in the checkout", 
 });
 
 describe("starting the dev server", () => {
-  it("names its config, so a checkout without one stops the server instead of serving the folder", () => {
+  it("names its config, so a cold start in a checkout without one stops instead of serving the folder", () => {
     // Vite started without a config serves the folder it is in, all of it. That is what happens
     // if the config is merely looked for and is not there, as on a commit from before the page.
     const scripts = (JSON.parse(readFileSync("package.json", "utf8")) as { scripts: Record<string, string> }).scripts;
@@ -269,8 +269,12 @@ describe("starting the dev server", () => {
     const vite = join(process.cwd(), "node_modules/.bin/vite");
     const run = spawnSync(vite, ["--config", "vite.config.ts", "--port", "0"], { cwd: empty, encoding: "utf8", timeout: 20_000, env: { ...process.env, VITE_CONFIG_NATIVE_IGNORE_WARNING: "true" } });
     expect(run.error).toBeUndefined();
-    expect(run.status).not.toBe(0);
-    expect(`${run.stdout}${run.stderr}`).not.toMatch(/Local:\s+http/);
+    expect(run.status).toBe(1);
+    // It stopped because the config it was told to use is not there, and it never listened.
+    const said = `${run.stdout}${run.stderr}`;
+    expect(said).toContain("failed to load config from");
+    expect(said).toContain("vite.config.ts");
+    expect(said).not.toMatch(/Local:\s+http/);
   }, 30_000);
 });
 
