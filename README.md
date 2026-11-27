@@ -117,6 +117,20 @@ The model is off in both: nothing is sent and nothing is spent. You get the brie
 
 以上两条命令都不调用模型，不发送任何内容，也不花钱。可以看简报、从话题菜单里审问嫌疑人、查看记录、翻笔记本和其中的矛盾、指认、最后看真相。模型关闭时嫌疑人的陈述由代码转述；用自己的话提问需要模型（`npm run play -- --live`，只有在游戏开始前已有人授权付费请求时才会真的发送）。指认时要写明依据哪些记录：`accuse 艾达 1 2 4`，或 `accuse 艾达 all`。
 
+### Play it in a browser · 在浏览器里玩
+
+```bash
+npm run dev
+```
+
+Then open the address it prints (http://localhost:5173). The model is off here too: nothing is sent and nothing is spent. Pick a case, read the briefing and the rules of proof, question people from their topic menus, inspect records, watch the notebook mark what contradicts what, then accuse with the evidence you tick. The page has a language switch; a topic you have heard can be asked again in the other language at no cost.
+
+The server keeps the case and your session. The page is sent only what you have been given or have found, under its own names (P3, T7, I2, E4), never the case file's. Your browser gets a cookie the page's scripts cannot read; that, not the address, is what lets you back into your game.
+
+然后打开它打印出的地址（http://localhost:5173）。这里模型同样是关闭的：不发送任何内容，也不花钱。选一个案件，读案情简报和证明规则，从话题菜单里询问人物，查看记录，看笔记本标出哪些陈述与证据矛盾，然后勾选证据进行指认。页面可以切换语言；听过的话题可以用另一种语言再问一遍，不消耗行动。
+
+案件和你的进度都保存在服务器上。页面只会收到你已经拿到或查到的内容，并且用的是页面自己的编号（P3、T7、I2、E4），不是案件文件里的编号。浏览器会拿到一个页面脚本读不到的 cookie；让你回到自己那一局的是它，而不是网址。
+
 ### The durable spend counter · 持久化的额度计数
 
 The spend guard counts in Redis, so the count survives restarts and is shared by every process. For local work, Docker provides it:
