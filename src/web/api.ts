@@ -51,6 +51,13 @@ export interface ApiDeps {
   newId?: () => string;
   /** A new visitor secret: 64 hex characters nobody could guess. */
   newSecret?: () => string;
+  /**
+   * The game's own public origin, scheme and port included ("https://example.com"). A request
+   * that changes something must come from exactly this origin. A deployed server sets it; when
+   * it is not set, the origin of the request's own URL is used, which is right for a local
+   * server that is reached directly.
+   */
+  origin?: string;
   now?: () => number;
 }
 
@@ -143,9 +150,39 @@ class Refused extends Error {
   }
 }
 
+/**
+ * The request's body, read no further than the limit. Bytes are counted as they arrive, and
+ * the moment there are too many the rest is not read: a body of unknown or dishonest length
+ * cannot make the server hold more than the limit.
+ */
+async function readLimited(request: Request): Promise<string> {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new Refused("bad-request");
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY_BYTES) {
+      await reader.cancel();
+      throw new Refused("bad-request");
+    }
+    chunks.push(value);
+  }
+  const whole = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    whole.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return new TextDecoder().decode(whole);
+}
+
 async function readBody(request: Request): Promise<Record<string, unknown>> {
-  const text = await request.text();
-  if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) throw new Refused("bad-request");
+  const text = await readLimited(request);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -179,13 +216,18 @@ function visitorOf(request: Request): string | null {
   return null;
 }
 
-/** A request that changes something must come from the game's own page. */
-function sameOrigin(request: Request): boolean {
+/**
+ * A request that changes something must come from the game's own page: its Origin header
+ * must be there, and must be exactly the game's origin, scheme, host and port. Browsers send
+ * Origin with every POST a page makes, so a request without one did not come from the page.
+ * "http://example.com" is not "https://example.com", and neither is another port.
+ */
+function sameOrigin(request: Request, expected: string | undefined): boolean {
   const origin = request.headers.get("origin");
-  // A request with no Origin header was not made by a page's script from another site.
-  if (origin === null) return true;
+  if (origin === null) return false;
   try {
-    return new URL(origin).host === new URL(request.url).host;
+    // `origin` of a URL is its scheme, host and port in canonical form; "null" and junk do not parse to one.
+    return new URL(origin).origin === new URL(expected ?? request.url).origin && new URL(origin).origin === origin;
   } catch {
     return false;
   }
@@ -216,7 +258,7 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
   }
 
   if (parts[1] !== "sessions") return fail("not-found");
-  if (request.method === "POST" && !sameOrigin(request)) return fail("forbidden");
+  if (request.method === "POST" && !sameOrigin(request, deps.origin)) return fail("forbidden");
 
   if (parts.length === 2) {
     if (request.method !== "POST") return fail("method");
@@ -224,8 +266,7 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
     const c = caseOf(text(body, "caseId"));
     if (!c) return fail("not-found");
     // A visitor without a secret is given one now, in a cookie the page's scripts cannot read.
-    const known = visitorOf(request);
-    const secret = known ?? (deps.newSecret ?? (() => randomBytes(32).toString("hex")))();
+    const secret = visitorOf(request) ?? (deps.newSecret ?? (() => randomBytes(32).toString("hex")))();
     const record = withHandles(c, {
       session: startSession(c, (deps.newId ?? randomUUID)()),
       owner: hash(secret),
@@ -237,8 +278,10 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
       createdAt: now(),
     });
     if (!(await deps.sessions.create(record))) return fail("full");
-    const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-    const cookie = known ? {} : { "set-cookie": `${VISITOR_COOKIE}=${secret}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${VISITOR_MAX_AGE_S}${secure}` };
+    // The cookie is sent with every new session, also to a visitor who has one: that renews its
+    // term, so a game begun today cannot outlive the cookie that opens it.
+    const secure = new URL(deps.origin ?? request.url).protocol === "https:" ? "; Secure" : "";
+    const cookie = { "set-cookie": `${VISITOR_COOKIE}=${secret}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${VISITOR_MAX_AGE_S}${secure}` };
     return json(201, { view: viewOf(c, record, modelFor(record)) } satisfies ViewReply, cookie);
   }
 
@@ -268,8 +311,7 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
   if (typeof body.revision !== "number" || !Number.isSafeInteger(body.revision)) return fail("bad-request");
   const revision = body.revision;
 
-  const done = await deps.sessions.update<ViewReply>(id, async (record) => {
-    if (record.owner !== owner) throw new Refused("not-found");
+  const done = await deps.sessions.update<ViewReply>(id, owner, async (record) => {
     const c = caseFor(record);
     // The page acted on a view the session has since left behind. Nothing is done.
     if (record.revision !== revision) throw new Refused("stale");

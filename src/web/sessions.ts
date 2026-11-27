@@ -43,11 +43,20 @@ export interface SessionStore {
   /**
    * Run `work` on a record, alone, and keep the record it returns. If `work` throws, nothing
    * is kept and the error is passed on.
+   *
+   * `owner` is checked first, before anything else is said: to anyone but its owner a session
+   * is "missing", whether or not it exists and whether or not it is at work. Only its owner
+   * can learn that it is busy.
    */
-  update<T>(id: string, work: (record: SessionRecord) => Promise<{ record: SessionRecord; value: T }>): Promise<{ ok: true; value: T } | { ok: false; why: "missing" | "busy" }>;
+  update<T>(id: string, owner: string, work: (record: SessionRecord) => Promise<{ record: SessionRecord; value: T }>): Promise<{ ok: true; value: T } | { ok: false; why: "missing" | "busy" }>;
 }
 
-/** The most sessions the in-memory store keeps. The oldest idle one makes room for a new one. */
+/**
+ * The most sessions the in-memory store keeps. When it is full, room is made only from games
+ * that are over: one that has expired, or one that has ended with an accusation. A game
+ * someone is still playing is never dropped to make room, however long they have been
+ * thinking; the new session is refused instead.
+ */
 export const MAX_SESSIONS = 500;
 /** How long a session is kept. After that it is gone, and its id answers like one that never was. */
 export const SESSION_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -69,20 +78,22 @@ export function memorySessions(options: { max?: number; ttlMs?: number; now?: ()
   };
   return {
     create: async (record) => {
+      // Expired sessions go first.
       for (const id of [...kept.keys()]) live(id);
       if (kept.size >= max) {
-        const oldest = [...kept.keys()].find((id) => !busy.has(id));
-        // Every session is at work: none may be dropped, so the new one is not kept.
-        if (oldest === undefined) return false;
-        kept.delete(oldest);
+        // Then the oldest game that has ended. An unfinished game is never dropped.
+        const finished = [...kept.entries()].find(([id, r]) => r.session.verdict !== undefined && !busy.has(id));
+        if (finished === undefined) return false;
+        kept.delete(finished[0]);
       }
       kept.set(record.session.id, record);
       return true;
     },
     read: async (id) => live(id) ?? null,
-    update: async (id, work) => {
+    update: async (id, owner, work) => {
       const record = live(id);
-      if (!record) return { ok: false, why: "missing" };
+      // Not there, or not theirs: the same answer, given before "busy" could tell them apart.
+      if (!record || record.owner !== owner) return { ok: false, why: "missing" };
       if (busy.has(id)) return { ok: false, why: "busy" };
       busy.add(id);
       try {

@@ -32,7 +32,7 @@ function wellBehaved(request: ProviderRequest): ProviderResponse {
 
 type Reply<T> = { status: number; raw: string; body: T; headers: Headers };
 
-function server(options: { cases?: Case[]; metered?: Metered; modelOff?: boolean; sessions?: SessionStore; now?: () => number } = {}) {
+function server(options: { cases?: Case[]; metered?: Metered; modelOff?: boolean; sessions?: SessionStore; now?: () => number; origin?: string } = {}) {
   let made = 0;
   let secrets = 0;
   const deps: ApiDeps = {
@@ -43,14 +43,18 @@ function server(options: { cases?: Case[]; metered?: Metered; modelOff?: boolean
     newId: () => `00000000-0000-4000-8000-${String(++made).padStart(12, "0")}`,
     newSecret: () => String(++secrets).padStart(64, "0"),
     ...(options.now ? { now: options.now } : {}),
+    ...(options.origin ? { origin: options.origin } : {}),
   };
   /** One browser: it keeps the cookie it is given and sends it back. */
   const visitor = () => {
     let cookie: string | null = null;
-    const call = async <T = ViewReply>(method: string, path: string, body?: unknown, extra: { origin?: string; https?: boolean; cookie?: string | null } = {}): Promise<Reply<T>> => {
+    const call = async <T = ViewReply>(method: string, path: string, body?: unknown, extra: { origin?: string | null; https?: boolean; cookie?: string | null } = {}): Promise<Reply<T>> => {
       const sent = extra.cookie === undefined ? cookie : extra.cookie;
-      const headers: Record<string, string> = { ...(sent ? { cookie: sent } : {}), ...(extra.origin ? { origin: extra.origin } : {}) };
-      const response = await handleRequest(new Request(`${extra.https ? "https" : "http"}://game.test${path}`, { method, headers, ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) }), deps);
+      const base = `${extra.https ? "https" : "http"}://game.test`;
+      // Like a browser: a page's POST carries the page's origin. `origin: null` leaves it out.
+      const origin = extra.origin === undefined ? (method === "GET" ? null : base) : extra.origin;
+      const headers: Record<string, string> = { ...(sent ? { cookie: sent } : {}), ...(origin ? { origin } : {}) };
+      const response = await handleRequest(new Request(`${base}${path}`, { method, headers, ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) }), deps);
       const set = response.headers.get("set-cookie");
       if (set && extra.cookie === undefined) cookie = set.split(";")[0]!;
       const raw = await response.text();
@@ -314,9 +318,9 @@ describe("who may touch a session", () => {
     // Over https it is also marked Secure.
     const fresh = server();
     expect((await fresh.call("POST", "/api/sessions", { caseId: archivePass.id }, { https: true })).headers.get("set-cookie")).toMatch(/; Secure$/);
-    // A visitor who already has one is not given another, and owns both sessions.
+    // A visitor who already has one keeps it, with its term renewed, and owns both sessions.
     const second = await call("POST", "/api/sessions", { caseId: lighthouse.id });
-    expect(second.headers.get("set-cookie")).toBeNull();
+    expect(second.headers.get("set-cookie")).toBe(first.headers.get("set-cookie"));
     const records = [await stored(deps, first.body.view), await stored(deps, second.body.view)];
     expect(records[0]!.owner).toBe(records[1]!.owner);
     // The secret is nowhere in what is kept, nor in any body; nor is its hash in a body.
@@ -357,14 +361,54 @@ describe("who may touch a session", () => {
     const { call, start } = server();
     const view = await start(lighthouse.id);
     const at = `/api/sessions/${view.session}`;
-    for (const origin of ["https://evil.example", "http://game.test.evil.example", "null", "not a url"]) {
+    // Another site, a look-alike, the same host under another scheme or port, no origin at all, and junk.
+    for (const origin of ["https://evil.example", "http://game.test.evil.example", "https://game.test", "http://game.test:8080", "http://game.test/", "http://GAME.test", null, "null", "not a url"]) {
       const r = await call<ApiError>("POST", `${at}/inspect`, { revision: view.revision, inspection: "I1" }, { origin });
-      expect([r.status, r.body.error.code], origin).toEqual([403, "forbidden"]);
+      expect([r.status, r.body.error.code], String(origin)).toEqual([403, "forbidden"]);
       expect((await call<ApiError>("POST", "/api/sessions", { caseId: lighthouse.id }, { origin })).body.error.code).toBe("forbidden");
     }
     expect((await call("GET", at)).body.view).toEqual(view);
     // The game's own page is let through.
     expect((await call("POST", `${at}/inspect`, { revision: view.revision, inspection: "I1" }, { origin: "http://game.test" })).status).toBe(200);
+  });
+
+  it("a deployed server names its one public origin, and the address a request arrived at does not matter", async () => {
+    // Behind a proxy the request's own URL may say http and an inner host. Only the public origin counts.
+    const { call } = server({ origin: "https://alibis.example" });
+    const made = await call("POST", "/api/sessions", { caseId: lighthouse.id }, { origin: "https://alibis.example" });
+    expect(made.status).toBe(201);
+    // The cookie is marked Secure because the public origin is https, whatever the inner hop was.
+    expect(made.headers.get("set-cookie")).toMatch(/; Secure$/);
+    for (const origin of ["http://game.test", "http://alibis.example", "https://alibis.example:8443", null]) {
+      expect((await call<ApiError>("POST", "/api/sessions", { caseId: lighthouse.id }, { origin })).body.error.code, String(origin)).toBe("forbidden");
+    }
+  });
+
+  it("reads a request's body no further than the limit, however long it claims or turns out to be", async () => {
+    const { deps } = server();
+    // A body with no declared length that never ends on its own: 1,000 bytes a chunk.
+    let pulled = 0;
+    let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++;
+        controller.enqueue(new Uint8Array(1_000).fill(120));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const response = await handleRequest(new Request("http://game.test/api/sessions", { method: "POST", headers: { origin: "http://game.test" }, body: endless, duplex: "half" } as RequestInit), deps);
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as ApiError).error.code).toBe("bad-request");
+    // It stopped a chunk or two past the 4,000-byte limit, and told the sender to stop.
+    expect(pulled).toBeLessThanOrEqual(8);
+    expect(cancelled).toBe(true);
+    // A body that declares itself too long is refused without being read at all.
+    const declared = new Request("http://game.test/api/sessions", { method: "POST", headers: { origin: "http://game.test", "content-length": String(MAX_BODY_BYTES + 1) }, body: JSON.stringify({ caseId: lighthouse.id }) });
+    const early = await handleRequest(declared, deps);
+    expect(early.status).toBe(400);
+    expect(declared.bodyUsed).toBe(false);
   });
 
   it("a session ends when it is too old, and when its case has changed under it", async () => {
@@ -441,7 +485,7 @@ describe("once only", () => {
       }
       return inner(request);
     };
-    const { act, call, start } = server({ metered, modelOff: false });
+    const { act, call, start, visitor } = server({ metered, modelOff: false });
     const view = await start(archivePass.id);
     const at = `/api/sessions/${view.session}`;
 
@@ -459,6 +503,13 @@ describe("once only", () => {
     }
     // Reading is not blocked, and shows the session as it was last kept.
     expect((await call("GET", at)).body.view).toEqual(view);
+    // A stranger cannot tell that this session is at work, or that it exists: the same bytes as for no session.
+    const stranger = visitor();
+    await stranger.start(archivePass.id);
+    const theirs = await stranger.call("POST", `${at}/inspect`, { revision: view.revision, inspection: "I1" });
+    const nothing = await stranger.call("POST", "/api/sessions/00000000-0000-4000-8000-999999999999/inspect", { revision: view.revision, inspection: "I1" });
+    expect(theirs.status).toBe(404);
+    expect(theirs.raw).toBe(nothing.raw);
     // Another session is not held up.
     const other = await start(archivePass.id);
     expect((await act(other, "inspect", { inspection: "I1" })).status).toBe(200);
@@ -689,7 +740,7 @@ describe("the game over HTTP, with a model", () => {
     // The same store and the same visitor, behind a server whose model is on.
     const on: ApiDeps = { ...off.deps, modelOff: false };
     const ask = (body: Record<string, unknown>) =>
-      handleRequest(new Request(`http://game.test/api/sessions/${view.session}/ask`, { method: "POST", headers: { cookie: off.cookie()! }, body: JSON.stringify({ revision: view.revision, ...body }) }), on);
+      handleRequest(new Request(`http://game.test/api/sessions/${view.session}/ask`, { method: "POST", headers: { cookie: off.cookie()!, origin: "http://game.test" }, body: JSON.stringify({ revision: view.revision, ...body }) }), on);
     const typed = await ask({ person: "P1", question: "Where were you at nine?" });
     expect(typed.status).toBe(409);
     expect(((await typed.json()) as ApiError).error.code).toBe("model-off");
@@ -708,51 +759,80 @@ describe("the game over HTTP, with a model", () => {
 });
 
 describe("sessions in memory", () => {
-  const blank = (id: string, createdAt = 0): SessionRecord => ({ session: { id, caseId: "c", actions: 0, evidence: [], inspections: [], asked: 0, turns: [] }, owner: "o", revision: 1, mode: "off", caseVersion: "v", topics: [], inspections: [], createdAt });
+  const blank = (id: string, createdAt = 0, over = false): SessionRecord => ({
+    session: { id, caseId: "c", actions: 0, evidence: [], inspections: [], asked: 0, turns: [], ...(over ? { verdict: { accused: "s", cited: [], outcome: "wrong" as const, missing: [], open: [], accusedRuledOut: false, actions: 0 } } : {}) },
+    owner: "o",
+    revision: 1,
+    mode: "off",
+    caseVersion: "v",
+    topics: [],
+    inspections: [],
+    createdAt,
+  });
 
   it("keeps what the work returns, keeps nothing when it throws, and lets go either way", async () => {
     const store = memorySessions({ now: () => 0 });
     expect(await store.create(blank("a"))).toBe(true);
-    expect(await store.update("a", async (r) => ({ record: { ...r, revision: 2 }, value: "done" }))).toEqual({ ok: true, value: "done" });
+    expect(await store.update("a", "o", async (r) => ({ record: { ...r, revision: 2 }, value: "done" }))).toEqual({ ok: true, value: "done" });
     expect((await store.read("a"))!.revision).toBe(2);
-    await expect(store.update("a", async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
+    await expect(store.update("a", "o", async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
     expect((await store.read("a"))!.revision).toBe(2);
-    expect(await store.update("a", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: true, value: 1 });
-    expect(await store.update("nobody", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: false, why: "missing" });
+    expect(await store.update("a", "o", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: true, value: 1 });
+    expect(await store.update("nobody", "o", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: false, why: "missing" });
     expect(await store.read("nobody")).toBeNull();
   });
 
-  it("makes room by dropping the oldest session that is not at work, and refuses when all are", async () => {
-    const store = memorySessions({ max: 2, now: () => 0 });
+  it("to anyone but its owner a session is missing, even while it is at work; only the owner hears that it is busy", async () => {
+    const store = memorySessions({ now: () => 0 });
     await store.create(blank("a"));
-    await store.create(blank("b"));
+    let ran = false;
+    expect(await store.update("a", "someone-else", async (r) => ((ran = true), { record: r, value: 1 }))).toEqual({ ok: false, why: "missing" });
+    expect(ran).toBe(false);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    // "a" is the oldest, and it is at work: "b" goes instead.
-    const working = store.update("a", async (r) => {
+    const working = store.update("a", "o", async (r) => {
       await gate;
-      return { record: { ...r, revision: 5 }, value: null };
+      return { record: r, value: null };
     });
+    expect(await store.update("a", "someone-else", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: false, why: "missing" });
+    expect(await store.update("a", "o", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: false, why: "busy" });
+    release();
+    await working;
+  });
+
+  it("when full, makes room only from games that are over; a game someone is still playing is never dropped", async () => {
+    let clock = 0;
+    const store = memorySessions({ max: 2, ttlMs: 1_000, now: () => clock });
+    await store.create(blank("a"));
+    await store.create(blank("b"));
+    // Both are unfinished and unexpired. Nobody is acting on either: their players are thinking. A third is refused.
+    expect(await store.create(blank("c"))).toBe(false);
+    expect(await store.read("a")).not.toBeNull();
+    expect(await store.read("b")).not.toBeNull();
+    expect(await store.read("c")).toBeNull();
+    // "b" ends with an accusation: it is the one that makes room, though "a" is older.
+    await store.update("b", "o", async (r) => ({ record: { ...r, session: blank("b", 0, true).session }, value: null }));
     expect(await store.create(blank("c"))).toBe(true);
     expect(await store.read("a")).not.toBeNull();
     expect(await store.read("b")).toBeNull();
-    // With "a" and "c" both at work there is nothing to drop, and a new session is not kept.
-    let releaseC!: () => void;
-    const gateC = new Promise<void>((resolve) => (releaseC = resolve));
-    const workingC = store.update("c", async (r) => {
-      await gateC;
+    // Full again with two unfinished games; when "a" expires it makes room.
+    expect(await store.create(blank("d", clock))).toBe(false);
+    clock = 1_000;
+    expect(await store.create(blank("d", clock))).toBe(true);
+    expect(await store.read("a")).toBeNull();
+    // A finished game that is at work is not dropped out from under its request.
+    const two = memorySessions({ max: 1, now: () => 0 });
+    await two.create(blank("x", 0, true));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const working = two.update("x", "o", async (r) => {
+      await gate;
       return { record: r, value: null };
     });
-    expect(await store.create(blank("d"))).toBe(false);
-    expect(await store.read("d")).toBeNull();
+    expect(await two.create(blank("y"))).toBe(false);
     release();
-    releaseC();
     await working;
-    await workingC;
-    expect((await store.read("a"))!.revision).toBe(5);
-    // Now "a" is idle and the oldest.
-    expect(await store.create(blank("d"))).toBe(true);
-    expect(await store.read("a")).toBeNull();
+    expect(await two.create(blank("y"))).toBe(true);
   });
 
   it("forgets a session when its time is up", async () => {
@@ -763,6 +843,6 @@ describe("sessions in memory", () => {
     expect(await store.read("a")).not.toBeNull();
     clock = 100;
     expect(await store.read("a")).toBeNull();
-    expect(await store.update("a", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: false, why: "missing" });
+    expect(await store.update("a", "o", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: false, why: "missing" });
   });
 });
