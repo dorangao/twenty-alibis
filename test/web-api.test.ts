@@ -972,7 +972,7 @@ describe("a question that was begun and never finished", () => {
     expect(twice.body.status).toMatchObject({ code: "interrupted" });
   });
 
-  it("writes the question down once, before its first request, and asks before each further request whether it still holds the session", async () => {
+  it("writes the question down once, before its first request, and asks before every request whether it still holds the session", async () => {
     const { sessions, saved, checks } = counting();
     const { provider, metered: inner } = live();
     const before: [saved: number, checks: number][] = [];
@@ -985,12 +985,13 @@ describe("a question that was begun and never finished", () => {
     // An inspection sends nothing: nothing is written down early.
     view = (await act(view, "inspect", { inspection: "I1" })).body.view;
     expect(saved).toHaveLength(0);
-    // A typed question sends two requests. Before the first, the question is written down; before the second, the hold is checked.
+    // A typed question sends two requests. The question is written down once, before the first;
+    // the hold is checked before each of them, as the last thing before the spend guard.
     const asked = (await act(view, "ask", { person: "P1", question: "Where were you at nine?" })).body.view;
     expect(provider.dispatched).toBe(2);
     expect(before).toEqual([
-      [1, 0],
       [1, 1],
+      [1, 2],
     ]);
     // What was written down: the same game, the question's number used, and the revision moved on.
     expect(saved[0]).toMatchObject({ inFlight: 1, revision: view.revision + 1, session: { asked: 1, actions: 1, turns: [] } });
@@ -1069,6 +1070,59 @@ describe("a question that was begun and never finished", () => {
     const after = await call("GET", `/api/sessions/${view.session}`);
     expect(after.body.view).toEqual(afterLoss(view));
     expect(after.body.status).toMatchObject({ code: "interrupted" });
+  });
+
+  it("asks whether it still holds the session after the allowance has answered, right before the request goes to the spend guard", async () => {
+    // The session is taken by another worker while this one waits for the visitor's allowance.
+    for (const takenDuring of [1, 2]) {
+      const inner = memorySessions();
+      let held = true;
+      const sessions: SessionStore = {
+        create: inner.create,
+        read: inner.read,
+        update: (id, owner, work) => inner.update(id, owner, (record, hold) => work(record, { save: hold.save, check: async () => (held ? hold.check() : Promise.reject(new Error("the lease is another worker's"))) })),
+      };
+      let asked = 0;
+      const allowance: Allowance = {
+        session: async () => "ok",
+        request: async () => {
+          if (++asked === takenDuring) held = false;
+          return true;
+        },
+      };
+      const { provider, metered } = live();
+      const { act, start } = server({ metered, modelOff: false, sessions, allowance });
+      const r = await act<ApiError>(await start(archivePass.id), "ask", { person: "P1", question: "Where were you at nine?" });
+      expect([r.status, r.body.error.code], String(takenDuring)).toEqual([500, "server"]);
+      // Lost during the wait before the first request: nothing is sent. Before the second: only the first was.
+      expect(provider.dispatched, String(takenDuring)).toBe(takenDuring - 1);
+    }
+  });
+
+  it("counts every question that never finished, also two in a row with nothing kept in between", async () => {
+    const { metered, state } = mortal();
+    const { act, call, start, deps } = server({ metered, modelOff: false });
+    let view = await start(archivePass.id);
+    const at = `/api/sessions/${view.session}`;
+    state.dies = true;
+    for (const lost of [1, 2, 3]) {
+      expect((await act<ApiError>(view, "ask", { person: "P1", question: "Where were you at nine?" })).status).toBe(500);
+      const looked = await call("GET", at);
+      expect(looked.body.status).toMatchObject({ code: "interrupted" });
+      view = looked.body.view;
+      expect(view.cost.unfinished, String(lost)).toBe(lost);
+    }
+    state.dies = false;
+    // An inspection is kept: the count stays at three, and the word that one was just lost goes.
+    const inspected = await act(view, "inspect", { inspection: "I1" });
+    expect(inspected.body.status).toBeUndefined();
+    expect(inspected.body.view.cost.unfinished).toBe(3);
+    // A question that is answered does not add to it.
+    const answered = await act(inspected.body.view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(answered.body.ask).toMatchObject({ recorded: true, shown: { source: "model" } });
+    expect(answered.body.view.cost.unfinished).toBe(3);
+    expect(await stored(deps, view)).toMatchObject({ lost: 3 });
+    expect((await stored(deps, view)).inFlight).toBeUndefined();
   });
 
   it("a question that is still being worked on is not called lost", async () => {

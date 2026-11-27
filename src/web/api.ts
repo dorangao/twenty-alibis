@@ -361,14 +361,18 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
     let begun = false;
     /** True once the visitor's allowance has refused a request of this question. */
     let spent = false;
+    /**
+     * Questions that never finished, as of now: the ones already counted, and the one still
+     * marked as begun when this work started. Nobody else is at work, so that one was lost.
+     * It is written into the count whenever this work writes the record, and counted once.
+     */
+    const lost = (record.lost ?? 0) + (record.inFlight !== undefined ? 1 : 0);
     const keep = (next: Session, note?: AskNote): { record: SessionRecord; value: ViewReply } => {
       // The revision moves only when the session did: a saved answer given again changes nothing.
       // A question that was begun always moved it: its number is used, whatever came of it.
       const changed = begun || JSON.stringify(next) !== JSON.stringify(base.session);
       // Once something new is kept, the question that was begun is either in it or behind it.
       const { inFlight: _begun, ...settled } = base;
-      // A mark that was already there when this work started is a question that never finished.
-      const lost = (record.lost ?? 0) + (record.inFlight !== undefined ? 1 : 0);
       const kept = changed ? withHandles(c, { ...settled, session: next, revision: base.revision + 1, ...(lost > 0 ? { lost } : {}) }) : base;
       // This request holds the session, so a question still marked as begun is one that was lost.
       return { record: kept, value: replyOf(c, kept, false, note) };
@@ -408,14 +412,11 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
       // nothing is sent.
       if (!begun) {
         const n = record.session.asked + 1;
-        const admitted: SessionRecord = { ...record, session: { ...record.session, asked: n }, inFlight: n, revision: record.revision + 1 };
+        // The mark of an earlier lost question is replaced here, so that question goes into the count now.
+        const admitted: SessionRecord = { ...record, session: { ...record.session, asked: n }, inFlight: n, revision: record.revision + 1, ...(lost > 0 ? { lost } : {}) };
         await hold.save(admitted);
         base = admitted;
         begun = true;
-      } else {
-        // A further request of the same question: only if this worker still holds the session.
-        // A worker that stalled and lost it to another must send nothing more. This throws then.
-        await hold.check();
       }
       if (spent) return refuse(r);
       if (deps.allowance) {
@@ -426,6 +427,11 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
           return refuse(r);
         }
       }
+      // Last thing before the request goes to the spend guard, for the first request and every
+      // later one: does this worker still hold the session? A worker that stalled, here or
+      // while it waited above, and lost the session to another must send nothing more. This
+      // throws then.
+      await hold.check();
       return deps.metered(r);
     };
     const metered: Metered = model === "on" ? live : refuse;
