@@ -2,15 +2,15 @@ import { describe, expect, it } from "vitest";
 import { archivePass } from "../src/case/fixtures/archive";
 import type { Case } from "../src/case/schema";
 import { solve } from "../src/case/solver";
-import { inspectionMenu, topicMenu, type Session } from "../src/game/session";
+import { inspectionMenu, topicMenu } from "../src/game/session";
 import { noModel } from "../src/game/terminal";
 import { createMetered, type Metered } from "../src/metered";
 import { FakeProvider } from "../src/provider/fake";
 import type { ProviderRequest, ProviderResponse } from "../src/provider/types";
 import { usdToNano } from "../src/spend/pricing";
 import { MemorySpendStore } from "../src/spend/store";
-import { handle, MAX_BODY_BYTES, type ApiDeps, type ApiError, type CasesReply, type ViewReply } from "../src/web/api";
-import { memorySessions, type SessionStore } from "../src/web/sessions";
+import { caseVersion, handleRequest, MAX_BODY_BYTES, VISITOR_COOKIE, type ApiDeps, type ApiError, type CasesReply, type ViewReply } from "../src/web/api";
+import { memorySessions, type SessionRecord, type SessionStore } from "../src/web/sessions";
 import type { View } from "../src/web/view";
 import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
@@ -30,63 +30,95 @@ function wellBehaved(request: ProviderRequest): ProviderResponse {
   return { text: JSON.stringify({ assertions: recalled.statements.map((s) => s.id), line: `${recalled.statements.map((s) => s.en).join(" ")} Now leave me be.`, language: "en" }), toolCalls: [], usage, finishReason: "stop" };
 }
 
-function server(options: { cases?: Case[]; metered?: Metered; modelOff?: boolean; sessions?: SessionStore } = {}) {
+type Reply<T> = { status: number; raw: string; body: T; headers: Headers };
+
+function server(options: { cases?: Case[]; metered?: Metered; modelOff?: boolean; sessions?: SessionStore; now?: () => number } = {}) {
   let made = 0;
+  let secrets = 0;
   const deps: ApiDeps = {
     cases: options.cases ?? [archivePass, lighthouse],
-    sessions: options.sessions ?? memorySessions(),
+    sessions: options.sessions ?? memorySessions(options.now ? { now: options.now } : {}),
     metered: options.metered ?? noModel,
     modelOff: options.modelOff ?? true,
     newId: () => `00000000-0000-4000-8000-${String(++made).padStart(12, "0")}`,
+    newSecret: () => String(++secrets).padStart(64, "0"),
+    ...(options.now ? { now: options.now } : {}),
   };
-  const call = async <T = ViewReply>(method: string, path: string, body?: unknown) => {
-    const response = await handle(new Request(`http://game.test${path}`, { method, ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) }), deps);
-    const raw = await response.text();
-    return { status: response.status, raw, body: JSON.parse(raw) as T, headers: response.headers };
+  /** One browser: it keeps the cookie it is given and sends it back. */
+  const visitor = () => {
+    let cookie: string | null = null;
+    const call = async <T = ViewReply>(method: string, path: string, body?: unknown, extra: { origin?: string; https?: boolean; cookie?: string | null } = {}): Promise<Reply<T>> => {
+      const sent = extra.cookie === undefined ? cookie : extra.cookie;
+      const headers: Record<string, string> = { ...(sent ? { cookie: sent } : {}), ...(extra.origin ? { origin: extra.origin } : {}) };
+      const response = await handleRequest(new Request(`${extra.https ? "https" : "http"}://game.test${path}`, { method, headers, ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) }), deps);
+      const set = response.headers.get("set-cookie");
+      if (set && extra.cookie === undefined) cookie = set.split(";")[0]!;
+      const raw = await response.text();
+      return { status: response.status, raw, body: JSON.parse(raw) as T, headers: response.headers };
+    };
+    const start = async (caseId: string): Promise<View> => (await call("POST", "/api/sessions", { caseId })).body.view;
+    /** Act on the view just shown: its revision goes with the request. */
+    const act = <T = ViewReply>(view: View, action: "ask" | "inspect" | "accuse", body: Record<string, unknown>) => call<T>("POST", `/api/sessions/${view.session}/${action}`, { revision: view.revision, ...body });
+    return { call, start, act, cookie: () => cookie };
   };
-  const start = async (caseId: string): Promise<View> => (await call("POST", "/api/sessions", { caseId })).body.view;
-  return { deps, call, start };
+  return { deps, ...visitor(), visitor };
 }
 const live = (handler: (request: ProviderRequest) => ProviderResponse = wellBehaved, killSwitch?: () => boolean) => {
   const provider = new FakeProvider(handler);
   const metered = createMetered({ inputBound: { tokensPerByte: 100 }, provider, store: new MemorySpendStore(), envelope: "e", limitNano: usdToNano(1), ...(killSwitch ? { killSwitch } : {}) });
   return { provider, metered };
 };
+const stored = async (deps: ApiDeps, view: View): Promise<SessionRecord> => {
+  const record = await deps.sessions.read(view.session);
+  if (!record) throw new Error("no stored session");
+  return record;
+};
+/** The page's handle for one of the case's things, read from the stored record: what a test uses to name it. */
+const personOf = (c: Case, id: string) => `P${c.suspects.findIndex((s) => s.id === id) + 1}`;
+const topicOf = (record: SessionRecord, id: string) => `T${record.topics.indexOf(id) + 1}`;
+const inspectionOf = (record: SessionRecord, id: string) => `I${record.inspections.indexOf(id) + 1}`;
+
+/** Every id the case file gives anything. None may reach a page, before the verdict or after. */
+const authorIds = (c: Case): string[] => [
+  ...c.suspects.map((s) => s.id),
+  ...c.assertions.map((a) => a.id),
+  ...c.evidence.map((e) => e.id),
+  ...c.actions.topics.map((t) => t.id),
+  ...c.actions.inspections.map((i) => i.id),
+  ...c.motives.map((m) => m.id),
+  ...c.means.map((m) => m.id),
+  ...c.locations.map((l) => l.id),
+];
+const HIDDEN_KEYS = ["culprit", "whereabouts", "motives", "means", "lies", "assertions", "assertion", "proves", "yields", "requires", "briefing", "reveal", "verdict", "adjacent", "authoritative", "persona", "owner", "caseVersion", "mode", "suspect", "id"];
 
 /**
- * Everything in a case that a player has not been given: it must not be in any answer before
- * the verdict. What the player holds is read from the stored session through the game's own
- * functions, never from the view being checked.
+ * Nothing the player has not been given is in the answer. What the player holds is read from
+ * the stored session through the game's own functions, never from the view being checked.
  */
-function hidden(c: Case, s: Session): string[] {
-  const held = new Set(s.evidence);
-  const openTopics = new Set(c.suspects.flatMap((x) => topicMenu(c, s, x.id).map((t) => t.id)));
-  const openInspections = new Set(inspectionMenu(c, s).map((i) => i.id));
-  return [
-    // No assertion id at all: the page has no use for one.
-    ...c.assertions.map((a) => a.id),
-    // Evidence not held: its id and its words.
-    ...c.evidence.filter((e) => !held.has(e.id)).flatMap((e) => [e.id, e.text.en, e.text.zh]),
-    // Topics and inspections that are still locked.
-    // A locked topic's id, and its words unless an open topic is worded the same (every "Where were you at …?" is).
-    ...c.actions.topics.filter((t) => !openTopics.has(t.id)).flatMap((t) => [`"${t.id}"`, ...(c.actions.topics.some((o) => openTopics.has(o.id) && o.label.en === t.label.en) ? [] : [t.label.en, t.label.zh])]),
-    ...c.actions.inspections.filter((i) => !openInspections.has(i.id)).flatMap((i) => [i.id, i.label.en, i.label.zh]),
-    // Motive and means ids, and the motives' words unless a held item quotes them.
-    ...c.motives.map((m) => `"${m.id}"`),
-    ...c.means.map((m) => `"${m.id}"`),
-    ...c.locations.map((l) => `"${l.id}"`),
-  ];
-}
-const HIDDEN_KEYS = ["culprit", "whereabouts", "motives", "means", "lies", "assertions", "assertion", "proves", "yields", "requires", "briefing", "reveal", "verdict", "adjacent", "authoritative"];
 async function expectNothingHidden(deps: ApiDeps, c: Case, raw: string, view: View, where: string) {
-  const session = await deps.sessions.read(view.session);
-  if (!session) throw new Error(`no stored session for ${where}`);
-  for (const secret of hidden(c, session)) expect(raw, `${where}: ${secret}`).not.toContain(secret);
+  const record = await stored(deps, view);
+  const s = record.session;
+  const held = new Set(s.evidence);
+  const openTopics = c.suspects.flatMap((x) => topicMenu(c, s, x.id).map((t) => ({ ...t, suspect: x.id })));
+  const openInspections = inspectionMenu(c, s);
+  const secrets = [
+    // The words of evidence not held, and of topics and inspections still locked (unless something open is worded the same).
+    ...c.evidence.filter((e) => !held.has(e.id)).flatMap((e) => [e.text.en, e.text.zh]),
+    ...c.actions.topics.filter((t) => !openTopics.some((o) => o.id === t.id || o.label.en === t.label.en)).flatMap((t) => [t.label.en, t.label.zh]),
+    ...c.actions.inspections.filter((i) => !openInspections.some((o) => o.id === i.id)).flatMap((i) => [i.label.en, i.label.zh]),
+    // No id from the case file, quoted as a JSON string value.
+    ...authorIds(c).map((id) => `"${id}"`),
+    // The hash of the visitor's secret never comes back in a body.
+    record.owner,
+  ];
+  for (const secret of secrets) expect(raw, `${where}: ${secret}`).not.toContain(secret);
   for (const key of HIDDEN_KEYS) expect(raw, `${where}: key ${key}`).not.toContain(`"${key}":`);
-  // And the view shows exactly what the session holds and offers, no more and no less.
-  expect(view.evidence.map((e) => e.id), where).toEqual(session.evidence);
-  expect(view.topics.map((t) => `${t.suspect} ${t.id} ${t.heard}`).sort(), where).toEqual(c.suspects.flatMap((x) => topicMenu(c, session, x.id).map((t) => `${x.id} ${t.id} ${t.heard}`)).sort());
-  expect(view.inspections.map((i) => i.id), where).toEqual(inspectionMenu(c, session).map((i) => i.id));
+  // And the view shows exactly what the session holds and offers, no more and no less, under its own handles.
+  expect(view.evidence.map((e) => e.handle), where).toEqual(s.evidence.map((_e, i) => `E${i + 1}`));
+  expect(view.evidence.map((e) => e.text), where).toEqual(s.evidence.map((id) => c.evidence.find((e) => e.id === id)!.text));
+  expect(view.topics.map((t) => `${t.handle} ${t.person} ${t.heard}`).sort(), where).toEqual(openTopics.map((t) => `${topicOf(record, t.id)} ${personOf(c, t.suspect)} ${t.heard}`).sort());
+  expect(view.inspections.map((i) => `${i.handle} ${i.done}`).sort(), where).toEqual(openInspections.map((i) => `${inspectionOf(record, i.id)} ${i.done}`).sort());
+  expect(view.revision, where).toBe(record.revision);
 }
 
 describe("the game over HTTP, with the model off", () => {
@@ -95,6 +127,7 @@ describe("the game over HTTP, with the model off", () => {
     const r = await call<CasesReply>("GET", "/api/cases");
     expect(r.status).toBe(200);
     expect(r.headers.get("cache-control")).toBe("no-store");
+    expect(r.headers.get("set-cookie")).toBeNull();
     expect(r.body).toEqual({
       model: "off",
       cases: [
@@ -109,13 +142,13 @@ describe("the game over HTTP, with the model off", () => {
     const r = await call("POST", "/api/sessions", { caseId: lighthouse.id });
     expect(r.status).toBe(201);
     const view = r.body.view;
-    expect(view).toMatchObject({ session: "00000000-0000-4000-8000-000000000001", caseId: lighthouse.id, title: lighthouse.title, model: "off", over: false, cost: { requests: 0, nano: 0 } });
+    expect(view).toMatchObject({ session: "00000000-0000-4000-8000-000000000001", revision: 1, caseId: lighthouse.id, title: lighthouse.title, model: "off", over: false, cost: { requests: 0, nano: 0 } });
     expect(view.actions).toEqual({ used: 0, cap: lighthouse.sessionCap, left: lighthouse.sessionCap });
-    expect(view.people).toHaveLength(20);
-    expect(view.people[0]).toEqual({ id: lighthouse.suspects[0]!.id, name: lighthouse.suspects[0]!.name, role: lighthouse.suspects[0]!.role, persona: lighthouse.suspects[0]!.persona });
+    // People are P1 … in the roster's order, with a name and a role and nothing else.
+    expect(view.people).toEqual(lighthouse.suspects.map((s, i) => ({ handle: `P${i + 1}`, name: s.name, role: s.role })));
     expect(view.rules).toHaveLength(4);
     expect(view.rules[3]!.zh).toContain("房间记录只列出在那里被看到的人");
-    expect(view.evidence.map((e) => e.id)).toEqual(lighthouse.briefing.evidence);
+    expect(view.evidence.map((e) => e.handle)).toEqual(lighthouse.briefing.evidence.map((_e, i) => `E${i + 1}`));
     // The keeper's note is marked as a note, and it is the only one.
     expect(view.evidence.filter((e) => e.note)).toHaveLength(1);
     expect(view.statements).toEqual([]);
@@ -125,28 +158,49 @@ describe("the game over HTTP, with the model off", () => {
     await expectNothingHidden(deps, lighthouse, r.raw, view, "opening");
     // The view is an allow-list. A field that is not named here is not sent: adding one means changing this test.
     expect(Object.keys(view).sort()).toEqual(
-      ["actions", "caseId", "cost", "evidence", "inspections", "model", "noteMark", "over", "people", "rooms", "rules", "session", "setting", "slots", "statements", "title", "topics", "transcript", "victim"].sort(),
+      ["actions", "caseId", "cost", "evidence", "inspections", "model", "noteMark", "over", "people", "revision", "rooms", "rules", "session", "setting", "slots", "statements", "title", "topics", "transcript", "victim"].sort(),
     );
-    expect(Object.keys(view.people[0]!).sort()).toEqual(["id", "name", "persona", "role"]);
-    expect(Object.keys(view.evidence[0]!).sort()).toEqual(["id", "note", "text"]);
-    expect(Object.keys(view.topics[0]!).sort()).toEqual(["heard", "id", "label", "suspect"]);
-    expect(Object.keys(view.inspections[0]!).sort()).toEqual(["done", "id", "label"]);
+    expect(Object.keys(view.evidence[0]!).sort()).toEqual(["handle", "note", "text"]);
+    expect(Object.keys(view.topics[0]!).sort()).toEqual(["handle", "heard", "label", "person"]);
+    expect(Object.keys(view.inspections[0]!).sort()).toEqual(["done", "handle", "label"]);
     expect(Object.keys(view.victim).sort()).toEqual(["cause", "died", "found", "name"]);
     // The same view again by GET.
     expect((await call("GET", `/api/sessions/${view.session}`)).body.view).toEqual(view);
   });
 
+  it("opens the same way whoever did it: two cases with the same public facts and different culprits", async () => {
+    const a = lighthousePeople.suspects.find((s) => s.id === "s-01")!;
+    const b = lighthousePeople.suspects.find((s) => s.id === "s-03")!;
+    const swapped = compilePlot("lighthouse", lighthouseSkeleton, {
+      culprit: "s-01",
+      suspects: lighthousePeople.suspects.map((s) => (s.id === "s-01" ? { ...s, whereabouts: b.whereabouts } : s.id === "s-03" ? { ...s, whereabouts: a.whereabouts } : s)),
+    });
+    if (!swapped.ok) throw new Error("expected a case");
+    expect(swapped.case.culprit.suspect).not.toBe(lighthouse.culprit.suspect);
+    const one = server({ cases: [lighthouse] });
+    const two = server({ cases: [swapped.case] });
+    const first = await one.call("POST", "/api/sessions", { caseId: lighthouse.id });
+    const second = await two.call("POST", "/api/sessions", { caseId: lighthouse.id });
+    // Byte for byte: every field, key, handle, order and length.
+    expect(second.raw).toBe(first.raw);
+    // And still the same after the keeper has been heard, in either language.
+    const keeper = lighthouse.actions.topics.find((t) => lighthouse.actions.inspections.some((i) => i.requires?.some((need) => t.yields.includes(need))))!;
+    const x = await one.act(first.body.view, "ask", { topic: topicOf(await stored(one.deps, first.body.view), keeper.id), language: "zh" });
+    const y = await two.act(second.body.view, "ask", { topic: topicOf(await stored(two.deps, second.body.view), keeper.id), language: "zh" });
+    expect(x.status).toBe(200);
+    expect(y.raw).toBe(x.raw);
+  });
+
   for (const c of [archivePass, lighthouse]) {
     it(`plays ${c.id} along the solver's own proof to a solved case, and nothing hidden is sent on the way`, async () => {
-      const { call, start, deps } = server();
+      const { act, start, deps } = server();
       let view = await start(c.id);
       const proof = solve(c).proof!;
       for (const step of proof.actions) {
-        const r =
-          step.type === "inspection"
-            ? await call("POST", `/api/sessions/${view.session}/inspect`, { inspection: step.id })
-            : await call("POST", `/api/sessions/${view.session}/ask`, { suspect: c.actions.topics.find((t) => t.id === step.id)!.suspect, topic: step.id, language: "zh" });
+        const record = await stored(deps, view);
+        const r = step.type === "inspection" ? await act(view, "inspect", { inspection: inspectionOf(record, step.id) }) : await act(view, "ask", { topic: topicOf(record, step.id), language: "zh" });
         expect(r.status, `${step.type} ${step.id}`).toBe(200);
+        expect(r.body.view.revision).toBe(view.revision + 1);
         view = r.body.view;
         await expectNothingHidden(deps, c, r.raw, view, `${step.type} ${step.id}`);
       }
@@ -155,274 +209,220 @@ describe("the game over HTTP, with the model off", () => {
       expect(view.transcript.every((t) => t.source === "rendered" && t.language === "zh")).toBe(true);
       expect(view.cost).toEqual({ requests: 0, nano: 0 });
 
-      const accused = await call("POST", `/api/sessions/${view.session}/accuse`, { suspect: c.culprit.suspect, evidence: view.evidence.map((e) => e.id) });
+      const accused = await act(view, "accuse", { person: personOf(c, c.culprit.suspect), evidence: view.evidence.map((e) => e.handle) });
       expect(accused.status).toBe(200);
       const end = accused.body.view;
       expect(end.over).toBe(true);
-      expect(end.verdict).toMatchObject({ accused: c.culprit.suspect, outcome: "solved", missing: [], open: [], accusedRuledOut: false });
-      // The truth is sent now, and only now: in words, not in the case file's ids.
-      expect(end.reveal!.culprit).toBe(c.culprit.suspect);
+      expect(end.verdict).toMatchObject({ accused: personOf(c, c.culprit.suspect), cited: view.evidence.map((e) => e.handle), outcome: "solved", missing: [], open: [], accusedRuledOut: false });
+      // The truth is sent now, and only now: in words and handles, never in the case file's ids.
+      expect(end.reveal!.culprit).toBe(personOf(c, c.culprit.suspect));
       expect(end.reveal!.motive).toEqual(c.motives.find((m) => m.id === c.culprit.motive)!.text);
-      expect(end.reveal!.timeline).toHaveLength(c.suspects.length);
+      expect(end.reveal!.timeline.map((row) => row.person)).toEqual(c.suspects.map((_s, i) => `P${i + 1}`));
       expect(end.reveal!.timeline[0]!.at.map((x) => x.slot)).toEqual(c.slots);
       expect(end.reveal!.lies).toHaveLength(c.suspects.reduce((n, s) => n + s.lies.length, 0));
-      for (const a of c.assertions) expect(accused.raw).not.toContain(`"${a.id}"`);
+      for (const id of authorIds(c)) expect(accused.raw, id).not.toContain(`"${id}"`);
       // And the game is over.
-      expect((await call<ApiError>("POST", `/api/sessions/${view.session}/inspect`, { inspection: c.actions.inspections[0]!.id })).body.error.code).toBe("over");
-      expect((await call<ApiError>("POST", `/api/sessions/${view.session}/accuse`, { suspect: c.culprit.suspect, evidence: [] })).body.error.code).toBe("over");
+      expect((await act<ApiError>(end, "inspect", { inspection: "I1" })).body.error.code).toBe("over");
+      expect((await act<ApiError>(end, "accuse", { person: "P1", evidence: [] })).body.error.code).toBe("over");
     });
   }
 
+  it("a handle is kept for good: a record that opens later is numbered after the ones already there", async () => {
+    const { act, start, deps } = server();
+    let view = await start(lighthouse.id);
+    const before = view.inspections.map((i) => `${i.handle} ${i.label.en}`);
+    const scene = lighthouse.actions.inspections.find((i) => i.requires?.length)!;
+    const keeper = lighthouse.actions.topics.find((t) => scene.requires!.some((need) => t.yields.includes(need)))!;
+    // The scene's record is first in the case file and is not on the menu yet.
+    expect(lighthouse.actions.inspections[0]!.id).toBe(scene.id);
+    expect(before).toHaveLength(lighthouse.actions.inspections.length - 1);
+    view = (await act(view, "ask", { topic: topicOf(await stored(deps, view), keeper.id) })).body.view;
+    // It opens as the last number. Nothing that was there has moved.
+    expect(view.inspections.map((i) => `${i.handle} ${i.label.en}`)).toEqual([...before, `I${before.length + 1} ${scene.label.en}`]);
+    // An inspection made keeps its handle and is marked done.
+    view = (await act(view, "inspect", { inspection: "I1" })).body.view;
+    expect(view.inspections[0]).toMatchObject({ handle: "I1", done: true });
+    expect(view.evidence.at(-1)!.handle).toBe(`E${lighthouse.briefing.evidence.length + 1}`);
+  });
+
   it("shows a contradiction on the statement it is against, by the evidence that is held", async () => {
-    const { call, start } = server();
+    const { act, start, deps } = server();
     let view = await start(archivePass.id);
     const caught = solve(archivePass).caughtLies[0]!;
     for (const step of solve(archivePass).proof!.actions) {
-      const path = step.type === "inspection" ? "inspect" : "ask";
-      const body = step.type === "inspection" ? { inspection: step.id } : { suspect: archivePass.actions.topics.find((t) => t.id === step.id)!.suspect, topic: step.id };
-      view = (await call("POST", `/api/sessions/${view.session}/${path}`, body)).body.view;
+      const record = await stored(deps, view);
+      view = (step.type === "inspection" ? await act(view, "inspect", { inspection: inspectionOf(record, step.id) }) : await act(view, "ask", { topic: topicOf(record, step.id) })).body.view;
     }
     // Hear the lie, if the proof did not already.
     const lieTopic = archivePass.actions.topics.find((t) => t.suspect === caught.suspect && t.yields.includes(caught.assertion))!;
-    view = (await call("POST", `/api/sessions/${view.session}/ask`, { suspect: caught.suspect, topic: lieTopic.id })).body.view;
+    view = (await act(view, "ask", { topic: topicOf(await stored(deps, view), lieTopic.id) })).body.view;
     const against = view.statements.filter((s) => s.contradictedBy.length > 0);
     expect(against.length).toBeGreaterThan(0);
-    expect(against[0]!.suspect).toBe(caught.suspect);
-    for (const id of against[0]!.contradictedBy) expect(view.evidence.map((e) => e.id)).toContain(id);
+    expect(against[0]!.person).toBe(personOf(archivePass, caught.suspect));
+    for (const handle of against[0]!.contradictedBy) expect(view.evidence.map((e) => e.handle)).toContain(handle);
+    expect(Object.keys(against[0]!).sort()).toEqual(["contradictedBy", "key", "person", "text", "turn"]);
+  });
+
+  it("gives a topic heard before again in the other language, at no cost, and keeps the transcript as it was first heard", async () => {
+    const { act, start } = server();
+    let view = await start(archivePass.id);
+    const first = await act(view, "ask", { topic: "T1", language: "en" });
+    view = first.body.view;
+    expect(first.body.ask).toMatchObject({ replayed: false, recorded: true, shown: { language: "en", source: "rendered" } });
+    expect(first.body.ask!.shown!.line).toBe(view.transcript[0]!.line);
+    const again = await act(view, "ask", { topic: "T1", language: "zh" });
+    expect(again.status).toBe(200);
+    // The answer as shown now is the Chinese one …
+    expect(again.body.ask).toMatchObject({ replayed: true, recorded: true, shown: { person: view.transcript[0]!.person, language: "zh" } });
+    expect(again.body.ask!.shown!.line).toMatch(/[一-鿿]/);
+    expect(again.body.ask!.shown!.line).not.toBe(view.transcript[0]!.line);
+    // … nothing was used, nothing changed, and the revision did not move.
+    expect(again.body.view).toEqual(view);
   });
 
   it("a right name without the proof is right but unproven, and a wrong name is wrong: the scorer decides", async () => {
-    const { call, start } = server();
+    const { act, start } = server();
     const a = await start(lighthouse.id);
-    const early = (await call("POST", `/api/sessions/${a.session}/accuse`, { suspect: lighthouse.culprit.suspect, evidence: a.evidence.map((e) => e.id) })).body.view;
+    const early = (await act(a, "accuse", { person: personOf(lighthouse, lighthouse.culprit.suspect), evidence: a.evidence.map((e) => e.handle) })).body.view;
     expect(early.verdict!.outcome).toBe("right-but-unproven");
     expect(early.verdict!.open.length).toBeGreaterThan(0);
+    expect(early.verdict!.open.every((p) => /^P\d+$/.test(p))).toBe(true);
     const b = await start(lighthouse.id);
     const other = lighthouse.suspects.find((s) => s.id !== lighthouse.culprit.suspect)!.id;
-    const wrong = (await call("POST", `/api/sessions/${b.session}/accuse`, { suspect: other, evidence: [] })).body.view;
+    const wrong = (await act(b, "accuse", { person: personOf(lighthouse, other), evidence: [] })).body.view;
     expect(wrong.verdict!.outcome).toBe("wrong");
     // The reveal is the same truth either way.
-    expect(wrong.reveal!.culprit).toBe(lighthouse.culprit.suspect);
+    expect(wrong.reveal!.culprit).toBe(personOf(lighthouse, lighthouse.culprit.suspect));
   });
 
   it("a question in the player's own words is not asked, and uses nothing", async () => {
-    const { call, start } = server();
+    const { act, call, start } = server();
     const view = await start(archivePass.id);
-    const r = await call<ApiError>("POST", `/api/sessions/${view.session}/ask`, { suspect: archivePass.suspects[0]!.id, question: "Where were you?" });
+    const r = await act<ApiError>(view, "ask", { person: "P1", question: "Where were you?" });
     expect(r.status).toBe(409);
     expect(r.body.error.code).toBe("model-off");
     expect((await call("GET", `/api/sessions/${view.session}`)).body.view).toEqual(view);
   });
-
-  it("keeps sessions apart", async () => {
-    const { call, start } = server();
-    const a = await start(lighthouse.id);
-    const b = await start(lighthouse.id);
-    expect(a.session).not.toBe(b.session);
-    await call("POST", `/api/sessions/${a.session}/inspect`, { inspection: a.inspections[0]!.id });
-    expect((await call("GET", `/api/sessions/${a.session}`)).body.view.actions.used).toBe(1);
-    expect((await call("GET", `/api/sessions/${b.session}`)).body.view).toEqual(b);
-  });
 });
 
-describe("what the server says when it cannot do what was asked", () => {
-  it("answers with a fixed code and a fixed sentence in both languages, and nothing else", async () => {
-    const { call, start } = server();
+describe("who may touch a session", () => {
+  it("gives a visitor a secret in a cookie the page cannot read, once, and keeps only its hash", async () => {
+    const { call, deps } = server();
+    const secret = `${"0".repeat(63)}1`;
+    const first = await call("POST", "/api/sessions", { caseId: archivePass.id });
+    expect(first.headers.get("set-cookie")).toBe(`${VISITOR_COOKIE}=${secret}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=604800`);
+    // Over https it is also marked Secure.
+    const fresh = server();
+    expect((await fresh.call("POST", "/api/sessions", { caseId: archivePass.id }, { https: true })).headers.get("set-cookie")).toMatch(/; Secure$/);
+    // A visitor who already has one is not given another, and owns both sessions.
+    const second = await call("POST", "/api/sessions", { caseId: lighthouse.id });
+    expect(second.headers.get("set-cookie")).toBeNull();
+    const records = [await stored(deps, first.body.view), await stored(deps, second.body.view)];
+    expect(records[0]!.owner).toBe(records[1]!.owner);
+    // The secret is nowhere in what is kept, nor in any body; nor is its hash in a body.
+    expect(JSON.stringify(records)).not.toContain(secret);
+    expect(first.raw).not.toContain(secret);
+    expect(first.raw).not.toContain(records[0]!.owner);
+    // The session's id, which is in the path and the view, is a locator and nothing more.
+    expect(records[0]!.session.id).toBe(first.body.view.session);
+    expect(first.body.view.session).not.toBe(secret);
+  });
+
+  it("a session asked for by anyone else answers exactly like one that does not exist, and is not touched", async () => {
+    const { visitor, start, act, call } = server();
     const view = await start(lighthouse.id);
     const at = `/api/sessions/${view.session}`;
-    const locked = lighthouse.actions.inspections.find((i) => !view.inspections.some((open) => open.id === i.id))!;
-    const cases: [string, string, unknown, number, string][] = [
-      ["GET", "/nothing", undefined, 404, "not-found"],
-      ["GET", "/api/nothing", undefined, 404, "not-found"],
-      ["POST", "/api/cases", {}, 405, "method"],
-      ["GET", "/api/sessions", undefined, 405, "method"],
-      ["DELETE", at, undefined, 405, "method"],
-      ["GET", `${at}/ask`, undefined, 405, "method"],
-      ["POST", `${at}/reveal`, {}, 404, "not-found"],
-      ["POST", "/api/sessions", "not json", 400, "bad-request"],
-      ["POST", "/api/sessions", [], 400, "bad-request"],
-      ["POST", "/api/sessions", {}, 400, "bad-request"],
-      ["POST", "/api/sessions", { caseId: 7 }, 400, "bad-request"],
-      ["POST", "/api/sessions", { caseId: "no-such-case" }, 404, "not-found"],
-      ["POST", "/api/sessions", { caseId: "x".repeat(MAX_BODY_BYTES) }, 400, "bad-request"],
-      // A body that is too large is not read, even when what it asks for is well formed.
-      ["POST", "/api/sessions", { caseId: lighthouse.id, pad: "x".repeat(MAX_BODY_BYTES) }, 400, "bad-request"],
-      ["GET", "/api/sessions/00000000-0000-4000-8000-999999999999", undefined, 404, "not-found"],
-      ["GET", "/api/sessions/not-an-id", undefined, 404, "not-found"],
-      ["POST", "/api/sessions/00000000-0000-4000-8000-999999999999/inspect", { inspection: "i-01" }, 404, "not-found"],
-      ["POST", `${at}/inspect`, {}, 400, "bad-request"],
-      ["POST", `${at}/inspect`, { inspection: "no-such-thing" }, 404, "not-available"],
-      ["POST", `${at}/inspect`, { inspection: locked.id }, 404, "not-available"],
-      ["POST", `${at}/ask`, { suspect: "nobody", topic: "t-01" }, 404, "not-available"],
-      ["POST", `${at}/ask`, { suspect: lighthouse.suspects[0]!.id, topic: "no-such-topic" }, 404, "not-available"],
-      ["POST", `${at}/ask`, { suspect: lighthouse.suspects[0]!.id }, 400, "bad-request"],
-      ["POST", `${at}/accuse`, { suspect: lighthouse.suspects[0]!.id }, 400, "bad-request"],
-      ["POST", `${at}/accuse`, { suspect: lighthouse.suspects[0]!.id, evidence: "all" }, 400, "bad-request"],
-      ["POST", `${at}/accuse`, { suspect: lighthouse.suspects[0]!.id, evidence: [7] }, 400, "bad-request"],
-      ["POST", `${at}/accuse`, { suspect: "nobody", evidence: [] }, 404, "not-available"],
-      ["POST", `${at}/accuse`, { suspect: lighthouse.suspects[0]!.id, evidence: [locked.yields[0]] }, 400, "not-held"],
-    ];
-    for (const [method, path, body, status, code] of cases) {
-      const r = await call<ApiError>(method, path, body);
-      const what = `${method} ${path} ${JSON.stringify(body)?.slice(0, 40)}`;
-      expect(r.status, what).toBe(status);
-      expect(r.body.error.code, what).toBe(code);
-      expect(Object.keys(r.body), what).toEqual(["error"]);
-      expect(Object.keys(r.body.error), what).toEqual(["code", "text"]);
-      expect(r.body.error.text.en, what).not.toMatch(/[一-鿿]/);
-      expect(r.body.error.text.zh, what).toMatch(/[一-鿿]/);
-      // Nothing of the case is in an error.
-      for (const s of lighthouse.suspects) expect(r.raw, what).not.toContain(s.id);
-      for (const e of lighthouse.evidence) expect(r.raw, what).not.toContain(e.id);
+    const stranger = visitor();
+    await stranger.start(archivePass.id); // The stranger has a cookie of their own.
+    const nobody = await stranger.call("GET", "/api/sessions/00000000-0000-4000-8000-999999999999");
+    expect(nobody.status).toBe(404);
+    for (const r of [
+      await stranger.call("GET", at),
+      await stranger.call("GET", at, undefined, { cookie: null }),
+      await stranger.call("GET", at, undefined, { cookie: `${VISITOR_COOKIE}=not-a-secret` }),
+      await stranger.call("GET", at, undefined, { cookie: `${VISITOR_COOKIE}=${"f".repeat(64)}` }),
+      await stranger.call("GET", at, undefined, { cookie: `other=${"0".repeat(63)}1` }),
+      await stranger.call("POST", `${at}/inspect`, { revision: view.revision, inspection: "I1" }),
+      await stranger.call("POST", `${at}/accuse`, { revision: view.revision, person: "P1", evidence: [] }),
+      await stranger.call("GET", "/api/sessions/whatever"),
+    ]) {
+      expect(r.raw).toBe(nobody.raw);
     }
-    // None of it changed the session.
+    // The owner's session is as it was, and the owner still plays it.
     expect((await call("GET", at)).body.view).toEqual(view);
+    expect((await act(view, "inspect", { inspection: "I1" })).status).toBe(200);
   });
 
-  it("a locked thing and a thing that does not exist get the very same answer", async () => {
+  it("refuses a request to change something that comes from another site's page", async () => {
     const { call, start } = server();
     const view = await start(lighthouse.id);
     const at = `/api/sessions/${view.session}`;
-    const locked = lighthouse.actions.inspections.find((i) => !view.inspections.some((open) => open.id === i.id))!;
-    const a = await call("POST", `${at}/inspect`, { inspection: locked.id });
-    const b = await call("POST", `${at}/inspect`, { inspection: "i-99" });
-    expect(a.status).toBe(b.status);
-    expect(a.raw).toBe(b.raw);
-    const unknown = await call("GET", "/api/sessions/00000000-0000-4000-8000-999999999999");
-    const malformed = await call("GET", "/api/sessions/whatever");
-    expect(unknown.raw).toBe(malformed.raw);
-  });
-
-  it("a topic that is still locked is not shown, cannot be asked, and opens when what it needs is held", async () => {
-    // The last person's topic now needs the scene's record, which the player does not hold at the start.
-    const scene = lighthouse.actions.inspections.find((i) => i.requires?.length)!;
-    const gated = lighthouse.actions.topics.at(-1)!;
-    const c: Case = { ...lighthouse, actions: { ...lighthouse.actions, topics: lighthouse.actions.topics.map((t) => (t.id === gated.id ? { ...t, requires: [scene.yields[0]!] } : t)) } };
-    const { call, start, deps } = server({ cases: [c] });
-    const opening = await call("POST", "/api/sessions", { caseId: c.id });
-    let view = opening.body.view;
-    expect(view.topics).toHaveLength(c.actions.topics.length - 1);
-    expect(view.topics.some((t) => t.id === gated.id)).toBe(false);
-    await expectNothingHidden(deps, c, opening.raw, view, "opening with a locked topic");
-    const at = `/api/sessions/${view.session}`;
-    const locked = await call("POST", `${at}/ask`, { suspect: gated.suspect, topic: gated.id });
-    const missing = await call("POST", `${at}/ask`, { suspect: gated.suspect, topic: "t-99" });
-    expect(locked.status).toBe(404);
-    expect(locked.raw).toBe(missing.raw);
-    // Hear the keeper, read the scene: the topic opens.
-    const keeper = c.actions.topics.find((t) => scene.requires!.some((need) => t.yields.includes(need)))!;
-    await call("POST", `${at}/ask`, { suspect: keeper.suspect, topic: keeper.id });
-    const after = await call("POST", `${at}/inspect`, { inspection: scene.id });
-    view = after.body.view;
-    expect(view.topics.find((t) => t.id === gated.id)).toMatchObject({ suspect: gated.suspect, heard: false });
-    expect(view.topics.find((t) => t.id === keeper.id)).toMatchObject({ heard: true });
-    await expectNothingHidden(deps, c, after.raw, view, "after the scene");
-    expect((await call("POST", `${at}/ask`, { suspect: gated.suspect, topic: gated.id })).status).toBe(200);
-  });
-
-  it("stops at the action cap, and still lets the player accuse", async () => {
-    const short = { ...archivePass, sessionCap: 1 };
-    const { call, start } = server({ cases: [short] });
-    const view = await start(short.id);
-    const at = `/api/sessions/${view.session}`;
-    expect((await call("POST", `${at}/inspect`, { inspection: view.inspections[0]!.id })).body.view.actions.left).toBe(0);
-    const topic = view.topics[0]!;
-    const refused = await call<ApiError>("POST", `${at}/ask`, { suspect: topic.suspect, topic: topic.id });
-    expect([refused.status, refused.body.error.code]).toEqual([409, "cap"]);
-    expect((await call("POST", `${at}/accuse`, { suspect: short.suspects[0]!.id, evidence: [] })).body.view.over).toBe(true);
-  });
-
-  it("says nothing of what went wrong inside when the server itself fails", async () => {
-    const broken: SessionStore = {
-      create: async () => {
-        throw new Error(`cannot store the case whose culprit is ${lighthouse.culprit.suspect}`);
-      },
-      read: async () => {
-        throw new Error("redis is down at 10.0.0.7");
-      },
-      update: async () => {
-        throw new Error("boom");
-      },
-    };
-    const { call } = server({ sessions: broken });
-    for (const [method, path, body] of [
-      ["POST", "/api/sessions", { caseId: lighthouse.id }],
-      ["GET", "/api/sessions/00000000-0000-4000-8000-000000000001", undefined],
-      ["POST", "/api/sessions/00000000-0000-4000-8000-000000000001/inspect", { inspection: "i-01" }],
-    ] as const) {
-      const r = await call<ApiError>(method, path, body);
-      expect(r.status).toBe(500);
-      expect(r.body).toEqual({ error: { code: "server", text: { en: "Something went wrong on the server. Nothing was changed.", zh: "服务器出了问题。没有做任何改动。" } } });
+    for (const origin of ["https://evil.example", "http://game.test.evil.example", "null", "not a url"]) {
+      const r = await call<ApiError>("POST", `${at}/inspect`, { revision: view.revision, inspection: "I1" }, { origin });
+      expect([r.status, r.body.error.code], origin).toEqual([403, "forbidden"]);
+      expect((await call<ApiError>("POST", "/api/sessions", { caseId: lighthouse.id }, { origin })).body.error.code).toBe("forbidden");
     }
+    expect((await call("GET", at)).body.view).toEqual(view);
+    // The game's own page is let through.
+    expect((await call("POST", `${at}/inspect`, { revision: view.revision, inspection: "I1" }, { origin: "http://game.test" })).status).toBe(200);
+  });
+
+  it("a session ends when it is too old, and when its case has changed under it", async () => {
+    let clock = 1_000;
+    const old = server({ now: () => clock });
+    const view = await old.start(lighthouse.id);
+    clock += 24 * 60 * 60 * 1_000 - 1;
+    expect((await old.call("GET", `/api/sessions/${view.session}`)).status).toBe(200);
+    clock += 1;
+    expect((await old.call("GET", `/api/sessions/${view.session}`)).status).toBe(404);
+    expect((await old.act<ApiError>(view, "inspect", { inspection: "I1" })).status).toBe(404);
+
+    // The library now holds another version of the case the session began on.
+    const cases = [lighthouse];
+    const moved = server({ cases });
+    const begun = await moved.start(lighthouse.id);
+    const edited: Case = { ...lighthouse, sessionCap: lighthouse.sessionCap + 1 };
+    expect(caseVersion(edited)).not.toBe(caseVersion(lighthouse));
+    cases[0] = edited;
+    const read = await moved.call<ApiError>("GET", `/api/sessions/${begun.session}`);
+    expect([read.status, read.body.error.code]).toEqual([410, "expired"]);
+    const acted = await moved.act<ApiError>(begun, "inspect", { inspection: "I1" });
+    expect([acted.status, acted.body.error.code]).toEqual([410, "expired"]);
+    // A new session on the new version is fine.
+    expect((await moved.call("POST", "/api/sessions", { caseId: lighthouse.id })).status).toBe(201);
   });
 });
 
-describe("the game over HTTP, with a model", () => {
-  it("shows the suspect's own line for a typed question, notes the statement, and counts the cost", async () => {
-    const { provider, metered } = live();
-    const { call, start, deps } = server({ metered, modelOff: false });
-    const view = await start(archivePass.id);
-    expect(view.model).toBe("on");
-    const suspect = archivePass.suspects[0]!.id;
-    const r = await call("POST", `/api/sessions/${view.session}/ask`, { suspect, question: "Where were you at nine?" });
-    expect(r.status).toBe(200);
-    expect(r.body.ask).toEqual({ replayed: false, recorded: true });
-    const turn = r.body.view.transcript[0]!;
-    expect(turn).toMatchObject({ n: 1, suspect, question: "Where were you at nine?", source: "model", language: "en" });
-    expect(turn.line).toContain("Now leave me be.");
-    expect(turn.noted).toBeGreaterThan(0);
-    expect(Object.keys(turn).sort()).toEqual(["language", "line", "n", "noted", "question", "source", "suspect"]);
-    expect(Object.keys(r.body.view.statements[0]!).sort()).toEqual(["contradictedBy", "key", "suspect", "text", "turn"]);
-    expect(r.body.view.statements).toHaveLength(turn.noted);
-    expect(provider.dispatched).toBe(2);
-    expect(r.body.view.cost.requests).toBe(2);
-    expect(r.body.view.cost.nano).toBeGreaterThan(0);
-    expect(r.body.view.actions.used).toBe(1);
-    await expectNothingHidden(deps, archivePass, r.raw, r.body.view, "typed question");
-    // The model's rejected lines, if any, and its raw replies are never part of a view.
-    expect(r.raw).not.toContain("rejections");
-    expect(r.raw).not.toContain("call_1");
-    // The same question again is the saved turn: nothing is sent and nothing is used.
-    const again = await call("POST", `/api/sessions/${view.session}/ask`, { suspect, question: "Where were you at nine?" });
-    expect(again.body.ask).toMatchObject({ replayed: true, recorded: true });
-    expect(provider.dispatched).toBe(2);
-    expect(again.body.view.actions.used).toBe(1);
+describe("once only", () => {
+  it("a request made on a view the session has left behind is refused, and does nothing", async () => {
+    const { act, call, start } = server();
+    const shown = await start(lighthouse.id);
+    const next = (await act(shown, "inspect", { inspection: "I1" })).body.view;
+    expect(next.revision).toBe(shown.revision + 1);
+    // The same click delivered again, a different action from a tab left open, and a revision from the future.
+    for (const [action, body] of [
+      ["inspect", { revision: shown.revision, inspection: "I1" }],
+      ["inspect", { revision: shown.revision, inspection: "I2" }],
+      ["ask", { revision: shown.revision, topic: "T1" }],
+      ["accuse", { revision: shown.revision, person: "P1", evidence: [] }],
+      ["inspect", { revision: next.revision + 1, inspection: "I2" }],
+    ] as const) {
+      const r = await call<ApiError>("POST", `/api/sessions/${shown.session}/${action}`, body);
+      expect([r.status, r.body.error.code], JSON.stringify(body)).toEqual([409, "stale"]);
+    }
+    // Nothing was done: one action used, no accusation. The page reads, and goes on from there.
+    const now = (await call("GET", `/api/sessions/${shown.session}`)).body.view;
+    expect(now).toEqual(next);
+    expect((await act(now, "inspect", { inspection: "I2" })).body.view.actions.used).toBe(2);
   });
 
-  it("refuses a question with no words or too many, before anything is sent", async () => {
-    const { provider, metered } = live();
-    const { call, start } = server({ metered, modelOff: false });
-    const view = await start(archivePass.id);
-    const at = `/api/sessions/${view.session}/ask`;
-    const suspect = archivePass.suspects[0]!.id;
-    expect((await call<ApiError>("POST", at, { suspect, question: "   " })).body.error.code).toBe("bad-question");
-    expect((await call<ApiError>("POST", at, { suspect, question: "x".repeat(301) })).body.error.code).toBe("bad-question");
-    expect(provider.dispatched).toBe(0);
-  });
-
-  it("when the spend guard refuses, a typed question is not asked and a menu topic is worded by code; the player is told which", async () => {
-    let closed = false;
-    const { provider, metered } = live(wellBehaved, () => closed);
-    const { call, start } = server({ metered, modelOff: false });
-    const view = await start(archivePass.id);
-    const at = `/api/sessions/${view.session}/ask`;
-    const suspect = archivePass.suspects[0]!.id;
-    closed = true;
-    const typed = await call("POST", at, { suspect, question: "Where were you at nine?" });
-    expect(typed.status).toBe(200);
-    expect(typed.body.ask).toMatchObject({ replayed: false, recorded: false, notice: { code: "not-asked" } });
-    expect(typed.body.view.actions.used).toBe(0);
-    expect(typed.body.view.transcript).toEqual([]);
-    const topic = view.topics.find((t) => t.suspect === suspect)!;
-    const menu = await call("POST", at, { suspect, topic: topic.id });
-    expect(menu.body.ask).toMatchObject({ replayed: false, recorded: true, notice: { code: "worded-by-code" } });
-    expect(menu.body.view.transcript[0]).toMatchObject({ source: "rendered" });
-    expect(menu.body.view.actions.used).toBe(1);
-    expect(provider.dispatched).toBe(0);
-    // The notices are fixed sentences: they do not carry the guard's reason.
-    expect(typed.raw).not.toContain("kill-switch");
-    expect(menu.raw).not.toContain("kill-switch");
-    expect(menu.raw).not.toContain("refused");
+  it("a request with no revision, or one that is not a whole number, is not read", async () => {
+    const { call, start } = server();
+    const view = await start(lighthouse.id);
+    for (const revision of [undefined, "1", 1.5, null]) {
+      const r = await call<ApiError>("POST", `/api/sessions/${view.session}/inspect`, { ...(revision === undefined ? {} : { revision }), inspection: "I1" });
+      expect([r.status, r.body.error.code], String(revision)).toEqual([400, "bad-request"]);
+    }
   });
 
   it("one request at a time for a session: a second that arrives during the first is refused, and nothing is sent twice", async () => {
@@ -441,28 +441,27 @@ describe("the game over HTTP, with a model", () => {
       }
       return inner(request);
     };
-    const { call, start } = server({ metered, modelOff: false });
+    const { act, call, start } = server({ metered, modelOff: false });
     const view = await start(archivePass.id);
     const at = `/api/sessions/${view.session}`;
-    const suspect = archivePass.suspects[0]!.id;
 
-    const first = call("POST", `${at}/ask`, { suspect, question: "Where were you at nine?" });
+    const first = act(view, "ask", { person: "P1", question: "Where were you at nine?" });
     await reached;
     // The same question again, another question, an inspection and an accusation: all refused, none acted on.
-    for (const [path, body] of [
-      ["ask", { suspect, question: "Where were you at nine?" }],
-      ["ask", { suspect, topic: view.topics.find((t) => t.suspect === suspect)!.id }],
-      ["inspect", { inspection: view.inspections[0]!.id }],
-      ["accuse", { suspect, evidence: [] }],
+    for (const [action, body] of [
+      ["ask", { person: "P1", question: "Where were you at nine?" }],
+      ["ask", { topic: "T1" }],
+      ["inspect", { inspection: "I1" }],
+      ["accuse", { person: "P1", evidence: [] }],
     ] as const) {
-      const r = await call<ApiError>("POST", `${at}/${path}`, body);
-      expect([r.status, r.body.error.code], path).toEqual([409, "busy"]);
+      const r = await act<ApiError>(view, action, body);
+      expect([r.status, r.body.error.code], action).toEqual([409, "busy"]);
     }
-    // Reading is not blocked, and shows the session as it stood.
+    // Reading is not blocked, and shows the session as it was last kept.
     expect((await call("GET", at)).body.view).toEqual(view);
     // Another session is not held up.
     const other = await start(archivePass.id);
-    expect((await call("POST", `/api/sessions/${other.session}/inspect`, { inspection: other.inspections[0]!.id })).status).toBe(200);
+    expect((await act(other, "inspect", { inspection: "I1" })).status).toBe(200);
 
     release();
     const done = await first;
@@ -471,46 +470,299 @@ describe("the game over HTTP, with a model", () => {
     expect(done.body.view.actions.used).toBe(1);
     expect(done.body.view.over).toBe(false);
     expect(provider.dispatched).toBe(2);
-    // Free again.
-    expect((await call("POST", `${at}/inspect`, { inspection: view.inspections[0]!.id })).status).toBe(200);
+    // Free again, and a click made on the old view is now stale rather than busy.
+    expect((await act<ApiError>(view, "inspect", { inspection: "I1" })).body.error.code).toBe("stale");
+    expect((await act(done.body.view, "inspect", { inspection: "I1" })).status).toBe(200);
+  });
+});
+
+describe("what the server says when it cannot do what was asked", () => {
+  it("answers with a fixed code and a fixed sentence in both languages, and nothing else", async () => {
+    const { call, start } = server();
+    const view = await start(lighthouse.id);
+    const at = `/api/sessions/${view.session}`;
+    const rev = view.revision;
+    const lockedHandle = `I${view.inspections.length + 1}`;
+    const cases: [string, string, unknown, number, string][] = [
+      ["GET", "/nothing", undefined, 404, "not-found"],
+      ["GET", "/api/nothing", undefined, 404, "not-found"],
+      ["POST", "/api/cases", {}, 405, "method"],
+      ["GET", "/api/sessions", undefined, 405, "method"],
+      ["DELETE", at, undefined, 405, "method"],
+      ["GET", `${at}/ask`, undefined, 405, "method"],
+      ["POST", `${at}/reveal`, { revision: rev }, 404, "not-found"],
+      ["POST", "/api/sessions", "not json", 400, "bad-request"],
+      ["POST", "/api/sessions", [], 400, "bad-request"],
+      ["POST", "/api/sessions", {}, 400, "bad-request"],
+      ["POST", "/api/sessions", { caseId: 7 }, 400, "bad-request"],
+      ["POST", "/api/sessions", { caseId: "no-such-case" }, 404, "not-found"],
+      // A body that is too large is not read, even when what it asks for is well formed.
+      ["POST", "/api/sessions", { caseId: lighthouse.id, pad: "x".repeat(MAX_BODY_BYTES) }, 400, "bad-request"],
+      ["GET", "/api/sessions/00000000-0000-4000-8000-999999999999", undefined, 404, "not-found"],
+      ["GET", "/api/sessions/not-an-id", undefined, 404, "not-found"],
+      ["POST", "/api/sessions/00000000-0000-4000-8000-999999999999/inspect", { revision: 1, inspection: "I1" }, 404, "not-found"],
+      ["POST", `${at}/inspect`, { revision: rev }, 400, "bad-request"],
+      ["POST", `${at}/inspect`, { revision: rev, inspection: 7 }, 400, "bad-request"],
+      ["POST", `${at}/inspect`, { revision: rev, inspection: "I99" }, 404, "not-available"],
+      ["POST", `${at}/inspect`, { revision: rev, inspection: lockedHandle }, 404, "not-available"],
+      // The case file's own ids name nothing here.
+      ["POST", `${at}/inspect`, { revision: rev, inspection: lighthouse.actions.inspections[1]!.id }, 404, "not-available"],
+      ["POST", `${at}/inspect`, { revision: rev, inspection: "T1" }, 404, "not-available"],
+      ["POST", `${at}/ask`, { revision: rev, topic: "T99" }, 404, "not-available"],
+      ["POST", `${at}/ask`, { revision: rev, topic: lighthouse.actions.topics[0]!.id }, 404, "not-available"],
+      ["POST", `${at}/ask`, { revision: rev }, 400, "bad-request"],
+      ["POST", `${at}/ask`, { revision: rev, person: "P99", question: "Hello?" }, 404, "not-available"],
+      ["POST", `${at}/accuse`, { revision: rev, person: "P1" }, 400, "bad-request"],
+      ["POST", `${at}/accuse`, { revision: rev, person: "P1", evidence: "all" }, 400, "bad-request"],
+      ["POST", `${at}/accuse`, { revision: rev, person: "P1", evidence: [7] }, 400, "bad-request"],
+      ["POST", `${at}/accuse`, { revision: rev, person: "P99", evidence: [] }, 404, "not-available"],
+      ["POST", `${at}/accuse`, { revision: rev, person: lighthouse.suspects[0]!.id, evidence: [] }, 404, "not-available"],
+      ["POST", `${at}/accuse`, { revision: rev, person: "P1", evidence: ["E99"] }, 400, "not-held"],
+      ["POST", `${at}/accuse`, { revision: rev, person: "P1", evidence: [lighthouse.evidence.at(-1)!.id] }, 400, "not-held"],
+    ];
+    for (const [method, path, body, status, code] of cases) {
+      const r = await call<ApiError>(method, path, body);
+      const what = `${method} ${path} ${JSON.stringify(body)?.slice(0, 60)}`;
+      expect(r.status, what).toBe(status);
+      expect(r.body.error.code, what).toBe(code);
+      expect(Object.keys(r.body), what).toEqual(["error"]);
+      expect(Object.keys(r.body.error), what).toEqual(["code", "text"]);
+      expect(r.body.error.text.en, what).not.toMatch(/[一-鿿]/);
+      expect(r.body.error.text.zh, what).toMatch(/[一-鿿]/);
+      // Nothing of the case is in an error.
+      for (const id of authorIds(lighthouse)) expect(r.raw, what).not.toContain(id);
+    }
+    // None of it changed the session.
+    expect((await call("GET", at)).body.view).toEqual(view);
+  });
+
+  it("a locked thing and a thing that does not exist get the very same answer", async () => {
+    const { act, start } = server();
+    const view = await start(lighthouse.id);
+    const a = await act(view, "inspect", { inspection: `I${view.inspections.length + 1}` });
+    const b = await act(view, "inspect", { inspection: "I99" });
+    expect(a.status).toBe(404);
+    expect(a.raw).toBe(b.raw);
+  });
+
+  it("a topic that is still locked is not shown, cannot be asked, and opens when what it needs is held", async () => {
+    // The last person's topic now needs the scene's record, which the player does not hold at the start.
+    const scene = lighthouse.actions.inspections.find((i) => i.requires?.length)!;
+    const gated = lighthouse.actions.topics.at(-1)!;
+    const c: Case = { ...lighthouse, actions: { ...lighthouse.actions, topics: lighthouse.actions.topics.map((t) => (t.id === gated.id ? { ...t, requires: [scene.yields[0]!] } : t)) } };
+    const { act, call, deps } = server({ cases: [c] });
+    const opening = await call("POST", "/api/sessions", { caseId: c.id });
+    let view = opening.body.view;
+    expect(view.topics).toHaveLength(c.actions.topics.length - 1);
+    expect(view.topics.some((t) => t.person === personOf(c, gated.suspect))).toBe(false);
+    await expectNothingHidden(deps, c, opening.raw, view, "opening with a locked topic");
+    // The handle it will get has no meaning yet.
+    const future = `T${c.actions.topics.length}`;
+    const locked = await act(view, "ask", { topic: future });
+    const missing = await act(view, "ask", { topic: "T99" });
+    expect(locked.status).toBe(404);
+    expect(locked.raw).toBe(missing.raw);
+    // Hear the keeper, read the scene: the topic opens, numbered after all the others.
+    const keeper = c.actions.topics.find((t) => scene.requires!.some((need) => t.yields.includes(need)))!;
+    view = (await act(view, "ask", { topic: topicOf(await stored(deps, view), keeper.id) })).body.view;
+    const after = await act(view, "inspect", { inspection: inspectionOf(await stored(deps, view), scene.id) });
+    view = after.body.view;
+    expect(view.topics.at(-1)).toMatchObject({ handle: future, person: personOf(c, gated.suspect), heard: false });
+    await expectNothingHidden(deps, c, after.raw, view, "after the scene");
+    expect((await act(view, "ask", { topic: future })).status).toBe(200);
+  });
+
+  it("stops at the action cap, and still lets the player accuse", async () => {
+    const short = { ...archivePass, sessionCap: 1 };
+    const { act, start } = server({ cases: [short] });
+    let view = await start(short.id);
+    view = (await act(view, "inspect", { inspection: "I1" })).body.view;
+    expect(view.actions.left).toBe(0);
+    const refused = await act<ApiError>(view, "ask", { topic: "T1" });
+    expect([refused.status, refused.body.error.code]).toEqual([409, "cap"]);
+    expect((await act(view, "accuse", { person: "P1", evidence: [] })).body.view.over).toBe(true);
+  });
+
+  it("says it has no room when the store can keep no more", async () => {
+    const full: SessionStore = { ...memorySessions(), create: async () => false };
+    const { call } = server({ sessions: full });
+    const r = await call<ApiError>("POST", "/api/sessions", { caseId: lighthouse.id });
+    expect([r.status, r.body.error.code]).toEqual([503, "full"]);
+  });
+
+  it("says nothing of what went wrong inside when the server itself fails, and does not promise that nothing changed", async () => {
+    const broken: SessionStore = {
+      create: async () => {
+        throw new Error(`cannot store the case whose culprit is ${lighthouse.culprit.suspect}`);
+      },
+      read: async () => {
+        throw new Error("redis is down at 10.0.0.7");
+      },
+      update: async () => {
+        throw new Error("boom");
+      },
+    };
+    const { call } = server({ sessions: broken });
+    const cookie = `${VISITOR_COOKIE}=${"a".repeat(64)}`;
+    for (const [method, path, body] of [
+      ["POST", "/api/sessions", { caseId: lighthouse.id }],
+      ["GET", "/api/sessions/00000000-0000-4000-8000-000000000001", undefined],
+      ["POST", "/api/sessions/00000000-0000-4000-8000-000000000001/inspect", { revision: 1, inspection: "I1" }],
+    ] as const) {
+      const r = await call<ApiError>(method, path, body, { cookie });
+      expect(r.status).toBe(500);
+      expect(r.body).toEqual({ error: { code: "server", text: { en: "Something went wrong on the server. Reload the page to see where the game stands.", zh: "服务器出了问题。请刷新页面，查看这一局的进展。" } } });
+    }
+  });
+});
+
+describe("the game over HTTP, with a model", () => {
+  it("shows the suspect's own line for a typed question, notes the statement, and counts the cost", async () => {
+    const { provider, metered } = live();
+    const { act, start, deps } = server({ metered, modelOff: false });
+    const view = await start(archivePass.id);
+    expect(view.model).toBe("on");
+    const r = await act(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(r.status).toBe(200);
+    const turn = r.body.view.transcript[0]!;
+    expect(turn).toMatchObject({ n: 1, person: "P1", question: "Where were you at nine?", source: "model", language: "en" });
+    expect(turn.line).toContain("Now leave me be.");
+    expect(turn.noted).toBeGreaterThan(0);
+    expect(Object.keys(turn).sort()).toEqual(["language", "line", "n", "noted", "person", "question", "source"]);
+    expect(r.body.ask).toEqual({ replayed: false, recorded: true, shown: { person: "P1", line: turn.line, language: "en", source: "model" } });
+    expect(r.body.view.statements).toHaveLength(turn.noted);
+    expect(provider.dispatched).toBe(2);
+    expect(r.body.view.cost.requests).toBe(2);
+    expect(r.body.view.cost.nano).toBeGreaterThan(0);
+    expect(r.body.view.actions.used).toBe(1);
+    await expectNothingHidden(deps, archivePass, r.raw, r.body.view, "typed question");
+    // The model's rejected lines and its raw replies are never part of a view.
+    expect(r.raw).not.toContain("rejections");
+    expect(r.raw).not.toContain("call_1");
+    // The same question again is the saved turn: nothing is sent, nothing is used, the revision stays.
+    const again = await act(r.body.view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(again.body.ask).toMatchObject({ replayed: true, recorded: true });
+    expect(provider.dispatched).toBe(2);
+    expect(again.body.view).toEqual(r.body.view);
+  });
+
+  it("refuses a question with no words or too many, before anything is sent", async () => {
+    const { provider, metered } = live();
+    const { act, start } = server({ metered, modelOff: false });
+    const view = await start(archivePass.id);
+    expect((await act<ApiError>(view, "ask", { person: "P1", question: "   " })).body.error.code).toBe("bad-question");
+    expect((await act<ApiError>(view, "ask", { person: "P1", question: "x".repeat(301) })).body.error.code).toBe("bad-question");
+    expect(provider.dispatched).toBe(0);
+  });
+
+  it("when the spend guard refuses, a typed question is not asked and a menu topic is worded by code; the player is told which", async () => {
+    let closed = false;
+    const { provider, metered } = live(wellBehaved, () => closed);
+    const { act, start } = server({ metered, modelOff: false });
+    let view = await start(archivePass.id);
+    closed = true;
+    const typed = await act(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(typed.status).toBe(200);
+    expect(typed.body.ask).toMatchObject({ replayed: false, recorded: false, notice: { code: "not-asked" } });
+    expect(typed.body.ask!.shown).toBeUndefined();
+    expect(typed.body.view.actions.used).toBe(0);
+    expect(typed.body.view.transcript).toEqual([]);
+    view = typed.body.view;
+    const menu = await act(view, "ask", { topic: "T1" });
+    expect(menu.body.ask).toMatchObject({ replayed: false, recorded: true, shown: { source: "rendered" }, notice: { code: "worded-by-code" } });
+    expect(menu.body.view.transcript[0]).toMatchObject({ source: "rendered" });
+    expect(menu.body.view.actions.used).toBe(1);
+    expect(provider.dispatched).toBe(0);
+    // The notices are fixed sentences: they do not carry the guard's reason.
+    for (const raw of [typed.raw, menu.raw]) {
+      expect(raw).not.toContain("kill-switch");
+      expect(raw).not.toContain("refused");
+    }
+  });
+
+  it("a session that began with the model off stays off, even when the server's model is on later", async () => {
+    const { provider, metered } = live();
+    const sessions = memorySessions();
+    const off = server({ sessions, metered, modelOff: true });
+    const view = await off.start(archivePass.id);
+    expect(view.model).toBe("off");
+    // The same store and the same visitor, behind a server whose model is on.
+    const on: ApiDeps = { ...off.deps, modelOff: false };
+    const ask = (body: Record<string, unknown>) =>
+      handleRequest(new Request(`http://game.test/api/sessions/${view.session}/ask`, { method: "POST", headers: { cookie: off.cookie()! }, body: JSON.stringify({ revision: view.revision, ...body }) }), on);
+    const typed = await ask({ person: "P1", question: "Where were you at nine?" });
+    expect(typed.status).toBe(409);
+    expect(((await typed.json()) as ApiError).error.code).toBe("model-off");
+    const menu = (await (await ask({ topic: "T1" })).json()) as ViewReply;
+    expect(menu.view.model).toBe("off");
+    expect(menu.view.transcript[0]!.source).toBe("rendered");
+    expect(menu.ask!.notice).toBeUndefined();
+    expect(provider.dispatched).toBe(0);
+    // And a session that began live is off while the server's model is off.
+    const began = server({ sessions, metered, modelOff: false });
+    const liveView = await began.start(archivePass.id);
+    expect(liveView.model).toBe("on");
+    const later = await handleRequest(new Request(`http://game.test/api/sessions/${liveView.session}`, { headers: { cookie: began.cookie()! } }), { ...began.deps, modelOff: true });
+    expect(((await later.json()) as ViewReply).view.model).toBe("off");
   });
 });
 
 describe("sessions in memory", () => {
-  const blank = (id: string) => ({ id, caseId: "c", actions: 0, evidence: [], inspections: [], asked: 0, turns: [] });
+  const blank = (id: string, createdAt = 0): SessionRecord => ({ session: { id, caseId: "c", actions: 0, evidence: [], inspections: [], asked: 0, turns: [] }, owner: "o", revision: 1, mode: "off", caseVersion: "v", topics: [], inspections: [], createdAt });
 
   it("keeps what the work returns, keeps nothing when it throws, and lets go either way", async () => {
-    const store = memorySessions();
-    await store.create(blank("a"));
-    expect(await store.update("a", async (s) => ({ session: { ...s, actions: 1 }, value: "done" }))).toEqual({ ok: true, value: "done" });
-    expect((await store.read("a"))!.actions).toBe(1);
+    const store = memorySessions({ now: () => 0 });
+    expect(await store.create(blank("a"))).toBe(true);
+    expect(await store.update("a", async (r) => ({ record: { ...r, revision: 2 }, value: "done" }))).toEqual({ ok: true, value: "done" });
+    expect((await store.read("a"))!.revision).toBe(2);
     await expect(store.update("a", async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
-    expect((await store.read("a"))!.actions).toBe(1);
-    expect(await store.update("a", async (s) => ({ session: s, value: 1 }))).toEqual({ ok: true, value: 1 });
-    expect(await store.update("nobody", async (s) => ({ session: s, value: 1 }))).toEqual({ ok: false, why: "missing" });
+    expect((await store.read("a"))!.revision).toBe(2);
+    expect(await store.update("a", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: true, value: 1 });
+    expect(await store.update("nobody", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: false, why: "missing" });
     expect(await store.read("nobody")).toBeNull();
   });
 
-  it("makes room by dropping the oldest session that is not at work", async () => {
-    const store = memorySessions({ max: 2 });
+  it("makes room by dropping the oldest session that is not at work, and refuses when all are", async () => {
+    const store = memorySessions({ max: 2, now: () => 0 });
     await store.create(blank("a"));
     await store.create(blank("b"));
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     // "a" is the oldest, and it is at work: "b" goes instead.
-    const working = store.update("a", async (s) => {
+    const working = store.update("a", async (r) => {
       await gate;
-      return { session: { ...s, actions: 5 }, value: null };
+      return { record: { ...r, revision: 5 }, value: null };
     });
-    await store.create(blank("c"));
+    expect(await store.create(blank("c"))).toBe(true);
     expect(await store.read("a")).not.toBeNull();
     expect(await store.read("b")).toBeNull();
-    expect(await store.read("c")).not.toBeNull();
+    // With "a" and "c" both at work there is nothing to drop, and a new session is not kept.
+    let releaseC!: () => void;
+    const gateC = new Promise<void>((resolve) => (releaseC = resolve));
+    const workingC = store.update("c", async (r) => {
+      await gateC;
+      return { record: r, value: null };
+    });
+    expect(await store.create(blank("d"))).toBe(false);
+    expect(await store.read("d")).toBeNull();
     release();
+    releaseC();
     await working;
-    expect((await store.read("a"))!.actions).toBe(5);
+    await workingC;
+    expect((await store.read("a"))!.revision).toBe(5);
     // Now "a" is idle and the oldest.
-    await store.create(blank("d"));
+    expect(await store.create(blank("d"))).toBe(true);
     expect(await store.read("a")).toBeNull();
+  });
+
+  it("forgets a session when its time is up", async () => {
+    let clock = 0;
+    const store = memorySessions({ ttlMs: 100, now: () => clock });
+    await store.create(blank("a", 0));
+    clock = 99;
+    expect(await store.read("a")).not.toBeNull();
+    clock = 100;
+    expect(await store.read("a")).toBeNull();
+    expect(await store.update("a", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: false, why: "missing" });
   });
 });
