@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { writeSync } from "node:fs";
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createMetered } from "../src/metered";
@@ -191,9 +192,10 @@ const prefix = `ta-test-${randomUUID()}`;
 // A run that is killed cannot clean up, and these keys do not expire. So the prefix is said
 // before anything is written: `npm run check:redis-clean -- --remove-run <prefix>` removes
 // exactly that run's keys afterwards.
-beforeAll(() => {
-  if (redisUrl) console.info(`Redis test keys of this run start with ${prefix}`);
-});
+// Written straight to standard error, at once and before any test runs. The test runner holds
+// back what a test logs through the console, and under some reporters never shows it: a run
+// that was killed would then have left keys behind without ever having said which.
+if (redisUrl) writeSync(2, `Redis test keys of this run start with ${prefix}\n`);
 afterAll(async () => {
   if (!redisUrl) return;
   const admin = new Redis(redisUrl);
