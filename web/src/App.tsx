@@ -28,15 +28,27 @@ const firstLanguage = (): Lang => {
   return typeof navigator !== "undefined" && navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
 };
 
+/** Something went wrong, in words for either language, and perhaps a way to look again. Looking again never repeats an action. */
+interface Trouble {
+  text: Text;
+  retry?: { label: Text; run: () => void };
+}
+
 export function App() {
   const [lang, setLang] = useState<Lang>(firstLanguage);
   const [cases, setCases] = useState<CasesReply | null>(null);
   const [view, setView] = useState<View | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<Text | null>(null);
+  const [error, setError] = useState<Trouble | null>(null);
   const [notice, setNotice] = useState<Text | null>(null);
   const [shown, setShown] = useState<Shown | null>(null);
   const t = useCallback((text: Text) => pick(lang, text), [lang]);
+  /**
+   * Which game the page is on. It moves every time the player opens a case or leaves one.
+   * An answer from the server is used only if the page is still on the game it was asked
+   * for: a late answer about a game the player has left must never bring that game back.
+   */
+  const generation = useRef(0);
 
   useEffect(() => {
     document.documentElement.lang = lang === "zh" ? "zh-Hans" : "en";
@@ -44,67 +56,94 @@ export function App() {
   }, [lang]);
 
   const leave = useCallback(() => {
+    generation.current++;
     remembered.set("ta.session", null);
     setView(null);
     setShown(null);
     setNotice(null);
+    setError(null);
   }, []);
 
-  // On arrival: the library, and the session that was open, if it is still there.
+  /** Read where a game stands. It changes nothing on the server, so it is always safe to do again. */
+  const read = useCallback(
+    async (session: string, failed: Text, again: Text) => {
+      const mine = generation.current;
+      try {
+        const reply = await api.view(session);
+        if (generation.current !== mine) return;
+        setView(reply.view);
+        setError(null);
+      } catch (e) {
+        if (generation.current !== mine) return;
+        // Forget the game only when the server says it is gone. If the server could not be
+        // reached, the game may well still be there: keep its locator and offer to look again.
+        if (e instanceof GameError && (e.code === "not-found" || e.code === "expired")) {
+          setError({ text: e.text });
+          remembered.set("ta.session", null);
+          setView(null);
+        } else setError({ text: failed, retry: { label: again, run: () => void read(session, failed, again) } });
+      }
+    },
+    [],
+  );
+
+  // On arrival: the library, and the game that was open, if it is still there.
   useEffect(() => {
     let gone = false;
     api
       .cases()
       .then((reply) => !gone && setCases(reply))
-      .catch((e: unknown) => !gone && setError(e instanceof GameError ? e.text : S.networkError));
+      .catch((e: unknown) => !gone && setError({ text: e instanceof GameError ? e.text : S.networkError }));
     const session = remembered.get("ta.session");
-    if (session) {
-      api
-        .view(session)
-        .then((reply) => !gone && setView(reply.view))
-        .catch((e: unknown) => {
-          // Forget the session only when the server says it is gone. If the server could not
-          // be reached, the game may well still be there: keep its locator and say what happened.
-          if (e instanceof GameError && (e.code === "not-found" || e.code === "expired")) remembered.set("ta.session", null);
-          else if (!gone) setError(e instanceof GameError ? e.text : S.networkError);
-        });
-    }
+    if (session) void read(session, S.resumeFailed, S.tryAgain);
     return () => {
       gone = true;
     };
-  }, []);
+  }, [read]);
 
-  /** Do one thing on the server and show where the game stands afterwards. */
+  /** Do one thing on the server and show where the game stands afterwards. It is never repeated on its own. */
   const run = useCallback(
     async (work: () => Promise<ViewReply>, current: View | null) => {
       if (busy) return;
+      // Opening a case is a new game: whatever was still on its way for an earlier one is dropped.
+      const mine = current ? generation.current : ++generation.current;
       setBusy(true);
       setError(null);
       setNotice(null);
       setShown(null);
       try {
         const reply = await work();
+        if (generation.current !== mine) return;
         setView(reply.view);
         remembered.set("ta.session", reply.view.session);
         if (reply.ask?.notice) setNotice(reply.ask.notice.text);
         if (reply.ask?.replayed && reply.ask.shown) setShown(reply.ask.shown);
       } catch (e) {
+        if (generation.current !== mine) return;
         const failure = e instanceof GameError ? e : new GameError("network", S.networkError);
-        setError(failure.text);
-        if (failure.code === "not-found" || failure.code === "expired") leave();
-        // The game may have moved on without this page: read it again rather than guess.
-        else if (current && ["stale", "busy", "server", "network"].includes(failure.code)) {
+        if (failure.code === "not-found" || failure.code === "expired") {
+          leave();
+          setError({ text: failure.text });
+        } else if (current && ["stale", "busy", "server", "network"].includes(failure.code)) {
+          // The game may have moved on without this page. Look, without acting again; and say
+          // the page is up to date only if the look worked.
+          const refresh = { label: S.refresh, run: () => void read(current.session, S.notRefreshed, S.refresh) };
           try {
-            setView((await api.view(current.session)).view);
+            const reply = await api.view(current.session);
+            if (generation.current !== mine) return;
+            setView(reply.view);
+            // While the earlier action is still at work the view may yet change: offer another look.
+            setError({ text: failure.text, ...(failure.code === "stale" ? {} : { retry: refresh }) });
           } catch {
-            // The error already on screen says what to do.
+            if (generation.current !== mine) return;
+            setError({ text: S.notRefreshed, retry: refresh });
           }
-        }
+        } else setError({ text: failure.text });
       } finally {
         setBusy(false);
       }
     },
-    [busy, leave],
+    [busy, leave, read],
   );
 
   return (
@@ -135,8 +174,15 @@ export function App() {
 
       {error && (
         <div className="banner error" role="alert">
-          <span>{t(error)}</span>
-          <button onClick={() => setError(null)}>{t(S.dismiss)}</button>
+          <span>{t(error.text)}</span>
+          <span className="banner-actions">
+            {error.retry && (
+              <button className="primary" onClick={error.retry.run}>
+                {t(error.retry.label)}
+              </button>
+            )}
+            <button onClick={() => setError(null)}>{t(S.dismiss)}</button>
+          </span>
         </div>
       )}
       {notice && (
@@ -479,14 +525,19 @@ function Verdict({ view, lang, nameOf, onLeave }: { view: View; lang: Lang; name
   const stop = lang === "zh" ? "。" : ".";
   const comma = lang === "zh" ? "、" : ", ";
   const gap = lang === "zh" ? "" : " ";
-  // The verdict replaces the game on the same page: start reading it from the top.
+  // The verdict replaces the game on the same page: start reading it from the top, with the
+  // focus on its heading, so a keyboard or a screen reader lands on the result.
+  const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     window.scrollTo(0, 0);
+    heading.current?.focus();
   }, []);
   return (
     <main className="verdict">
       <section className={`outcome ${v.outcome}`}>
-        <h1>{t(headline)}</h1>
+        <h1 ref={heading} tabIndex={-1}>
+          {t(headline)}
+        </h1>
         <p>
           {t(S.youAccused)}
           {gap}

@@ -4,9 +4,9 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 
 一款中英双语的推理游戏：每个嫌疑人都是一个 Muse Ember 智能体，而真相由代码掌握，不由模型决定。
 
-> **Status: early build.** The case format, the solver, the spend guard and the model client exist and are tested. The game itself is not playable yet.
+> **Status: playable on your own machine, with the model off.** You can play a case from the briefing to the reveal in a terminal or in a browser; suspects' statements are then worded by code, and nothing is sent or spent. The parts that use Muse Ember (suspects answering in their own words, the case writer, the self-play detective) exist and are tested with a stand-in provider. The game is not hosted anywhere yet.
 >
-> **状态：开发初期。** 案件格式、求解器和额度保护已完成并有测试，游戏本身尚不可玩。
+> **状态：可以在自己的机器上玩，模型关闭。** 可以在终端或浏览器里把一个案件从简报玩到真相公开；此时嫌疑人的陈述由代码写成，不发送任何请求，也不花钱。用到 Muse Ember 的部分（嫌疑人用自己的话回答、案件写作、自我对局的侦探）已经写好，并用替身模型测试过。游戏目前还没有部署到任何网站。
 
 ## The idea · 核心思路
 

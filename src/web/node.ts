@@ -12,14 +12,18 @@ import { handleRequest, type ApiDeps } from "./api";
  * wrong origin is refused with none of its body read, and a body is read no further than the
  * handler's limit. If the handler answers without having read the whole body, the
  * connection is closed after the answer, and what was still on its way is never taken in.
+ *
+ * `trustProxy`: only a server that really sits behind a proxy it trusts may believe the
+ * "x-forwarded-proto" header. Reached directly, any client can send that header, so by
+ * default it is ignored and the scheme is http. A deployed server should also name its public
+ * origin in `deps.origin`, which is what the origin check and the cookie's Secure flag go by.
  */
-export function nodeListener(deps: ApiDeps): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+export function nodeListener(deps: ApiDeps, options: { trustProxy?: boolean } = {}): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   return async (req, res) => {
     const method = req.method ?? "GET";
     const headers = new Headers();
     for (const [name, value] of Object.entries(req.headers)) if (typeof value === "string") headers.set(name, value);
-    // Behind a proxy that ends TLS, the proxy says which scheme the visitor used.
-    const scheme = req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+    const scheme = options.trustProxy && req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
     const url = `${scheme}://${req.headers.host ?? "localhost"}${req.url ?? "/"}`;
     const hasBody = method !== "GET" && method !== "HEAD";
     const request = new Request(url, { method, headers, ...(hasBody ? { body: bodyOf(req), duplex: "half" } : {}) } as RequestInit);

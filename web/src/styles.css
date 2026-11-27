@@ -214,10 +214,20 @@ p {
   background: color-mix(in srgb, var(--warn) 14%, var(--paper));
 }
 
+.banner-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex: none;
+}
+
 .banner button {
   flex: none;
   padding: 0.2rem 0.6rem;
   font-size: 0.85rem;
+}
+
+.outcome h1:focus {
+  outline: none;
 }
 
 /* ---- Library ---- */

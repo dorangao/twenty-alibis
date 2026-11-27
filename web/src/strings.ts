@@ -95,16 +95,23 @@ export const S = {
   playAnother: s("Play another case", "再玩一个案件"),
 
   networkError: s("The server could not be reached. Check that it is running, then try again.", "无法连接服务器。请确认它在运行，然后重试。"),
+  notRefreshed: s("The page could not be brought up to date just now. Nothing more was done. Use Refresh to see where the game stands.", "页面暂时无法更新。没有执行任何其他操作。请点“刷新”查看这一局的进展。"),
+  resumeFailed: s("Your game in progress could not be opened just now. It has not been lost.", "暂时无法打开你进行中的那一局。它没有丢失。"),
+  refresh: s("Refresh", "刷新"),
+  tryAgain: s("Try again", "重试"),
   dismiss: s("Dismiss", "关闭"),
 } satisfies Record<string, Text>;
 
 export const pick = (lang: Lang, text: Text): string => text[lang];
 
-/** "Dr. Chen died at 21:00 in the lamp room and was found at 21:20." */
+/**
+ * "Dr. Chen died at 21:00 in the lamp room and was found at 21:20." When the body was found
+ * somewhere else, the line says where: "… and was found in the cellar at 21:20."
+ */
 export function victimLine(lang: Lang, v: { name: Text; died: { slot: string; room: Text }; found: { slot: string; room: Text } }): string {
-  return lang === "en"
-    ? `${v.name.en} died at ${v.died.slot} in the ${v.died.room.en.toLowerCase()} and was found at ${v.found.slot}.`
-    : `${v.name.zh}于 ${v.died.slot} 死在${v.died.room.zh}，${v.found.slot} 被发现。`;
+  const elsewhere = v.found.room.en !== v.died.room.en || v.found.room.zh !== v.died.room.zh;
+  if (lang === "en") return `${v.name.en} died at ${v.died.slot} in the ${v.died.room.en.toLowerCase()} and was found ${elsewhere ? `in the ${v.found.room.en.toLowerCase()} ` : ""}at ${v.found.slot}.`;
+  return `${v.name.zh}于 ${v.died.slot} 死在${v.died.room.zh}，${v.found.slot} ${elsewhere ? `在${v.found.room.zh}` : ""}被发现。`;
 }
 
 /** Nanodollars as dollars: small amounts keep four decimals. */

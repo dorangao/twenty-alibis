@@ -15,7 +15,7 @@ import { bodyOf, nodeListener } from "../src/web/node";
 import { memorySessions } from "../src/web/sessions";
 import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
-import { S } from "../web/src/strings";
+import { S, victimLine } from "../web/src/strings";
 
 const built = compilePlot("lighthouse", lighthouseSkeleton, lighthousePeople);
 if (!built.ok) throw new Error(built.problems.join("; "));
@@ -55,11 +55,27 @@ describe("the game API behind Node's http server", () => {
     expect((await fetch(`${base}/api/sessions`, { method: "POST", headers: { origin: "http://elsewhere.example" }, body: JSON.stringify({ caseId: lighthouse.id }) })).status).toBe(403);
   });
 
-  it("marks the cookie Secure when the proxy in front says the visitor used https", async () => {
-    const origin = base.replace("http://", "https://");
-    const started = await fetch(`${base}/api/sessions`, { method: "POST", headers: { origin, "x-forwarded-proto": "https" }, body: JSON.stringify({ caseId: lighthouse.id }) });
-    expect(started.status).toBe(201);
-    expect(started.headers.get("set-cookie")).toMatch(/; Secure$/);
+  it("believes a forwarded scheme only when told it sits behind a proxy it trusts", async () => {
+    const https = base.replace("http://", "https://");
+    const forwarded = (origin: string) => fetch(`${base}/api/sessions`, { method: "POST", headers: { origin, "x-forwarded-proto": "https" }, body: JSON.stringify({ caseId: lighthouse.id }) });
+    // Reached directly: any client can send that header, so it changes nothing. The origin is still http.
+    expect((await forwarded(https)).status).toBe(403);
+    const direct = await forwarded(base);
+    expect(direct.status).toBe(201);
+    expect(direct.headers.get("set-cookie")).not.toMatch(/Secure/);
+
+    // Behind a trusted proxy the header is believed, and the cookie is marked Secure.
+    const listener = nodeListener({ cases: [lighthouse], sessions: memorySessions(), metered: noModel, modelOff: true }, { trustProxy: true });
+    const proxied = createServer((req, res) => void listener(req, res));
+    await new Promise<void>((resolve) => proxied.listen(0, "127.0.0.1", resolve));
+    const at = `127.0.0.1:${(proxied.address() as AddressInfo).port}`;
+    try {
+      const started = await fetch(`http://${at}/api/sessions`, { method: "POST", headers: { origin: `https://${at}`, "x-forwarded-proto": "https" }, body: JSON.stringify({ caseId: lighthouse.id }) });
+      expect(started.status).toBe(201);
+      expect(started.headers.get("set-cookie")).toMatch(/; Secure$/);
+    } finally {
+      await new Promise<void>((resolve) => proxied.close(() => resolve()));
+    }
   });
 
   it("refuses a body over the limit without keeping it", async () => {
@@ -232,6 +248,18 @@ describe("the page", () => {
       expect(text, name).not.toMatch(/import\(\s*"\.\.\/\.\.\//);
       expect(text, name).not.toMatch(/require\(/);
     }
+  });
+
+  it("says where the body was found when that is not where the victim died", () => {
+    const name = { en: "Dr. Chen", zh: "陈医生" };
+    const lamp = { en: "Lamp Room", zh: "灯室" };
+    const cellar = { en: "Cellar", zh: "地窖" };
+    const same = { name, died: { slot: "21:00", room: lamp }, found: { slot: "21:20", room: lamp } };
+    const moved = { ...same, found: { slot: "21:20", room: cellar } };
+    expect(victimLine("en", same)).toBe("Dr. Chen died at 21:00 in the lamp room and was found at 21:20.");
+    expect(victimLine("zh", same)).toBe("陈医生于 21:00 死在灯室，21:20 被发现。");
+    expect(victimLine("en", moved)).toBe("Dr. Chen died at 21:00 in the lamp room and was found in the cellar at 21:20.");
+    expect(victimLine("zh", moved)).toBe("陈医生于 21:00 死在灯室，21:20 在地窖被发现。");
   });
 
   it("says everything in both languages", () => {
