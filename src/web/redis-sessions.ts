@@ -56,13 +56,16 @@ export class SessionWriteError extends Error {
   }
 }
 
-// KEYS: session, open.  ARGV: id, record, owner, revision, expires at, now, the most games in play
+// KEYS: session, open.  ARGV: id, record, owner, revision, expires at, now, the most games in play, time left
+// "Expires at" and "now" are the server's clock and are only compared with each other, in
+// `open`. The session's own time limit is given as time left, which Redis counts on its own
+// clock: the two clocks need not agree.
 const CREATE = `
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[6])
 if redis.call('EXISTS', KEYS[1]) == 1 then return 'exists' end
 if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[7]) then return 'full' end
 redis.call('HSET', KEYS[1], 'record', ARGV[2], 'owner', ARGV[3], 'revision', ARGV[4])
-redis.call('PEXPIREAT', KEYS[1], ARGV[5])
+redis.call('PEXPIRE', KEYS[1], ARGV[8])
 redis.call('ZADD', KEYS[2], ARGV[5], ARGV[1])
 return 'ok'
 `;
@@ -143,7 +146,11 @@ export function redisSessions(redis: ScriptRunner, options: RedisSessionOptions)
   return {
     create: async (record) => {
       const id = record.session.id;
-      const said = await redis.eval(CREATE, [key(id), open], [id, JSON.stringify(record), record.owner, String(record.revision), String(record.createdAt + ttl), String(now()), String(max)]);
+      const at = now();
+      const expires = record.createdAt + ttl;
+      // A session whose time is already up is not kept at all.
+      if (expires <= at) return false;
+      const said = await redis.eval(CREATE, [key(id), open], [id, JSON.stringify(record), record.owner, String(record.revision), String(expires), String(at), String(max), String(expires - at)]);
       return said === "ok";
     },
 

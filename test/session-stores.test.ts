@@ -203,6 +203,31 @@ describe.skipIf(!redisUrl)("sessions in Redis", () => {
     expect(await redisSessions(runner, { prefix: own() }).read(a)).toBeNull();
   });
 
+  it("counts a session's time on Redis's own clock: a server whose clock is ahead or behind keeps it exactly as long", async () => {
+    for (const skew of [5_000, -5_000]) {
+      const p = own();
+      const now = () => Date.now() + skew;
+      const store = redisSessions(runner, { prefix: p, ttlMs: 400, max: 1, now });
+      const a = id();
+      expect(await store.create(blank(a, { createdAt: now() }))).toBe(true);
+      const left = await admin.pttl(`${p}:s:${a}`);
+      expect(left).toBeGreaterThan(300);
+      expect(left).toBeLessThanOrEqual(400);
+      await wait(200);
+      expect(await store.read(a)).not.toBeNull();
+      expect(await store.create(blank(id(), { createdAt: now() }))).toBe(false);
+      await wait(250);
+      expect(await store.read(a)).toBeNull();
+      // Its place is free by the same server's clock.
+      expect(await store.create(blank(id(), { createdAt: now() }))).toBe(true);
+    }
+    // A session whose time is already up is not kept at all.
+    const store = redisSessions(runner, { prefix: own(), ttlMs: 400 });
+    const old = id();
+    expect(await store.create(blank(old, { createdAt: Date.now() - 400 }))).toBe(false);
+    expect(await store.read(old)).toBeNull();
+  });
+
   it("a game that has ended gives up its place and can still be read", async () => {
     const p = own();
     const store = redisSessions(runner, { prefix: p, max: 1 });
