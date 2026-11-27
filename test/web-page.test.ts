@@ -244,6 +244,18 @@ describe("the dev server hands out the page, and nothing else in the checkout", 
         const climbed = await (await fetch(`${base}/../${file}`)).text();
         expect(climbed, file).not.toMatch(secret);
       }
+      // The published replays are files beside the page. The ones that wait to be looked at are
+      // handed out by plain file name only: nothing else can be reached through that address.
+      const replays = await fetch(`${base}/replays/index.json`);
+      expect(replays.status).toBe(200);
+      expect(((await replays.json()) as { replays: { id: string }[] }).replays.map((r) => r.id)).toEqual(["lighthouse"]);
+      for (const name of ["..%2F..%2F..%2Fpackage.json", "%2e%2e%2f%2e%2e%2f%2e%2e%2fpackage.json", "..%2Fpilot-a-1.json", "deeper/x.json", "notes.txt", "package.json", ""]) {
+        const r = await fetch(`${base}/replays/preview/${name}`);
+        const body = await r.text();
+        expect(r.status, name).toBe(404);
+        expect(body, name).toBe("{}");
+      }
+      expect((await fetch(`${base}/replays/preview/index.json`, { method: "POST" })).status).toBe(404);
       // The policy itself, as the server resolved it.
       const fs = dev.config.server.fs;
       expect(fs.strict).toBe(true);
@@ -364,6 +376,8 @@ describe("the page", () => {
       const secrets = [c.title.en, c.title.zh, c.setting.en, ...c.suspects.flatMap((s) => [s.name.en, s.name.zh]), ...c.evidence.flatMap((e) => [e.text.en, e.text.zh]), ...c.assertions.map((a) => a.id)];
       for (const secret of secrets) expect(bundle.includes(secret), `${c.id}: ${secret}`).toBe(false);
     }
+    // The published replays go out with the page, as files of their own; the ones that wait to be looked at do not.
+    expect(readdirSync(join(out, "replays")).sort()).toEqual(["index.json", "lighthouse.json"]);
     // The rules of proof come from the server too: the page does not carry a copy that could drift.
     expect(bundle).not.toContain("A room's record lists the people who were seen there.");
   }, 60_000);

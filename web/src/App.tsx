@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, GameError, type CasesReply, type View, type ViewReply } from "./api";
 import { supersedes, type Stamp } from "./latest";
+import { listReplays, loadReplay, PREVIEW, REPLAYS, stepBy, type Listed, type Replay, type ReplayMove } from "./replay";
 import { dollars, pick, S, victimLine, type Lang, type Text } from "./strings";
 
 type Shown = NonNullable<NonNullable<ViewReply["ask"]>["shown"]>;
@@ -43,6 +44,10 @@ export function App() {
   const [error, setError] = useState<Trouble | null>(null);
   const [notice, setNotice] = useState<Text | null>(null);
   const [shown, setShown] = useState<Shown | null>(null);
+  /** The replays that can be watched. They are files beside the page, so they are listed whether or not the server answers. */
+  const [replays, setReplays] = useState<Listed[]>([]);
+  /** The replay being watched, and the step it is at. */
+  const [playing, setPlaying] = useState<{ replay: Replay; step: number } | null>(null);
   const t = useCallback((text: Text) => pick(lang, text), [lang]);
   /**
    * Which game the page is on. It moves every time the player opens a case or leaves one.
@@ -72,6 +77,7 @@ export function App() {
     newest.current = null;
     remembered.set("ta.session", null);
     setView(null);
+    setPlaying(null);
     setShown(null);
     setNotice(null);
     setError(null);
@@ -116,10 +122,36 @@ export function App() {
       .catch((e: unknown) => !gone && setError({ text: e instanceof GameError ? e.text : S.networkError }));
     const session = remembered.get("ta.session");
     if (session) void read(session, S.resumeFailed, S.tryAgain);
+    // The replays: the published ones, and on a dev server also the ones waiting to be looked at.
+    void Promise.all([listReplays(REPLAYS), import.meta.env.DEV ? listReplays(PREVIEW) : Promise.resolve([])]).then(([published, preview]) => !gone && setReplays([...published, ...preview]));
     return () => {
       gone = true;
     };
   }, [read]);
+
+  /** Open a replay. It is a file: nothing is asked of the game's server. */
+  const watch = useCallback(
+    async (card: Listed) => {
+      if (busy) return;
+      // Whatever was still on its way for a game is dropped: the page is somewhere else now.
+      const mine = ++generation.current;
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const replay = await loadReplay(card);
+        if (generation.current !== mine) return;
+        setPlaying({ replay, step: 0 });
+      } catch (e) {
+        if (generation.current === mine) setError({ text: e instanceof GameError ? e.text : S.replayFailed });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy],
+  );
+  /** What the meters at the top are about: the replay's frame while one is watched, else the game. */
+  const onScreen = playing ? playing.replay.frames[playing.step]!.view : view;
 
   /** Do one thing on the server and show where the game stands afterwards. It is never repeated on its own. */
   const run = useCallback(
@@ -178,17 +210,17 @@ export function App() {
           <span className="brand-tag">{t(S.tagline)}</span>
         </button>
         <div className="top-right">
-          {view && (
+          {onScreen && (
             <div className="meters" aria-live="polite">
               <span className="meter">
-                {t(S.actionsLeft)} <strong>{view.actions.left}</strong> / {view.actions.cap}
+                {t(S.actionsLeft)} <strong>{onScreen.actions.left}</strong> / {onScreen.actions.cap}
               </span>
-              <span className="meter" title={t(view.model === "on" ? S.modelOn : S.modelOff)}>
-                <strong>{view.cost.requests}</strong> {t(S.requests)} · <strong>{dollars(view.cost.nano)}</strong> {t(S.confirmed)}
+              <span className="meter" title={t(onScreen.model === "on" ? S.modelOn : S.modelOff)}>
+                <strong>{onScreen.cost.requests}</strong> {t(S.requests)} · <strong>{dollars(onScreen.cost.nano)}</strong> {t(S.confirmed)}
               </span>
-              {view.cost.unfinished > 0 && (
+              {onScreen.cost.unfinished > 0 && (
                 <span className="meter" title={t(S.unfinishedHint)}>
-                  <strong>{view.cost.unfinished}</strong> {t(S.unfinished)}
+                  <strong>{onScreen.cost.unfinished}</strong> {t(S.unfinished)}
                 </span>
               )}
             </div>
@@ -219,7 +251,9 @@ export function App() {
         </div>
       )}
 
-      {view ? (
+      {playing ? (
+        <Watching replay={playing.replay} step={playing.step} lang={lang} onStep={(step) => setPlaying({ replay: playing.replay, step })} onLeave={leave} />
+      ) : view ? (
         <Game
           view={view}
           lang={lang}
@@ -232,13 +266,26 @@ export function App() {
           onLeave={leave}
         />
       ) : (
-        <Library cases={cases} lang={lang} busy={busy} onOpen={(id) => run(() => api.start(id), null)} />
+        <Library cases={cases} replays={replays} lang={lang} busy={busy} onOpen={(id) => run(() => api.start(id), null)} onWatch={(card) => void watch(card)} />
       )}
     </div>
   );
 }
 
-function Library({ cases, lang, busy, onOpen }: { cases: CasesReply | null; lang: Lang; busy: boolean; onOpen: (id: string) => void }) {
+/** Who chose a replay's moves, and what that cost, in a sentence. */
+function playedBy(lang: Lang, player: Replay["player"]): string {
+  const t = (text: Text) => pick(lang, text);
+  if (player.kind === "solver") return t(S.bySolver);
+  // Each language orders the sentence its own way.
+  if (lang === "zh") {
+    const unused = player.unused > 0 ? `，其中 ${player.unused} 次无法使用` : "";
+    return `每一步都由侦探智能体（${player.model}）选择：共 ${player.turns} 次回复${unused}，当时实际计费 ${dollars(player.costNano)}。${t(S.replayStatements)}`;
+  }
+  const unused = player.unused > 0 ? `, ${player.unused} of them not usable` : "";
+  return `Every move was chosen by the detective agent (${player.model}): ${player.turns} replies${unused}, ${dollars(player.costNano)} as billed when it was played. ${t(S.replayStatements)}`;
+}
+
+function Library({ cases, replays, lang, busy, onOpen, onWatch }: { cases: CasesReply | null; replays: Listed[]; lang: Lang; busy: boolean; onOpen: (id: string) => void; onWatch: (card: Listed) => void }) {
   const t = (text: Text) => pick(lang, text);
   return (
     <main className="library">
@@ -261,7 +308,129 @@ function Library({ cases, lang, busy, onOpen }: { cases: CasesReply | null; lang
           </article>
         ))}
       </div>
+      {replays.length > 0 && (
+        <section className="replays" aria-label={t(S.replays)}>
+          <h1>{t(S.replays)}</h1>
+          <p className="hint">{t(S.replaysHint)}</p>
+          <div className="cards">
+            {replays.map((r) => (
+              <article className="card replay-card" key={`${r.base}/${r.id}`}>
+                <h2>{t(r.title)}</h2>
+                <p>{t(r.setting)}</p>
+                <p className="facts">
+                  {r.suspects} {t(S.people)} · {r.actions} {t(S.actionsCap)}
+                </p>
+                <p className="hint">{playedBy(lang, r.player)}</p>
+                <button disabled={busy} onClick={() => onWatch(r)}>
+                  {t(S.watch)}
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
     </main>
+  );
+}
+
+/** How long each step stays on screen while a replay plays by itself. */
+const REPLAY_STEP_MS = 3_500;
+
+/**
+ * A replay being watched: the game exactly as it stood at one step, which nothing on the page
+ * can change, and a bar to move between steps. It asks nothing of the server.
+ */
+function Watching({ replay, step, lang, onStep, onLeave }: { replay: Replay; step: number; lang: Lang; onStep: (step: number) => void; onLeave: () => void }) {
+  const t = (text: Text) => pick(lang, text);
+  const [auto, setAuto] = useState(false);
+  const last = replay.frames.length - 1;
+  const frame = replay.frames[step]!;
+  const names = new Map(frame.view.people.map((p) => [p.handle, p.name]));
+  const nameOf = (handle: string) => {
+    const name = names.get(handle);
+    return name ? t(name) : handle;
+  };
+  const go = useCallback((by: number) => onStep(stepBy(replay, step, by)), [onStep, replay, step]);
+
+  // Playing by itself: one step at a time, and it stops at the end.
+  useEffect(() => {
+    if (!auto) return;
+    if (step >= last) {
+      setAuto(false);
+      return;
+    }
+    const timer = window.setTimeout(() => go(1), REPLAY_STEP_MS);
+    return () => window.clearTimeout(timer);
+  }, [auto, go, last, step]);
+
+  // The arrow keys step, unless the reader is typing or a button has the key.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      if (e.key === "ArrowRight") go(1);
+      else if (e.key === "ArrowLeft") go(-1);
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [go]);
+
+  const said = (move: ReplayMove | undefined): string => {
+    if (!move) return t(S.replayOpening);
+    // Each language orders the sentence its own way.
+    if (lang === "zh") {
+      if (move.kind === "ask") return `询问${nameOf(move.person)}：${move.label.zh}`;
+      if (move.kind === "inspect") return `查看记录：${move.label.zh}`;
+      return `指认${nameOf(move.person)}，引用 ${move.evidence.length} 项证据`;
+    }
+    if (move.kind === "ask") return `Asked ${nameOf(move.person)}: ${move.label.en}`;
+    if (move.kind === "inspect") return `Inspected: ${move.label.en}`;
+    return `Accused ${nameOf(move.person)}, citing ${move.evidence.length} items of evidence`;
+  };
+
+  return (
+    <>
+      <section className="replay-bar" aria-label={t(S.replayLabel)}>
+        <div className="replay-head">
+          <span className="replay-tag">{t(S.replayLabel)}</span>
+          <span className="replay-by">{playedBy(lang, replay.player)}</span>
+        </div>
+        <div className="replay-controls">
+          <button onClick={() => onStep(0)} disabled={step === 0}>
+            {t(S.replayFirst)}
+          </button>
+          <button onClick={() => go(-1)} disabled={step === 0}>
+            ◀ {t(S.replayBack)}
+          </button>
+          <span className="replay-step" aria-live="polite">
+            {lang === "zh" ? `第 ${step} 步，共 ${last} 步` : `Step ${step} of ${last}`}
+          </span>
+          <button className="primary" onClick={() => go(1)} disabled={step === last}>
+            {t(S.replayNext)} ▶
+          </button>
+          <button onClick={() => setAuto(!auto)} disabled={step === last} aria-pressed={auto}>
+            {t(auto ? S.replayPause : S.replayPlay)}
+          </button>
+          <button onClick={onLeave}>{t(S.replayLeave)}</button>
+        </div>
+        <p className="replay-move" aria-live="polite">
+          {said(frame.move)}
+        </p>
+      </section>
+      <Game
+        view={frame.view}
+        lang={lang}
+        busy={false}
+        shown={null}
+        watching={{ focus: frame.move && frame.move.kind !== "inspect" && frame.move.kind !== "accuse" ? frame.move.person : null }}
+        onTopic={() => undefined}
+        onOwn={() => undefined}
+        onInspect={() => undefined}
+        onAccuse={() => undefined}
+        onLeave={onLeave}
+      />
+    </>
   );
 }
 
@@ -275,9 +444,14 @@ interface GameProps {
   onInspect: (inspection: string) => void;
   onAccuse: (person: string, evidence: string[]) => void;
   onLeave: () => void;
+  /**
+   * Set when this is a replay's frame and not a game: nothing on it can be acted on. `focus`
+   * is the person the step was about, whose conversation is opened.
+   */
+  watching?: { focus: string | null };
 }
 
-function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, onLeave }: GameProps) {
+function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, onLeave, watching }: GameProps) {
   const t = (text: Text) => pick(lang, text);
   const [selected, setSelected] = useState<string | null>(null);
   const [accusing, setAccusing] = useState(false);
@@ -288,7 +462,12 @@ function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, on
     return person ? t(person.name) : handle;
   };
   const person = selected ? names.get(selected) : undefined;
-  const locked = busy || view.over;
+  const locked = busy || view.over || watching !== undefined;
+  // In a replay, open the conversation of the person each step was about.
+  const focus = watching?.focus ?? null;
+  useEffect(() => {
+    if (focus) setSelected(focus);
+  }, [focus, view.revision]);
 
   if (view.over && view.verdict && view.reveal) return <Verdict view={view} lang={lang} nameOf={nameOf} onLeave={onLeave} />;
 
@@ -349,8 +528,8 @@ function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, on
                   </button>
                 ))}
               </div>
-              <h3>{t(S.ownWords)}</h3>
-              {view.model === "on" ? (
+              {!watching && <h3>{t(S.ownWords)}</h3>}
+              {watching ? null : view.model === "on" ? (
                 <form
                   className="own"
                   onSubmit={(e) => {
@@ -447,9 +626,11 @@ function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, on
             ))}
           </ul>
           {view.actions.left === 0 && <p className="hint">{t(S.noActions)}</p>}
-          <button className="primary accuse" disabled={busy} onClick={() => setAccusing(true)}>
-            {t(S.accuse)}
-          </button>
+          {!watching && (
+            <button className="primary accuse" disabled={busy} onClick={() => setAccusing(true)}>
+              {t(S.accuse)}
+            </button>
+          )}
         </section>
       </div>
 

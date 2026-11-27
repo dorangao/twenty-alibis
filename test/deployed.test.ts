@@ -529,6 +529,8 @@ server.listen(0, "127.0.0.1", () => console.log("PORT " + server.address().port)
     expect(JSON.parse(readFileSync(join(out, "functions/api.func/.vc-config.json"), "utf8"))).toEqual({ runtime: "nodejs22.x", handler: "index.mjs", launcherType: "Nodejs", shouldAddHelpers: false, shouldAddSourcemapSupport: false, maxDuration: 200 });
     expect(readdirSync(join(out, "functions/api.func")).sort()).toEqual([".vc-config.json", "cases", "index.mjs"]);
     expect(existsSync(join(out, "static/index.html"))).toBe(true);
+    // The published replays are among the page's files: they play with the function gone.
+    expect(readdirSync(join(out, "static/replays")).sort()).toEqual(["index.json", "lighthouse.json"]);
     // The route's pattern: everything under /api, and nothing that only starts like it.
     const route = /^\/api(?:\/.*)?$/;
     expect(["/api", "/api/cases", "/api/sessions/x/ask"].every((p) => route.test(p))).toBe(true);

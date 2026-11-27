@@ -66,6 +66,11 @@ describe("the detective plays through the same game a player does", () => {
     expect(report).toMatchObject({ outcome: "solved", turns: 6, actions: 5, requests: 6, costNano: 6 * PRICE, detectiveCostNano: 6 * PRICE, suspectCostNano: 0 });
     expect(report.verdict).toMatchObject({ accused: "s-03", outcome: "solved", missing: [], open: [] });
     expect(report.problem).toBeUndefined();
+    // Each step that did something also says what, by the case's own ids, for code to read.
+    expect(report.steps.map((s) => s.move?.type)).toEqual(["ask", "inspect", "inspect", "inspect", "inspect", "accuse"]);
+    expect(report.steps[0]!.move).toEqual({ type: "ask", topic: report.session.turns[0]!.turn.topic });
+    expect(report.steps.slice(1, 5).map((s) => (s.move as { inspection: string }).inspection)).toEqual(report.session.inspections);
+    expect(report.steps[5]!.move).toEqual({ type: "accuse", suspect: "s-03", evidence: report.verdict!.cited });
     expect(report.steps.map((s) => s.did)).toEqual([
       "asked T2 (t-02)",
       "inspected I5 (i-01)",

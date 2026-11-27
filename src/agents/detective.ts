@@ -31,12 +31,17 @@ export const DETECTIVE_OUTPUT_TOKENS = 3_000;
 /** Two unusable replies in a row end the game: the detective is not making progress. */
 export const MAX_WASTED_IN_A_ROW = 2;
 
+/** One thing done in a game, named by the case file's own ids. */
+export type Move = { type: "ask"; topic: string } | { type: "inspect"; inspection: string } | { type: "accuse"; suspect: string; evidence: string[] };
+
 export interface DetectiveStep {
   turn: number;
   /** What the detective did, in plain words, or why its reply could not be used. */
   did: string;
   /** False when the reply could not be used and nothing happened. */
   used: boolean;
+  /** What was done, when something was: the same thing `did` says, for code to read. */
+  move?: Move;
 }
 
 export interface DetectiveReport {
@@ -283,7 +288,7 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
             const asked = await ask(suspects, c, s, { suspect: topic.suspect, topic: topic.id, language: "en", ...(args.cacheKey ? { cacheKey: args.cacheKey } : {}) });
             s = asked.session;
             wasted = 0;
-            steps.push({ turn, did: `asked ${topic.handle} (${topic.id})`, used: true });
+            steps.push({ turn, did: `asked ${topic.handle} (${topic.id})`, used: true, move: { type: "ask", topic: topic.id } });
             // With the suspects' model off, a refusal is the expected path. With it on, any problem ends the game.
             if (asked.turn.problem && (liveSuspects || asked.turn.requests > 0)) problem = `suspect:${asked.turn.problem}`;
           }
@@ -293,7 +298,7 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
           else {
             s = inspect(c, s, item.id).session;
             wasted = 0;
-            steps.push({ turn, did: `inspected ${item.handle} (${item.id})`, used: true });
+            steps.push({ turn, did: `inspected ${item.handle} (${item.id})`, used: true, move: { type: "inspect", inspection: item.id } });
           }
         } else if (reply.action === "accuse") {
           const index = typeof reply.person === "string" && /^P\d+$/.test(reply.person) ? Number(reply.person.slice(1)) - 1 : -1;
@@ -303,7 +308,7 @@ export async function playDetective(args: DetectiveArgs): Promise<DetectiveRepor
           else {
             const done = accuse(c, s, { suspect: accused.id, evidence: cited as string[] });
             s = done.session;
-            steps.push({ turn, did: `accused ${reply.person as string} (${accused.id}) citing ${cited.length} record(s)`, used: true });
+            steps.push({ turn, did: `accused ${reply.person as string} (${accused.id}) citing ${cited.length} record(s)`, used: true, move: { type: "accuse", suspect: accused.id, evidence: cited as string[] } });
             return report(done.verdict.outcome, done.verdict);
           }
         } else stop = waste(`unknown action: ${String(reply.action)}`);
