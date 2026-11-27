@@ -44,7 +44,7 @@ What the runs so far showed. Each line is a measurement from a small batch, on N
 | The same three model-written cases, one detective game each under the final rules | 3 of 3 solved |
 | Lines told to "say it your way, add no fact" | of seven lines read, seven were in character with no added time, place, object or person |
 | Reasoning effort "minimal" against "low", on two pairs of gossip prompts | 195 reasoning tokens against 606: about a third |
-| One long request sent a second time with a cache label | 7,796 of its 7,836 input tokens were cached (99.5%); it cost $0.000175 where the first cost $0.000824 |
+| Second of two labelled requests sharing a long prefix | 7,796 of its 7,836 input tokens were cached (99.5%); it cost $0.000175 where the first cost $0.000824 |
 
 Why this matters for the game: at these prices every suspect, the author and the detective can each be an agent. A typed question, a written case and the detective's side of a solved game each cost a fraction of a cent. What a whole live game costs a player who types every question has not been measured: by the question prices above it is the number of questions times about $0.0004. And the model follows tools and schemas closely enough that code can decide what counts as evidence without ever taking the model's sentence for it.
 
@@ -76,7 +76,7 @@ What these runs do not show, and what the design does about it:
 | 同样三个模型写的案件，按最终规则各由侦探玩一局 | 3 个全部破解 |
 | 要求"用你的方式说，不要添加事实"的台词 | 读过的七句里，七句都符合角色，没有多出时间、地点、物品或人物 |
 | 推理强度"minimal"对比"low"，两组成对的传话提示词 | 推理 token 195 对 606，约三分之一 |
-| 一个很长的请求带缓存标签发第二次 | 它的 7,836 个输入 token 中有 7,796 个命中缓存（99.5%）；这次花费 $0.000175，第一次是 $0.000824 |
+| 两次共用长前缀且带缓存标签的请求中，第二次 | 它的 7,836 个输入 token 中有 7,796 个命中缓存（99.5%）；这次花费 $0.000175，第一次是 $0.000824 |
 
 这对游戏意味着：按这样的价格，每个嫌疑人、作者和侦探都可以各是一个智能体。一个自己提的问题、写一个案件、侦探破一局所用的请求，各自都只要一美分的零头。玩家每个问题都自己打字的一整局要花多少，还没有实测过：按上面的单价，就是问题数乘以约 $0.0004。而且模型对工具和格式遵守得足够好，什么算证据可以完全由代码决定，从不以模型说的那句话为准。
 
