@@ -4,8 +4,9 @@
  *
  *   npm run build:vercel [-- --out <folder>]        default folder: .vercel/output
  *
- * The folder must be new, empty, or hold an earlier build's output and nothing else. A
- * folder with anything else in it is refused, and nothing in it is touched.
+ * A folder named with --out must be new or empty: nothing in it is ever removed. The default
+ * folder, which is this project's own, is written over if it holds an earlier build's output
+ * and nothing else. Anything else is refused, and nothing is touched.
  *
  *   <out>/config.json                     the routes: /api/* goes to the function, the rest is files
  *   <out>/static/                         the page, built by Vite. No case text is in it.
@@ -29,17 +30,21 @@ if (args.length !== 0 && !(args.length === 2 && args[0] === "--out" && args[1]))
   process.exit(1);
 }
 const repo = resolve(import.meta.dirname, "..");
-const out = resolve(args[1] ?? join(repo, ".vercel/output"));
+/** The project's own output folder: the one place a build may write over an earlier build. */
+const own = join(repo, ".vercel/output");
+const out = resolve(args[1] ?? own);
 const func = join(out, "functions/api.func");
 
 /** How long the host lets the function run. One question is at most three requests of a minute each. */
 const MAX_DURATION_S = 200;
 
-// The folder must be new, empty, or an earlier build's output. Nothing else is ever removed.
-const ready = prepareOutputDir(out);
+// A folder named on the command line must be new or empty. Only the project's own default
+// folder is written over, and only when it holds nothing but an earlier build.
+const ready = prepareOutputDir(out, { own: out === own });
 if (!ready.ok) {
   const why = {
     "not-a-folder": ["it is not a folder", "它不是一个目录"],
+    "not-empty": ["it is not empty, and a folder named with --out is never cleared", "它不是空的，而用 --out 指定的目录从不会被清空"],
     "holds-other-files": ["it holds files that are not a build's output", "里面有不属于构建产物的文件"],
     "not-a-build": ["what is in it is not an earlier build's output", "里面的内容不是之前的构建产物"],
   }[ready.why];

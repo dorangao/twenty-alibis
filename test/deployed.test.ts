@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -384,72 +384,100 @@ describe("the folder a build writes into", () => {
     for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   });
   const tree = (dir: string): string[] => readdirSync(dir, { recursive: true, encoding: "utf8" }).sort();
-
-  it("takes a folder that does not exist yet, and one that is empty", () => {
-    const parent = fresh();
-    expect(prepareOutputDir(join(parent, "new/deeper"))).toEqual({ ok: true });
-    expect(existsSync(join(parent, "new/deeper"))).toBe(true);
-    expect(prepareOutputDir(fresh())).toEqual({ ok: true });
-  });
-
-  it("takes an earlier build's output and removes that, and only that", () => {
-    const out = fresh();
+  /** What an earlier build leaves. */
+  const built = (out: string) => {
     mkdirSync(join(out, "static/assets"), { recursive: true });
     mkdirSync(join(out, "functions/api.func"), { recursive: true });
     writeFileSync(join(out, "static/assets/old.js"), "old");
     writeFileSync(join(out, "functions/api.func/index.mjs"), "old");
     writeFileSync(join(out, "config.json"), JSON.stringify({ version: 3, routes: [] }));
-    expect(prepareOutputDir(out)).toEqual({ ok: true });
+  };
+
+  it("takes a folder that does not exist yet, and one that is empty, whoever named it", () => {
+    for (const own of [false, true]) {
+      const parent = fresh();
+      expect(prepareOutputDir(join(parent, "new/deeper"), { own })).toEqual({ ok: true });
+      expect(existsSync(join(parent, "new/deeper"))).toBe(true);
+      expect(prepareOutputDir(fresh(), { own })).toEqual({ ok: true });
+    }
+  });
+
+  it("never removes anything from a folder that was named on the command line, whatever it looks like", () => {
+    const cases: [string, (out: string) => void][] = [
+      ["somebody's work", (out) => (mkdirSync(join(out, "notes")), writeFileSync(join(out, "notes/draft.md"), "three days of work"))],
+      // A config file of another program that happens to say "version 3", and nothing else.
+      ["a foreign version-3 config", (out) => writeFileSync(join(out, "config.json"), JSON.stringify({ version: 3, database: "prod" }))],
+      // Another project's build output, in exactly the layout this build writes.
+      ["another project's build", built],
+      ["an empty file", (out) => writeFileSync(join(out, ".keep"), "")],
+    ];
+    for (const [what, fill] of cases) {
+      const out = fresh();
+      fill(out);
+      const before = tree(out);
+      const contents = before.filter((f) => lstatSync(join(out, f)).isFile()).map((f) => readFileSync(join(out, f), "utf8"));
+      expect(prepareOutputDir(out, { own: false }), what).toEqual({ ok: false, why: "not-empty" });
+      expect(tree(out), what).toEqual(before);
+      expect(before.filter((f) => lstatSync(join(out, f)).isFile()).map((f) => readFileSync(join(out, f), "utf8")), what).toEqual(contents);
+    }
+  });
+
+  it("in the project's own folder, takes an earlier build's output and removes that, and only that", () => {
+    const out = fresh();
+    built(out);
+    expect(prepareOutputDir(out, { own: true })).toEqual({ ok: true });
     expect(tree(out)).toEqual([]);
   });
 
-  it("refuses a folder that holds anything else, and touches nothing in it", () => {
-    // Somebody's work, with or without a build's output beside it.
+  it("even in the project's own folder, refuses if anything else is there, and touches nothing", () => {
     for (const withBuild of [false, true]) {
       const out = fresh();
       mkdirSync(join(out, "notes"));
       writeFileSync(join(out, "notes/draft.md"), "three days of work");
-      writeFileSync(join(out, "package.json"), "{}");
-      if (withBuild) {
-        mkdirSync(join(out, "static"));
-        writeFileSync(join(out, "static/index.html"), "old page");
-        writeFileSync(join(out, "config.json"), JSON.stringify({ version: 3 }));
-      }
+      if (withBuild) built(out);
       const before = tree(out);
-      expect(prepareOutputDir(out), String(withBuild)).toEqual({ ok: false, why: "holds-other-files" });
+      expect(prepareOutputDir(out, { own: true }), String(withBuild)).toEqual({ ok: false, why: "holds-other-files" });
       expect(tree(out)).toEqual(before);
       expect(readFileSync(join(out, "notes/draft.md"), "utf8")).toBe("three days of work");
     }
-  });
-
-  it("refuses a folder whose files only have a build's names: without a build's config file it is not a build", () => {
+    // Only a build's names, but no build's config file: not a build.
     for (const config of [undefined, "{not json", JSON.stringify({ version: 2 }), JSON.stringify({ name: "my-app" }), "null"]) {
       const out = fresh();
       mkdirSync(join(out, "static"));
-      writeFileSync(join(out, "static/thesis.pdf"), "a site somebody keeps in a folder called static");
+      writeFileSync(join(out, "static/thesis.pdf"), "kept in a folder called static");
       if (config !== undefined) writeFileSync(join(out, "config.json"), config);
       const before = tree(out);
-      expect(prepareOutputDir(out), String(config)).toEqual({ ok: false, why: "not-a-build" });
+      expect(prepareOutputDir(out, { own: true }), String(config)).toEqual({ ok: false, why: "not-a-build" });
       expect(tree(out)).toEqual(before);
     }
   });
 
   it("refuses a path that is a file", () => {
-    const file = join(fresh(), "output");
-    writeFileSync(file, "a file");
-    expect(prepareOutputDir(file)).toEqual({ ok: false, why: "not-a-folder" });
-    expect(readFileSync(file, "utf8")).toBe("a file");
+    for (const own of [false, true]) {
+      const file = join(fresh(), "output");
+      writeFileSync(file, "a file");
+      expect(prepareOutputDir(file, { own })).toEqual({ ok: false, why: "not-a-folder" });
+      expect(readFileSync(file, "utf8")).toBe("a file");
+    }
   });
 
-  it("the build command itself refuses such a folder before it builds anything, and says so in both languages", () => {
-    const out = fresh();
-    writeFileSync(join(out, "keep.txt"), "mine");
-    const built = spawnSync(process.execPath, ["--import", "tsx", "scripts/build-vercel.ts", "--out", out], { cwd: repo, encoding: "utf8", env: { ...process.env, VITE_CONFIG_NATIVE_IGNORE_WARNING: "true" } });
-    expect(built.status).toBe(1);
-    expect(built.stdout).toContain("Nothing was changed");
-    expect(built.stdout).toContain("没有改动任何内容");
-    expect(tree(out)).toEqual(["keep.txt"]);
-    expect(readFileSync(join(out, "keep.txt"), "utf8")).toBe("mine");
+  it("the build command refuses a folder named with --out that is not empty, before it builds anything, and says so in both languages", () => {
+    for (const fill of [(out: string) => writeFileSync(join(out, "keep.txt"), "mine"), (out: string) => writeFileSync(join(out, "config.json"), JSON.stringify({ version: 3 })), built]) {
+      const out = fresh();
+      fill(out);
+      const before = tree(out);
+      const run = spawnSync(process.execPath, ["--import", "tsx", "scripts/build-vercel.ts", "--out", out], { cwd: repo, encoding: "utf8", env: { ...process.env, VITE_CONFIG_NATIVE_IGNORE_WARNING: "true" } });
+      expect(run.status).toBe(1);
+      expect(run.stdout).toContain("Nothing was changed");
+      expect(run.stdout).toContain("没有改动任何内容");
+      expect(tree(out)).toEqual(before);
+    }
+  });
+
+  it("the build command treats only the repository's own .vercel/output as its own", () => {
+    const script = readFileSync(join(repo, "scripts/build-vercel.ts"), "utf8");
+    expect(script).toContain('const own = join(repo, ".vercel/output");');
+    expect(script).toContain("prepareOutputDir(out, { own: out === own })");
   });
 });
 
@@ -506,16 +534,6 @@ server.listen(0, "127.0.0.1", () => console.log("PORT " + server.address().port)
     expect(["/api", "/api/cases", "/api/sessions/x/ask"].every((p) => route.test(p))).toBe(true);
     expect(["/", "/apiary", "/assets/api.js", "/index.html"].some((p) => route.test(p))).toBe(false);
   });
-
-  it("builds again into the same folder: what the earlier build left is replaced, stale files and all", () => {
-    writeFileSync(join(out, "static/stale.txt"), "left by an earlier build");
-    const again = spawnSync(process.execPath, ["--import", "tsx", "scripts/build-vercel.ts", "--out", out], { cwd: repo, encoding: "utf8", env: { ...process.env, VITE_CONFIG_NATIVE_IGNORE_WARNING: "true" } });
-    expect(again.status, again.stdout + again.stderr).toBe(0);
-    expect(existsSync(join(out, "static/stale.txt"))).toBe(false);
-    expect(readdirSync(out).sort()).toEqual(["config.json", "functions", "static"]);
-    // The function is the same file as before, byte for byte: the one the other tests run.
-    expect(readFileSync(join(out, "functions/api.func/index.mjs"), "utf8")).toBe(readFileSync(join(home, "index.mjs"), "utf8"));
-  }, 60_000);
 
   it("puts no case text in the page's files: the cases are in the function only", () => {
     const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]));
