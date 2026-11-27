@@ -4,9 +4,9 @@ A bilingual (English / 中文) murder mystery where every suspect is a [Muse Emb
 
 一款中英双语的推理游戏：每个嫌疑人都是一个 Muse Ember 智能体，而真相由代码掌握，不由模型决定。
 
-> **Status: early build.** The case format, the solver, the spend guard and the model client exist and are tested. The game itself is not playable yet.
+> **Status: playable on your own machine, with the model off.** You can play a case from the briefing to the reveal in a terminal or in a browser; suspects' statements are then worded by code, and nothing is sent or spent. The parts that use Muse Ember (suspects answering in their own words, the case writer, the self-play detective) exist and are tested with a stand-in provider. The game is not hosted anywhere yet.
 >
-> **状态：开发初期。** 案件格式、求解器和额度保护已完成并有测试，游戏本身尚不可玩。
+> **状态：可以在自己的机器上玩，模型关闭。** 可以在终端或浏览器里把一个案件从简报玩到真相公开；此时嫌疑人的陈述由代码写成，不发送任何请求，也不花钱。用到 Muse Ember 的部分（嫌疑人用自己的话回答、案件写作、自我对局的侦探）已经写好，并用替身模型测试过。游戏目前还没有部署到任何网站。
 
 ## The idea · 核心思路
 
@@ -116,6 +116,20 @@ npm run play -- --zh
 The model is off in both: nothing is sent and nothing is spent. You get the briefing, question the suspects from their topic menus, inspect records, read the notebook with its contradictions, accuse, and see the truth. With the model off a suspect's statement is worded by code; a question in your own words needs the model (`npm run play -- --live`, which sends a request only if a person authorized paid requests before the game started). An accusation names the records it rests on: `accuse ada 1 2 4`, or `accuse ada all`.
 
 以上两条命令都不调用模型，不发送任何内容，也不花钱。可以看简报、从话题菜单里审问嫌疑人、查看记录、翻笔记本和其中的矛盾、指认、最后看真相。模型关闭时嫌疑人的陈述由代码转述；用自己的话提问需要模型（`npm run play -- --live`，只有在游戏开始前已有人授权付费请求时才会真的发送）。指认时要写明依据哪些记录：`accuse 艾达 1 2 4`，或 `accuse 艾达 all`。
+
+### Play it in a browser · 在浏览器里玩
+
+```bash
+npm run dev
+```
+
+Then open the address it prints (http://localhost:5173). The model is off here too: nothing is sent and nothing is spent. Pick a case, read the briefing and the rules of proof, question people from their topic menus, inspect records, watch the notebook mark what contradicts what, then accuse with the evidence you tick. The page has a language switch; a topic you have heard can be asked again in the other language at no cost.
+
+The server keeps the case and your session. The page is sent only what you have been given or have found, under its own names (P3, T7, I2, E4), never the case file's. Your browser gets a cookie the page's scripts cannot read; that, not the address, is what lets you back into your game.
+
+然后打开它打印出的地址（http://localhost:5173）。这里模型同样是关闭的：不发送任何内容，也不花钱。选一个案件，读案情简报和证明规则，从话题菜单里询问人物，查看记录，看笔记本标出哪些陈述与证据矛盾，然后勾选证据进行指认。页面可以切换语言；听过的话题可以用另一种语言再问一遍，不消耗行动。
+
+案件和你的进度都保存在服务器上。页面只会收到你已经拿到或查到的内容，并且用的是页面自己的编号（P3、T7、I2、E4），不是案件文件里的编号。浏览器会拿到一个页面脚本读不到的 cookie；让你回到自己那一局的是它，而不是网址。
 
 ### The durable spend counter · 持久化的额度计数
 

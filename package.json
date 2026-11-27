@@ -12,7 +12,7 @@
   "scripts": {
     "test": "vitest run",
     "test:redis": "TEST_REDIS_URL=redis://127.0.0.1:6379/15 vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "check": "npm run typecheck && npm test",
     "redis:up": "docker compose up -d --wait",
     "redis:down": "docker compose down",
@@ -23,7 +23,9 @@
     "trial:turn": "node --env-file-if-exists=.env.local --import tsx scripts/turn-trial.ts",
     "play": "node --env-file-if-exists=.env.local --import tsx scripts/play.ts",
     "trial:writer": "node --env-file-if-exists=.env.local --import tsx scripts/write-trial.ts",
-    "pilot": "node --env-file-if-exists=.env.local --import tsx scripts/pilot.ts"
+    "pilot": "node --env-file-if-exists=.env.local --import tsx scripts/pilot.ts",
+    "dev": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true vite",
+    "build:web": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true vite build"
   },
   "dependencies": {
     "ioredis": "^6.1.0",
@@ -31,8 +33,14 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.7",
+    "@types/react": "^19.3.3",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
+    "vite": "^8.4.0",
     "vitest": "^5.1.1"
   }
 }
