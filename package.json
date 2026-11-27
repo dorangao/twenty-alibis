@@ -28,7 +28,8 @@
     "build:web": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true vite build --config vite.config.ts",
     "build:vercel": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true node --import tsx scripts/build-vercel.ts",
     "check:redis-clean": "node --import tsx scripts/redis-clean-check.ts",
-    "replay:make": "node --import tsx scripts/make-replay.ts"
+    "replay:make": "node --import tsx scripts/make-replay.ts",
+    "case": "node --import tsx scripts/case.ts"
   },
   "dependencies": {
     "ioredis": "^6.1.0",
