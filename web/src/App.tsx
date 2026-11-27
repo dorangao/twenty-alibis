@@ -86,7 +86,11 @@ export function App() {
         const reply = await api.view(session);
         if (generation.current !== mine) return;
         // An older view of this game than the one on screen changes nothing, not even the banner.
-        if (show(reply.view)) setError(null);
+        if (show(reply.view)) {
+          setError(null);
+          // The server says the last question was lost before its answer was kept.
+          if (reply.status) setNotice(reply.status.text);
+        }
       } catch (e) {
         // A look that failed says nothing once the page has moved on, or has since been shown a view.
         if (generation.current !== mine || shownCount.current !== seen) return;
@@ -133,6 +137,7 @@ export function App() {
         show(reply.view);
         remembered.set("ta.session", reply.view.session);
         if (reply.ask?.notice) setNotice(reply.ask.notice.text);
+        else if (reply.status) setNotice(reply.status.text);
         if (reply.ask?.replayed && reply.ask.shown) setShown(reply.ask.shown);
       } catch (e) {
         if (generation.current !== mine) return;
@@ -148,6 +153,7 @@ export function App() {
             const reply = await api.view(current.session);
             if (generation.current !== mine) return;
             show(reply.view);
+            if (reply.status) setNotice(reply.status.text);
             // While the earlier action is still at work the view may yet change: offer another look.
             setError({ text: failure.text, ...(failure.code === "stale" ? {} : { retry: refresh }) });
           } catch {

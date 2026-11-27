@@ -4,6 +4,7 @@ import type { LineSource } from "../agents/suspect-turn";
 import type { Case, Text } from "../case/schema";
 import { accuse, ask, inspect, MAX_QUESTION_CHARS, SessionError, startSession, type Session, type SessionErrorCode } from "../game/session";
 import type { Metered } from "../metered";
+import type { Allowance } from "./allowance";
 import type { SessionRecord, SessionStore } from "./sessions";
 import { caseCard, handlesOf, viewOf, withHandles, type CaseCard, type View } from "./view";
 
@@ -32,6 +33,11 @@ import { caseCard, handlesOf, viewOf, withHandles, type CaseCard, type View } fr
  * done: a click delivered twice, or a tab left open, cannot act twice. The page then reads
  * the session and sees where it stands.
  *
+ * Lost work. A question is written down as begun before its first request to the model is
+ * sent. If the server stops before the answer is kept, the game stands where it stood, the
+ * next view says so, and the question's number is not used again, so its requests can never
+ * be sent a second time under the same ids. What they cost stays counted by the spend guard.
+ *
  * Names. A request names things by the handles its view gave it (P3, T7, I2, E4), never by
  * the case file's ids, and a handle is taken only if it is on the menu or in the notebook.
  *
@@ -58,10 +64,16 @@ export interface ApiDeps {
    * server that is reached directly.
    */
   origin?: string;
+  /**
+   * How many games a visitor may start and how many requests their games may send. A server
+   * that can reach the model sets it. Without it nothing is counted, which is right for a
+   * local server with the model off.
+   */
+  allowance?: Allowance;
   now?: () => number;
 }
 
-export type ErrorCode = "not-found" | "method" | "bad-request" | "forbidden" | "busy" | "stale" | "expired" | "full" | "model-off" | "server" | SessionErrorCode;
+export type ErrorCode = "not-found" | "method" | "bad-request" | "forbidden" | "busy" | "stale" | "expired" | "full" | "allowance" | "crowded" | "model-off" | "server" | SessionErrorCode;
 
 export interface ApiError {
   error: { code: ErrorCode; text: Text };
@@ -80,12 +92,17 @@ export interface AskNote {
    */
   shown?: { person: string; line: string; language: Lang; source: LineSource };
   /** Set when the model could not be used for this question. */
-  notice?: { code: "not-asked" | "worded-by-code"; text: Text };
+  notice?: { code: "not-asked" | "allowance" | "worded-by-code"; text: Text };
 }
 
 export interface ViewReply {
   view: View;
   ask?: AskNote;
+  /**
+   * Set when the last question was begun and never finished: the server stopped before its
+   * answer was kept. It stays until the next thing the player does is kept.
+   */
+  status?: { code: "interrupted"; text: Text };
 }
 
 export interface CasesReply {
@@ -102,6 +119,8 @@ const ERRORS: Record<ErrorCode, { status: number; text: Text }> = {
   stale: { status: 409, text: { en: "The game has moved on since this page was shown. It has been brought up to date; nothing was done.", zh: "页面显示之后，游戏已经有了新的进展。页面已更新，这一步没有执行。" } },
   expired: { status: 410, text: { en: "This game can no longer be continued. Please start the case again.", zh: "这一局已无法继续。请重新开始本案。" } },
   full: { status: 503, text: { en: "Too many games are in progress right now. Please try again in a moment.", zh: "当前进行中的游戏太多。请稍后再试。" } },
+  allowance: { status: 429, text: { en: "You have started as many games as one visitor may in a day. Go on with one you have, or come back tomorrow.", zh: "你今天开始的游戏已达到每位访客的上限。请继续已有的一局，或明天再来。" } },
+  crowded: { status: 503, text: { en: "Too many games have been started in the last hour. Please try again later.", zh: "过去一小时内开始的游戏太多。请稍后再试。" } },
   "model-off": { status: 409, text: { en: "A question in your own words needs the model, and the model is off. Pick a topic from the menu.", zh: "用自己的话提问需要模型，而模型现在是关闭的。请从话题列表里选。" } },
   server: { status: 500, text: { en: "Something went wrong on the server. Reload the page to see where the game stands.", zh: "服务器出了问题。请刷新页面，查看这一局的进展。" } },
   over: { status: 409, text: { en: "This case has ended with an accusation.", zh: "本案已经以指认结束。" } },
@@ -113,7 +132,13 @@ const ERRORS: Record<ErrorCode, { status: number; text: Text }> = {
 
 const NOTICES: Record<NonNullable<AskNote["notice"]>["code"], Text> = {
   "not-asked": { en: "The model is not available right now, so this question was not asked. No action was used.", zh: "模型现在不可用，这个问题没有问出去。没有消耗行动。" },
+  allowance: { en: "You have used all the questions to the model that one visitor may ask in a day, so this question was not asked. No action was used. Topics from the menu still work.", zh: "你今天向模型提问的次数已达到每位访客的上限，这个问题没有问出去。没有消耗行动。话题列表仍然可以用。" },
   "worded-by-code": { en: "The model could not be used for this answer. The statement is worded by code.", zh: "这次回答无法使用模型。陈述由代码写成。" },
+};
+
+const INTERRUPTED: Text = {
+  en: "The last question did not finish: the server stopped before its answer was kept. The game stands where it was, and no action was used. If the question had reached the model, its cost is still counted on the server and is not in the total shown here. You can ask again.",
+  zh: "上一个问题没有完成：服务器在保存回答之前中断了。这一局停在原来的位置，没有消耗行动。如果问题已经发给了模型，它的费用仍由服务器计入，但不在这里显示的合计里。可以重新提问。",
 };
 
 /** The largest request body that is read. */
@@ -251,6 +276,15 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
   const caseOf = (id: string): Case | undefined => deps.cases.find((c) => c.id === id);
   /** The model is on for a session only if it was on when the session began and is on now. */
   const modelFor = (record: SessionRecord): "on" | "off" => (record.mode === "live" && !deps.modelOff ? "on" : "off");
+  /**
+   * A view of a record, with the word that its last question was lost. A question that is
+   * written down as begun while a request is at work on the session is simply in progress.
+   */
+  const replyOf = (c: Case, record: SessionRecord, busy: boolean, note?: AskNote): ViewReply => ({
+    view: viewOf(c, record, modelFor(record)),
+    ...(note ? { ask: note } : {}),
+    ...(record.inFlight !== undefined && !busy ? { status: { code: "interrupted", text: INTERRUPTED } } : {}),
+  });
 
   if (parts.length === 2 && parts[1] === "cases") {
     if (request.method !== "GET") return fail("method");
@@ -267,6 +301,9 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
     if (!c) return fail("not-found");
     // A visitor without a secret is given one now, in a cookie the page's scripts cannot read.
     const secret = visitorOf(request) ?? (deps.newSecret ?? (() => randomBytes(32).toString("hex")))();
+    // Counted before the session is made. If the count cannot be read, this throws and nothing is started.
+    const allowed = deps.allowance ? await deps.allowance.session(hash(secret)) : "ok";
+    if (allowed !== "ok") return fail(allowed === "visitor" ? "allowance" : "crowded");
     const record = withHandles(c, {
       session: startSession(c, (deps.newId ?? randomUUID)()),
       owner: hash(secret),
@@ -282,7 +319,7 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
     // term, so a game begun today cannot outlive the cookie that opens it.
     const secure = new URL(deps.origin ?? request.url).protocol === "https:" ? "; Secure" : "";
     const cookie = { "set-cookie": `${VISITOR_COOKIE}=${secret}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${VISITOR_MAX_AGE_S}${secure}` };
-    return json(201, { view: viewOf(c, record, modelFor(record)) } satisfies ViewReply, cookie);
+    return json(201, replyOf(c, record, false), cookie);
   }
 
   const id = parts[2]!;
@@ -299,9 +336,9 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
 
   if (parts.length === 3) {
     if (request.method !== "GET") return fail("method");
-    const record = await deps.sessions.read(id);
-    if (!record || record.owner !== owner) return fail("not-found");
-    return json(200, { view: viewOf(caseFor(record), record, modelFor(record)) } satisfies ViewReply);
+    const found = await deps.sessions.read(id);
+    if (!found || found.record.owner !== owner) return fail("not-found");
+    return json(200, replyOf(caseFor(found.record), found.record, found.busy));
   }
 
   if (parts.length !== 4 || !["ask", "inspect", "accuse"].includes(parts[3]!)) return fail("not-found");
@@ -311,7 +348,7 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
   if (typeof body.revision !== "number" || !Number.isSafeInteger(body.revision)) return fail("bad-request");
   const revision = body.revision;
 
-  const done = await deps.sessions.update<ViewReply>(id, owner, async (record) => {
+  const done = await deps.sessions.update<ViewReply>(id, owner, async (record, save) => {
     const c = caseFor(record);
     // The page acted on a view the session has since left behind. Nothing is done.
     if (record.revision !== revision) throw new Refused("stale");
@@ -320,8 +357,11 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
     const keep = (next: Session, note?: AskNote): { record: SessionRecord; value: ViewReply } => {
       // The revision moves only when the session did: a saved answer given again changes nothing.
       const changed = JSON.stringify(next) !== JSON.stringify(record.session);
-      const kept = changed ? withHandles(c, { ...record, session: next, revision: record.revision + 1 }) : record;
-      return { record: kept, value: { view: viewOf(c, kept, model), ...(note ? { ask: note } : {}) } };
+      // Once something new is kept, the question that was begun is either in it or behind it.
+      const { inFlight: _begun, ...settled } = record;
+      const kept = changed ? withHandles(c, { ...settled, session: next, revision: record.revision + 1 }) : record;
+      // This request holds the session, so a question still marked as begun is one that was lost.
+      return { record: kept, value: replyOf(c, kept, false, note) };
     };
     /** The case's id for a handle, or a refusal that is the same whether the thing is locked or was never there. */
     const need = (found: string | undefined, code: ErrorCode = "not-available"): string => {
@@ -340,7 +380,7 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
 
     const noteOf = (result: { replayed: boolean; recorded: boolean; turn: { suspect: string; line: string; language: Lang; source: LineSource; problem?: string } }): AskNote => {
       const note: AskNote = { replayed: result.replayed, recorded: result.recorded };
-      if (!result.recorded) note.notice = { code: "not-asked", text: NOTICES["not-asked"] };
+      if (!result.recorded) note.notice = spent ? { code: "allowance", text: NOTICES.allowance } : { code: "not-asked", text: NOTICES["not-asked"] };
       else {
         note.shown = { person: h.person.handle(result.turn.suspect), line: result.turn.line, language: result.turn.language, source: result.turn.source };
         // With the model off, a statement worded by code is the expected answer and needs no notice.
@@ -349,7 +389,31 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
       return note;
     };
     // A session that began with the model off never reaches the real one, whatever the server holds now.
-    const metered: Metered = model === "on" ? deps.metered : async (r) => ({ ok: false, attemptId: r.attemptId, sent: false, reason: "kill-switch" });
+    const refuse: Metered = async (r) => ({ ok: false, attemptId: r.attemptId, sent: false, reason: "kill-switch" });
+    /** True once the visitor's allowance has refused a request of this question. */
+    let spent = false;
+    let begun = false;
+    const live: Metered = async (r) => {
+      // Before the question's first request: write down that it has begun, and move its number
+      // on. If this worker is lost from here on, the number is used up and the next view says
+      // so. If this cannot be written, it throws, and nothing is sent.
+      if (!begun) {
+        const n = record.session.asked + 1;
+        await save({ ...record, session: { ...record.session, asked: n }, inFlight: n });
+        begun = true;
+      }
+      if (spent) return refuse(r);
+      if (deps.allowance) {
+        // An allowance that cannot be read is "no": the request is not sent.
+        const allowed = await deps.allowance.request(owner).catch(() => null);
+        if (allowed !== true) {
+          spent = allowed === false;
+          return refuse(r);
+        }
+      }
+      return deps.metered(r);
+    };
+    const metered: Metered = model === "on" ? live : refuse;
 
     if (body.topic !== undefined) {
       const topic = need(h.topic.id(handle(body, "topic")));

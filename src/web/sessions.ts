@@ -27,7 +27,18 @@ export interface SessionRecord {
   topics: string[];
   inspections: string[];
   createdAt: number;
+  /**
+   * The number of a question that has begun and whose result is not kept yet. It is written
+   * down before the question's first request to the model, and removed when the result is
+   * kept. If it is still there when nobody is at work on the session, that work was lost: the
+   * server stopped between sending and keeping. The game then stands where it stood, the
+   * question's requests may have been charged, and its number is never used again.
+   */
+  inFlight?: number;
 }
+
+/** Keeps a record now, in the middle of a piece of work, without ending the work. */
+export type SaveRecord = (record: SessionRecord) => Promise<void>;
 
 /**
  * Where sessions are kept. Its one rule is that a session's requests run one at a time. Two
@@ -38,17 +49,28 @@ export interface SessionRecord {
 export interface SessionStore {
   /** Keep a new session. False when there is no room and nothing can be dropped to make some. */
   create(record: SessionRecord): Promise<boolean>;
-  /** The record as it was last kept, or null. A read does not wait for a request that is at work. */
-  read(id: string): Promise<SessionRecord | null>;
+  /**
+   * The record as it was last kept, or null, and whether a request is at work on it right
+   * now. A read does not wait for that request.
+   */
+  read(id: string): Promise<{ record: SessionRecord; busy: boolean } | null>;
   /**
    * Run `work` on a record, alone, and keep the record it returns. If `work` throws, nothing
-   * is kept and the error is passed on.
+   * more is kept and the error is passed on.
+   *
+   * `work` is also handed `save`, which keeps a record at once, while the work goes on. The
+   * API uses it for one thing: to write down that a question has begun before the first
+   * request for it is sent. What `save` kept stays kept even if the work never finishes.
    *
    * `owner` is checked first, before anything else is said: to anyone but its owner a session
    * is "missing", whether or not it exists and whether or not it is at work. Only its owner
    * can learn that it is busy.
    */
-  update<T>(id: string, owner: string, work: (record: SessionRecord) => Promise<{ record: SessionRecord; value: T }>): Promise<{ ok: true; value: T } | { ok: false; why: "missing" | "busy" }>;
+  update<T>(
+    id: string,
+    owner: string,
+    work: (record: SessionRecord, save: SaveRecord) => Promise<{ record: SessionRecord; value: T }>,
+  ): Promise<{ ok: true; value: T } | { ok: false; why: "missing" | "busy" }>;
 }
 
 /**
@@ -89,7 +111,10 @@ export function memorySessions(options: { max?: number; ttlMs?: number; now?: ()
       kept.set(record.session.id, record);
       return true;
     },
-    read: async (id) => live(id) ?? null,
+    read: async (id) => {
+      const record = live(id);
+      return record ? { record, busy: busy.has(id) } : null;
+    },
     update: async (id, owner, work) => {
       const record = live(id);
       // Not there, or not theirs: the same answer, given before "busy" could tell them apart.
@@ -97,9 +122,12 @@ export function memorySessions(options: { max?: number; ttlMs?: number; now?: ()
       if (busy.has(id)) return { ok: false, why: "busy" };
       busy.add(id);
       try {
-        const done = await work(record);
         // Still there: a session that was dropped while this ran stays dropped.
-        if (kept.has(id)) kept.set(id, done.record);
+        const keep = (next: SessionRecord): void => {
+          if (kept.has(id)) kept.set(id, next);
+        };
+        const done = await work(record, async (next) => keep(next));
+        keep(done.record);
         return { ok: true, value: done.value };
       } finally {
         busy.delete(id);
