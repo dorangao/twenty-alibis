@@ -690,20 +690,22 @@ describe.skipIf(!redisUrl)("the lease in Redis", () => {
     const { runner, close } = await connectRedis(redisUrl!);
     try {
       const k = key();
-      const lock = redisRunLock(runner, k, { ttlMs: 150 });
+      // Terms long enough for a Redis that is a network hop away: against a hosted one a single
+      // command took about 93 ms, which a 150 ms term could not survive.
+      const lock = redisRunLock(runner, k, { ttlMs: 1_000 });
       const crashed = await lock.acquire();
       expect(crashed).not.toBeNull();
       expect(await lock.acquire()).toBeNull();
-      await wait(250);
+      await wait(1_300);
       // The holder never released. The lease ran out, and the next run gets it.
       const next = await lock.acquire();
       expect(next).not.toBeNull();
       // The crashed run, coming back, finds the lease is no longer its own.
       expect(await crashed!.renew()).toBe(false);
       // Renewing keeps it past its first term.
-      await wait(100);
+      await wait(300);
       expect(await next!.renew()).toBe(true);
-      await wait(100);
+      await wait(300);
       expect(await lock.acquire()).toBeNull();
       await next!.release();
     } finally {

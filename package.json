@@ -24,8 +24,9 @@
     "play": "node --env-file-if-exists=.env.local --import tsx scripts/play.ts",
     "trial:writer": "node --env-file-if-exists=.env.local --import tsx scripts/write-trial.ts",
     "pilot": "node --env-file-if-exists=.env.local --import tsx scripts/pilot.ts",
-    "dev": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true vite",
-    "build:web": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true vite build"
+    "dev": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true vite --config vite.config.ts",
+    "build:web": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true vite build --config vite.config.ts",
+    "check:redis-clean": "node --import tsx scripts/redis-clean-check.ts"
   },
   "dependencies": {
     "ioredis": "^6.1.0",

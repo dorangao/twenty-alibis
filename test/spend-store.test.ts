@@ -182,6 +182,21 @@ contract("in memory", async () => ({ store: new MemorySpendStore(), prepare: asy
 const redisUrl = process.env.TEST_REDIS_URL;
 const prefix = `ta-test-${randomUUID()}`;
 
+// Every key a Redis test in this file writes is under `prefix`. They are removed once, when
+// the whole file is done. Cleaning up inside one group of tests is not enough: the groups
+// after it write under the same prefix, and against a Redis that other things share those
+// keys would stay behind.
+afterAll(async () => {
+  if (!redisUrl) return;
+  const admin = new Redis(redisUrl);
+  try {
+    const keys = await admin.keys(`${prefix}*`);
+    if (keys.length) await admin.del(...keys);
+  } finally {
+    admin.disconnect();
+  }
+});
+
 if (redisUrl) {
   contract("Redis", async () => {
     const { runner } = await connectRedis(redisUrl);
@@ -199,11 +214,7 @@ describe.skipIf(!redisUrl)("Redis spend store", () => {
     store = new RedisSpendStore((await connectRedis(redisUrl!)).runner, { prefix });
     admin = new Redis(redisUrl!);
   });
-  afterAll(async () => {
-    const keys = await admin.keys(`${prefix}:*`);
-    if (keys.length) await admin.del(...keys);
-    admin.disconnect();
-  });
+  afterAll(() => admin.disconnect());
 
   it("refuses everything for an envelope that was never initialized", async () => {
     const envelope = fresh();
