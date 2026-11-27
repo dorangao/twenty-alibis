@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { archivePass } from "../src/case/fixtures/archive";
 import type { Case } from "../src/case/schema";
 import { solve } from "../src/case/solver";
@@ -8,12 +9,17 @@ import { createMetered, type Metered } from "../src/metered";
 import { FakeProvider } from "../src/provider/fake";
 import type { ProviderRequest, ProviderResponse } from "../src/provider/types";
 import { usdToNano } from "../src/spend/pricing";
+import { connectRedis } from "../src/spend/redis-client";
+import type { ScriptRunner } from "../src/spend/redis-store";
 import { MemorySpendStore } from "../src/spend/store";
 import { caseVersion, handleRequest, MAX_BODY_BYTES, VISITOR_COOKIE, type ApiDeps, type ApiError, type CasesReply, type ViewReply } from "../src/web/api";
+import { memoryAllowance, redisAllowance, DEFAULT_LIMITS, type Allowance } from "../src/web/allowance";
+import { redisSessions } from "../src/web/redis-sessions";
 import { memorySessions, type SessionRecord, type SessionStore } from "../src/web/sessions";
 import type { View } from "../src/web/view";
 import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
+import { redisRun, redisUrl } from "./redis-run";
 
 const built = compilePlot("lighthouse", lighthouseSkeleton, lighthousePeople);
 if (!built.ok) throw new Error(built.problems.join("; "));
@@ -32,7 +38,7 @@ function wellBehaved(request: ProviderRequest): ProviderResponse {
 
 type Reply<T> = { status: number; raw: string; body: T; headers: Headers };
 
-function server(options: { cases?: Case[]; metered?: Metered; modelOff?: boolean; sessions?: SessionStore; now?: () => number; origin?: string } = {}) {
+function server(options: { cases?: Case[]; metered?: Metered; modelOff?: boolean; sessions?: SessionStore; now?: () => number; origin?: string; allowance?: Allowance } = {}) {
   let made = 0;
   let secrets = 0;
   const deps: ApiDeps = {
@@ -44,6 +50,7 @@ function server(options: { cases?: Case[]; metered?: Metered; modelOff?: boolean
     newSecret: () => String(++secrets).padStart(64, "0"),
     ...(options.now ? { now: options.now } : {}),
     ...(options.origin ? { origin: options.origin } : {}),
+    ...(options.allowance ? { allowance: options.allowance } : {}),
   };
   /** One browser: it keeps the cookie it is given and sends it back. */
   const visitor = () => {
@@ -73,9 +80,9 @@ const live = (handler: (request: ProviderRequest) => ProviderResponse = wellBeha
   return { provider, metered };
 };
 const stored = async (deps: ApiDeps, view: View): Promise<SessionRecord> => {
-  const record = await deps.sessions.read(view.session);
-  if (!record) throw new Error("no stored session");
-  return record;
+  const found = await deps.sessions.read(view.session);
+  if (!found) throw new Error("no stored session");
+  return found.record;
 };
 /** The page's handle for one of the case's things, read from the stored record: what a test uses to name it. */
 const personOf = (c: Case, id: string) => `P${c.suspects.findIndex((s) => s.id === id) + 1}`;
@@ -146,7 +153,7 @@ describe("the game over HTTP, with the model off", () => {
     const r = await call("POST", "/api/sessions", { caseId: lighthouse.id });
     expect(r.status).toBe(201);
     const view = r.body.view;
-    expect(view).toMatchObject({ session: "00000000-0000-4000-8000-000000000001", revision: 1, caseId: lighthouse.id, title: lighthouse.title, model: "off", over: false, cost: { requests: 0, nano: 0 } });
+    expect(view).toMatchObject({ session: "00000000-0000-4000-8000-000000000001", revision: 1, caseId: lighthouse.id, title: lighthouse.title, model: "off", over: false, cost: { requests: 0, nano: 0, unfinished: 0 } });
     expect(view.actions).toEqual({ used: 0, cap: lighthouse.sessionCap, left: lighthouse.sessionCap });
     // People are P1 … in the roster's order, with a name and a role and nothing else.
     expect(view.people).toEqual(lighthouse.suspects.map((s, i) => ({ handle: `P${i + 1}`, name: s.name, role: s.role })));
@@ -211,7 +218,7 @@ describe("the game over HTTP, with the model off", () => {
       expect(view.actions.used).toBe(proof.actions.length);
       // With the model off every line is worded by code, in the language asked, and costs nothing.
       expect(view.transcript.every((t) => t.source === "rendered" && t.language === "zh")).toBe(true);
-      expect(view.cost).toEqual({ requests: 0, nano: 0 });
+      expect(view.cost).toEqual({ requests: 0, nano: 0, unfinished: 0 });
 
       const accused = await act(view, "accuse", { person: personOf(c, c.culprit.suspect), evidence: view.evidence.map((e) => e.handle) });
       expect(accused.status).toBe(200);
@@ -501,8 +508,9 @@ describe("once only", () => {
       const r = await act<ApiError>(view, action, body);
       expect([r.status, r.body.error.code], action).toEqual([409, "busy"]);
     }
-    // Reading is not blocked, and shows the session as it was last kept.
-    expect((await call("GET", at)).body.view).toEqual(view);
+    // Reading is not blocked, and shows the session as it was last kept: the same game, one
+    // revision on, because the question has been written down as begun.
+    expect((await call("GET", at)).body.view).toEqual({ ...view, revision: view.revision + 1 });
     // A stranger cannot tell that this session is at work, or that it exists: the same bytes as for no session.
     const stranger = visitor();
     await stranger.start(archivePass.id);
@@ -774,9 +782,9 @@ describe("sessions in memory", () => {
     const store = memorySessions({ now: () => 0 });
     expect(await store.create(blank("a"))).toBe(true);
     expect(await store.update("a", "o", async (r) => ({ record: { ...r, revision: 2 }, value: "done" }))).toEqual({ ok: true, value: "done" });
-    expect((await store.read("a"))!.revision).toBe(2);
+    expect((await store.read("a"))!.record.revision).toBe(2);
     await expect(store.update("a", "o", async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
-    expect((await store.read("a"))!.revision).toBe(2);
+    expect((await store.read("a"))!.record.revision).toBe(2);
     expect(await store.update("a", "o", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: true, value: 1 });
     expect(await store.update("nobody", "o", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: false, why: "missing" });
     expect(await store.read("nobody")).toBeNull();
@@ -844,5 +852,599 @@ describe("sessions in memory", () => {
     clock = 100;
     expect(await store.read("a")).toBeNull();
     expect(await store.update("a", "o", async (r) => ({ record: r, value: 1 }))).toEqual({ ok: false, why: "missing" });
+  });
+});
+
+describe("a question that was begun and never finished", () => {
+  /** A model whose worker can die: the request goes out, and the server stops before anything is kept. */
+  const mortal = () => {
+    const { provider, metered: inner } = live();
+    const state = { dies: false, ids: [] as string[] };
+    const metered: Metered = async (request) => {
+      state.ids.push(request.attemptId);
+      const result = await inner(request);
+      if (state.dies) throw new Error("the worker died");
+      return result;
+    };
+    return { provider, metered, state };
+  };
+  /** A store that counts what is saved in the middle of the work, and how often the work asks whether it still holds the session. */
+  const counting = () => {
+    const inner = memorySessions();
+    const saved: SessionRecord[] = [];
+    const checks = { n: 0 };
+    const sessions: SessionStore = {
+      create: inner.create,
+      read: inner.read,
+      update: (id, owner, work) => inner.update(id, owner, (record, hold) => work(record, { save: async (next) => (saved.push(next), hold.save(next)), check: async () => (checks.n++, hold.check()) })),
+    };
+    return { sessions, saved, checks };
+  };
+  const INTERRUPTED = {
+    code: "interrupted",
+    text: {
+      en: "The last question did not finish: the server stopped before its answer was kept. The game stands where it was, and no action was used. If the question had reached the model, its cost is still counted on the server and is not in the total shown here. You can ask again.",
+      zh: "上一个问题没有完成：服务器在保存回答之前中断了。这一局停在原来的位置，没有消耗行动。如果问题已经发给了模型，它的费用仍由服务器计入，但不在这里显示的合计里。可以重新提问。",
+    },
+  };
+  /** The view after a question was begun and lost: the same game, one revision on, one question unfinished. */
+  const afterLoss = (view: View): View => ({ ...view, revision: view.revision + 1, cost: { ...view.cost, unfinished: view.cost.unfinished + 1 } });
+
+  it("leaves the game where it was and says so; the click that asked is used up, and asking again is a new click under request ids that were never used", async () => {
+    const { provider, metered, state } = mortal();
+    const { act, call, start, deps } = server({ metered, modelOff: false });
+    const view = await start(archivePass.id);
+    const at = `/api/sessions/${view.session}`;
+
+    state.dies = true;
+    const lost = await act<ApiError>(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect([lost.status, lost.body.error.code]).toEqual([500, "server"]);
+    // The request did go out. What it cost is with the spend guard, not with the session.
+    expect(provider.dispatched).toBe(1);
+    const firstIds = [...state.ids];
+    state.dies = false;
+
+    // The same click delivered again, with no look at the game in between, does nothing: the
+    // game moved on when the question was begun. So does any other click made on the old view.
+    for (const [action, body] of [
+      ["ask", { person: "P1", question: "Where were you at nine?" }],
+      ["ask", { person: "P2", question: "And you?" }],
+      ["inspect", { inspection: "I1" }],
+    ] as const) {
+      const again = await act<ApiError>(view, action, body);
+      expect([again.status, again.body.error.code], action).toEqual([409, "stale"]);
+    }
+    expect(provider.dispatched).toBe(1);
+
+    // A look shows the game exactly where it stood, one revision on, and says what happened.
+    const after = await call("GET", at);
+    expect(after.body.view).toEqual(afterLoss(view));
+    expect(after.body.status).toEqual(INTERRUPTED);
+    expect(await stored(deps, view)).toMatchObject({ inFlight: 1, revision: 2, session: { asked: 1, actions: 0, turns: [] } });
+
+    // Asked again from that view: answered by the model, under ids the lost question never used.
+    const retry = await act(after.body.view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(retry.status).toBe(200);
+    expect(retry.body.ask).toMatchObject({ replayed: false, recorded: true, shown: { source: "model" } });
+    expect(retry.body.ask!.notice).toBeUndefined();
+    expect(retry.body.status).toBeUndefined();
+    expect(retry.body.view.actions.used).toBe(1);
+    const secondIds = state.ids.slice(firstIds.length);
+    expect(secondIds).toHaveLength(2);
+    expect(secondIds.filter((id) => firstIds.includes(id))).toEqual([]);
+    // The page's total holds the kept turn only, and goes on saying that one question is not in it.
+    expect(retry.body.view.cost).toMatchObject({ requests: 2, unfinished: 1 });
+    const kept = await stored(deps, view);
+    expect(kept.inFlight).toBeUndefined();
+    expect(kept.lost).toBe(1);
+    const end = await call("GET", at);
+    expect(end.body.status).toBeUndefined();
+    expect(end.body.view).toEqual(retry.body.view);
+  });
+
+  it("keeps saying so until the next thing the player does is kept; an answer given again from memory keeps nothing", async () => {
+    const { metered, state } = mortal();
+    const { act, call, start } = server({ metered, modelOff: false });
+    let view = (await act(await start(archivePass.id), "ask", { topic: "T1", language: "en" })).body.view;
+    state.dies = true;
+    expect((await act<ApiError>(view, "ask", { person: "P1", question: "Where were you at nine?" })).status).toBe(500);
+    state.dies = false;
+    view = (await call("GET", `/api/sessions/${view.session}`)).body.view;
+    expect(view.cost.unfinished).toBe(1);
+    // The saved topic in the other language: nothing changes, so nothing is kept, and the word stays.
+    const replay = await act(view, "ask", { topic: "T1", language: "zh" });
+    expect(replay.body.ask).toMatchObject({ replayed: true });
+    expect(replay.body.view).toEqual(view);
+    expect(replay.body.status).toMatchObject({ code: "interrupted" });
+    // An inspection is kept: the word is gone, and the count of unfinished questions stays.
+    const inspected = await act(view, "inspect", { inspection: "I1" });
+    expect(inspected.status).toBe(200);
+    expect(inspected.body.status).toBeUndefined();
+    expect(inspected.body.view.revision).toBe(view.revision + 1);
+    expect(inspected.body.view.actions.used).toBe(2);
+    expect(inspected.body.view.cost.unfinished).toBe(1);
+    // A second question lost later is counted as well.
+    state.dies = true;
+    expect((await act<ApiError>(inspected.body.view, "ask", { person: "P1", question: "Where were you at nine?" })).status).toBe(500);
+    state.dies = false;
+    const twice = await call("GET", `/api/sessions/${view.session}`);
+    expect(twice.body.view.cost.unfinished).toBe(2);
+    expect(twice.body.status).toMatchObject({ code: "interrupted" });
+  });
+
+  it("writes the question down once, before its first request, and asks before every request whether it still holds the session", async () => {
+    const { sessions, saved, checks } = counting();
+    const { provider, metered: inner } = live();
+    const before: [saved: number, checks: number][] = [];
+    const metered: Metered = async (request) => {
+      before.push([saved.length, checks.n]);
+      return inner(request);
+    };
+    const { act, start } = server({ metered, modelOff: false, sessions });
+    let view = await start(archivePass.id);
+    // An inspection sends nothing: nothing is written down early.
+    view = (await act(view, "inspect", { inspection: "I1" })).body.view;
+    expect(saved).toHaveLength(0);
+    // A typed question sends two requests. The question is written down once, before the first;
+    // the hold is checked before each of them, as the last thing before the spend guard.
+    const asked = (await act(view, "ask", { person: "P1", question: "Where were you at nine?" })).body.view;
+    expect(provider.dispatched).toBe(2);
+    expect(before).toEqual([
+      [1, 1],
+      [1, 2],
+    ]);
+    // What was written down: the same game, the question's number used, and the revision moved on.
+    expect(saved[0]).toMatchObject({ inFlight: 1, revision: view.revision + 1, session: { asked: 1, actions: 1, turns: [] } });
+    // The answer is kept one revision after that.
+    expect(asked.revision).toBe(view.revision + 2);
+    expect(asked.cost.unfinished).toBe(0);
+    // The same question again is given from memory: nothing is sent, nothing is written down.
+    await act(asked, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(saved).toHaveLength(1);
+
+    // With the model off for the session, a topic from the menu is worded by code and nothing is written down early.
+    const off = counting();
+    const quiet = server({ sessions: off.sessions });
+    const first = await quiet.start(archivePass.id);
+    const topic = await quiet.act(first, "ask", { topic: "T1" });
+    expect(off.saved).toHaveLength(0);
+    expect(topic.body.view.revision).toBe(first.revision + 1);
+  });
+
+  it("a question the spend guard refuses is settled like any other: its number is used, nothing is left marked", async () => {
+    let closed = true;
+    const { provider, metered } = live(wellBehaved, () => closed);
+    const { act, call, start, deps } = server({ metered, modelOff: false });
+    const view = await start(archivePass.id);
+    const refused = await act(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(refused.body.ask).toMatchObject({ recorded: false, notice: { code: "not-asked" } });
+    expect(refused.body.status).toBeUndefined();
+    expect(refused.body.view).toEqual({ ...view, revision: view.revision + 2 });
+    expect(await stored(deps, view)).toMatchObject({ revision: 3, session: { asked: 1, actions: 0 } });
+    expect((await stored(deps, view)).inFlight).toBeUndefined();
+    expect((await call("GET", `/api/sessions/${view.session}`)).body.status).toBeUndefined();
+    expect(provider.dispatched).toBe(0);
+    // The click is used up all the same.
+    closed = false;
+    expect((await act<ApiError>(view, "ask", { person: "P1", question: "Where were you at nine?" })).body.error.code).toBe("stale");
+    expect(provider.dispatched).toBe(0);
+  });
+
+  it("sends nothing if the question cannot be written down first", async () => {
+    const inner = memorySessions();
+    const sessions: SessionStore = { create: inner.create, read: inner.read, update: (id, owner, work) => inner.update(id, owner, (record, hold) => work(record, { save: async () => Promise.reject(new Error("redis is down")), check: hold.check })) };
+    const { provider, metered } = live();
+    const { act, call, start } = server({ metered, modelOff: false, sessions });
+    const view = await start(archivePass.id);
+    const r = await act<ApiError>(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect([r.status, r.body.error.code]).toEqual([500, "server"]);
+    expect(provider.dispatched).toBe(0);
+    // Nothing was begun, so nothing was lost, and the click can be made again.
+    const after = await call("GET", `/api/sessions/${view.session}`);
+    expect(after.body.view).toEqual(view);
+    expect(after.body.status).toBeUndefined();
+  });
+
+  it("sends no further request once the work no longer holds the session", async () => {
+    const inner = memorySessions();
+    let held = true;
+    const sessions: SessionStore = {
+      create: inner.create,
+      read: inner.read,
+      update: (id, owner, work) => inner.update(id, owner, (record, hold) => work(record, { save: hold.save, check: async () => (held ? hold.check() : Promise.reject(new Error("the lease is another worker's"))) })),
+    };
+    const { provider, metered: inner2 } = live();
+    const metered: Metered = async (request) => {
+      const result = await inner2(request);
+      // The first request came back; meanwhile the session was taken by another worker.
+      held = false;
+      return result;
+    };
+    const { act, call, start } = server({ metered, modelOff: false, sessions });
+    const view = await start(archivePass.id);
+    const r = await act<ApiError>(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect([r.status, r.body.error.code]).toEqual([500, "server"]);
+    // The topic was chosen; the answer was never asked for.
+    expect(provider.dispatched).toBe(1);
+    expect(provider.requests[0]!.tools?.length).toBe(1);
+    const after = await call("GET", `/api/sessions/${view.session}`);
+    expect(after.body.view).toEqual(afterLoss(view));
+    expect(after.body.status).toMatchObject({ code: "interrupted" });
+  });
+
+  it("asks whether it still holds the session after the allowance has answered, right before the request goes to the spend guard", async () => {
+    // The session is taken by another worker while this one waits for the visitor's allowance.
+    for (const takenDuring of [1, 2]) {
+      const inner = memorySessions();
+      let held = true;
+      const sessions: SessionStore = {
+        create: inner.create,
+        read: inner.read,
+        update: (id, owner, work) => inner.update(id, owner, (record, hold) => work(record, { save: hold.save, check: async () => (held ? hold.check() : Promise.reject(new Error("the lease is another worker's"))) })),
+      };
+      let asked = 0;
+      const allowance: Allowance = {
+        session: async () => "ok",
+        request: async () => {
+          if (++asked === takenDuring) held = false;
+          return true;
+        },
+      };
+      const { provider, metered } = live();
+      const { act, start } = server({ metered, modelOff: false, sessions, allowance });
+      const r = await act<ApiError>(await start(archivePass.id), "ask", { person: "P1", question: "Where were you at nine?" });
+      expect([r.status, r.body.error.code], String(takenDuring)).toEqual([500, "server"]);
+      // Lost during the wait before the first request: nothing is sent. Before the second: only the first was.
+      expect(provider.dispatched, String(takenDuring)).toBe(takenDuring - 1);
+    }
+  });
+
+  it("counts every question that never finished, also two in a row with nothing kept in between", async () => {
+    const { metered, state } = mortal();
+    const { act, call, start, deps } = server({ metered, modelOff: false });
+    let view = await start(archivePass.id);
+    const at = `/api/sessions/${view.session}`;
+    state.dies = true;
+    for (const lost of [1, 2, 3]) {
+      expect((await act<ApiError>(view, "ask", { person: "P1", question: "Where were you at nine?" })).status).toBe(500);
+      const looked = await call("GET", at);
+      expect(looked.body.status).toMatchObject({ code: "interrupted" });
+      view = looked.body.view;
+      expect(view.cost.unfinished, String(lost)).toBe(lost);
+    }
+    state.dies = false;
+    // An inspection is kept: the count stays at three, and the word that one was just lost goes.
+    const inspected = await act(view, "inspect", { inspection: "I1" });
+    expect(inspected.body.status).toBeUndefined();
+    expect(inspected.body.view.cost.unfinished).toBe(3);
+    // A question that is answered does not add to it.
+    const answered = await act(inspected.body.view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(answered.body.ask).toMatchObject({ recorded: true, shown: { source: "model" } });
+    expect(answered.body.view.cost.unfinished).toBe(3);
+    expect(await stored(deps, view)).toMatchObject({ lost: 3 });
+    expect((await stored(deps, view)).inFlight).toBeUndefined();
+  });
+
+  it("a question that is still being worked on is not called lost", async () => {
+    let release!: () => void;
+    let arrived!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const reached = new Promise<void>((resolve) => (arrived = resolve));
+    const { metered: inner } = live();
+    let held = false;
+    const metered: Metered = async (request) => {
+      if (!held) {
+        held = true;
+        arrived();
+        await gate;
+      }
+      return inner(request);
+    };
+    const { act, call, start, deps } = server({ metered, modelOff: false });
+    const view = await start(archivePass.id);
+    const asking = act(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    await reached;
+    // It is written down as begun, and a request is at work on the session: the view is the
+    // same game one revision on, and says nothing of a loss.
+    expect((await stored(deps, view)).inFlight).toBe(1);
+    const during = await call("GET", `/api/sessions/${view.session}`);
+    expect(during.body.view).toEqual({ ...view, revision: view.revision + 1 });
+    expect(during.body.status).toBeUndefined();
+    release();
+    const done = await asking;
+    expect(done.status).toBe(200);
+    expect(done.body.status).toBeUndefined();
+    expect(done.body.view.revision).toBe(view.revision + 2);
+    expect(done.body.view.cost.unfinished).toBe(0);
+  });
+
+  it("a game that runs out while a question is being answered says it has expired, and is gone", async () => {
+    let clock = 0;
+    const { metered: inner } = live();
+    const metered: Metered = async (request) => {
+      const result = await inner(request);
+      // A day goes by while the model answers.
+      clock = 24 * 60 * 60 * 1_000;
+      return result;
+    };
+    const { act, call, start } = server({ metered, modelOff: false, now: () => clock });
+    const view = await start(archivePass.id);
+    const r = await act<ApiError>(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect([r.status, r.body.error.code]).toEqual([410, "expired"]);
+    const after = await call<ApiError>("GET", `/api/sessions/${view.session}`);
+    expect([after.status, after.body.error.code]).toEqual([404, "not-found"]);
+  });
+});
+
+describe("what one visitor may ask for", () => {
+  const limits = (over: Partial<typeof DEFAULT_LIMITS>) => memoryAllowance({ ...DEFAULT_LIMITS, ...over });
+
+  it("lets a visitor start only so many games, and everyone together only so many in an hour", async () => {
+    const { call, visitor, deps } = server({ allowance: limits({ sessionsPerVisitor: 2, sessionsPerHour: 4 }) });
+    const begin = (v: { call: typeof call }) => v.call<ViewReply & ApiError>("POST", "/api/sessions", { caseId: archivePass.id });
+    const first = await begin({ call });
+    expect(first.status).toBe(201);
+    expect((await begin({ call })).status).toBe(201);
+    const third = await begin({ call });
+    expect(third.status).toBe(429);
+    expect(third.body).toEqual({
+      error: { code: "allowance", text: { en: "You have started as many games as one visitor may in a day. Go on with one you have, or come back tomorrow.", zh: "你今天开始的游戏已达到每位访客的上限。请继续已有的一局，或明天再来。" } },
+    });
+    // The games they have still work.
+    expect((await call("GET", `/api/sessions/${first.body.view.session}`)).status).toBe(200);
+    // Another visitor is not held to the first one's count, until everyone's hour is used up.
+    const second = visitor();
+    expect((await begin(second)).status).toBe(201);
+    expect((await begin(second)).status).toBe(201);
+    const fifth = await begin(visitor());
+    expect(fifth.status).toBe(503);
+    expect(fifth.body).toEqual({ error: { code: "crowded", text: { en: "Too many games have been started in the last hour. Please try again later.", zh: "过去一小时内开始的游戏太多。请稍后再试。" } } });
+    // A refused start makes no session and hands out no secret.
+    expect(fifth.headers.get("set-cookie")).toBeNull();
+    expect(await deps.sessions.read("00000000-0000-4000-8000-000000000005")).toBeNull();
+  });
+
+  it("counts by the hash of the visitor's secret, never the secret", async () => {
+    const seen: string[] = [];
+    const allowance: Allowance = { session: async (v) => (seen.push(v), "ok"), request: async (v) => (seen.push(v), true) };
+    const { metered } = live();
+    const { act, start, cookie, deps } = server({ metered, modelOff: false, allowance });
+    const view = await start(archivePass.id);
+    await act(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    const secret = cookie()!.split("=")[1]!;
+    const owner = (await stored(deps, view)).owner;
+    expect(seen).toEqual([owner, owner, owner]);
+    expect(seen).not.toContain(secret);
+  });
+
+  it("counts every request to the model across a visitor's games; when none are left, a typed question is not asked and the player is told why", async () => {
+    const { provider, metered } = live();
+    const { act, start, visitor } = server({ metered, modelOff: false, allowance: limits({ requestsPerVisitor: 3 }) });
+    let view = await start(archivePass.id);
+    // Two requests: the topic, then the answer.
+    let r = await act(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(r.body.ask).toMatchObject({ recorded: true, shown: { source: "model" } });
+    expect(provider.dispatched).toBe(2);
+    // The third request picks the topic; the fourth, the answer, is not allowed. The statement is worded by code.
+    r = await act(r.body.view, "ask", { person: "P2", question: "And where were you?" });
+    expect(provider.dispatched).toBe(3);
+    expect(r.body.ask).toMatchObject({ recorded: true, notice: { code: "worded-by-code" } });
+    view = r.body.view;
+    // None left: the question is not asked, nothing is sent, no action is used.
+    r = await act(view, "ask", { person: "P3", question: "What did you see?" });
+    expect(r.status).toBe(200);
+    expect(r.body.ask).toEqual({
+      replayed: false,
+      recorded: false,
+      notice: {
+        code: "allowance",
+        text: {
+          en: "You have used all the questions to the model that one visitor may ask in a day, so this question was not asked. No action was used. Topics from the menu still work.",
+          zh: "你今天向模型提问的次数已达到每位访客的上限，这个问题没有问出去。没有消耗行动。话题列表仍然可以用。",
+        },
+      },
+    });
+    expect(r.body.view.actions.used).toBe(view.actions.used);
+    expect(provider.dispatched).toBe(3);
+    // The same visitor's next game has none left either.
+    const next = await start(archivePass.id);
+    r = await act(next, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(r.body.ask).toMatchObject({ recorded: false, notice: { code: "allowance" } });
+    // A topic from the menu still works there, worded by code, and uses an action.
+    const menu = await act(r.body.view, "ask", { topic: "T1" });
+    expect(menu.body.ask).toMatchObject({ recorded: true, shown: { source: "rendered" }, notice: { code: "worded-by-code" } });
+    expect(menu.body.view.actions.used).toBe(1);
+    expect(provider.dispatched).toBe(3);
+    // Another visitor has their own.
+    const other = visitor();
+    const theirs = await other.act(await other.start(archivePass.id), "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(theirs.body.ask).toMatchObject({ recorded: true, shown: { source: "model" } });
+    expect(provider.dispatched).toBe(5);
+  });
+
+  it("an allowance that cannot be read is a no: no game is started, and no request is sent", async () => {
+    const broken: Allowance = { session: async () => Promise.reject(new Error("redis is down")), request: async () => Promise.reject(new Error("redis is down")) };
+    const refused = server({ allowance: broken });
+    const start = await refused.call<ApiError>("POST", "/api/sessions", { caseId: archivePass.id });
+    expect([start.status, start.body.error.code]).toEqual([500, "server"]);
+    expect(await refused.deps.sessions.read("00000000-0000-4000-8000-000000000001")).toBeNull();
+
+    const { provider, metered } = live();
+    const half: Allowance = { session: async () => "ok", request: broken.request };
+    const { act, start: begin } = server({ metered, modelOff: false, allowance: half });
+    const r = await act(await begin(archivePass.id), "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(r.status).toBe(200);
+    // Not asked, and not blamed on the visitor's allowance, which was never read.
+    expect(r.body.ask).toMatchObject({ recorded: false, notice: { code: "not-asked" } });
+    expect(provider.dispatched).toBe(0);
+  });
+});
+
+const prefix = redisRun();
+
+describe.skipIf(!redisUrl)("the game over HTTP, kept in Redis", () => {
+  let connections: { runner: ScriptRunner; close(): Promise<void> }[];
+  const own = () => `${prefix}:${randomUUID()}`;
+  beforeAll(async () => {
+    connections = [await connectRedis(redisUrl!), await connectRedis(redisUrl!)];
+  });
+  afterAll(async () => {
+    for (const c of connections ?? []) await c.close();
+  });
+  /** Workers that share nothing but Redis: each call is served by the next one in turn. */
+  const workers = (stores: SessionStore[]): SessionStore => {
+    let turn = 0;
+    const next = () => stores[turn++ % stores.length]!;
+    return { create: (r) => next().create(r), read: (id) => next().read(id), update: (id, owner, work) => next().update(id, owner, work) };
+  };
+
+  it("plays a case to solved through two workers, with the sessions and the allowance in Redis", async () => {
+    const p = own();
+    const sessions = workers(connections.map((c) => redisSessions(c.runner, { prefix: p })));
+    const { act, call, start, deps } = server({ sessions, allowance: redisAllowance(connections[0]!.runner, { prefix: p }) });
+    let view = await start(lighthouse.id);
+    for (const step of solve(lighthouse).proof!.actions) {
+      const record = await stored(deps, view);
+      const r = step.type === "inspection" ? await act(view, "inspect", { inspection: inspectionOf(record, step.id) }) : await act(view, "ask", { topic: topicOf(record, step.id), language: "zh" });
+      expect(r.status, `${step.type} ${step.id}`).toBe(200);
+      expect(r.body.view.revision).toBe(view.revision + 1);
+      view = r.body.view;
+      await expectNothingHidden(deps, lighthouse, r.raw, view, `${step.type} ${step.id}`);
+      // What one worker kept, the other reads.
+      expect((await call("GET", `/api/sessions/${view.session}`)).body.view).toEqual(view);
+    }
+    // A click made on a view the game has left is stale here too, and a stranger finds nothing.
+    expect((await act<ApiError>({ ...view, revision: view.revision - 1 }, "inspect", { inspection: "I1" })).body.error.code).toBe("stale");
+    const end = (await act(view, "accuse", { person: personOf(lighthouse, lighthouse.culprit.suspect), evidence: view.evidence.map((e) => e.handle) })).body.view;
+    expect(end.verdict).toMatchObject({ outcome: "solved" });
+    expect((await act<ApiError>(end, "inspect", { inspection: "I1" })).body.error.code).toBe("over");
+  });
+
+  /** A session store whose first worker's renewals never reach Redis, as if that worker had died or stalled. */
+  const withDoomedWorker = (p: string) => {
+    const alive = redisSessions(connections[0]!.runner, { prefix: p, leaseMs: 300 });
+    const doomed = redisSessions({ eval: (script, keys, args) => (script.includes("PEXPIRE', KEYS[1]") ? Promise.resolve(0) : connections[1]!.runner.eval(script, keys, args)) }, { prefix: p, leaseMs: 300 });
+    const state = { lost: false };
+    const sessions: SessionStore = { create: alive.create, read: alive.read, update: (id, owner, work) => (state.lost ? alive : doomed).update(id, owner, work) };
+    return { sessions, state };
+  };
+  const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  it("a worker that is lost after its request went out: busy for one lease term, then the game is where it was, the page is told, and asking again is a new click under new ids", async () => {
+    const { sessions, state } = withDoomedWorker(own());
+    const { provider, metered: inner } = live();
+    const ids: string[] = [];
+    const never = new Promise<void>(() => undefined);
+    let reached!: () => void;
+    const arrived = new Promise<void>((resolve) => (reached = resolve));
+    const metered: Metered = async (request) => {
+      ids.push(request.attemptId);
+      const result = await inner(request);
+      if (!state.lost) {
+        // The request went out and was charged. The worker stops here and never comes back.
+        reached();
+        await never;
+      }
+      return result;
+    };
+    const { act, call, start } = server({ sessions, metered, modelOff: false });
+    const view = await start(archivePass.id);
+    const at = `/api/sessions/${view.session}`;
+    void act(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    await arrived;
+    state.lost = true;
+    expect(provider.dispatched).toBe(1);
+    const firstIds = [...ids];
+
+    // Until the lost worker's lease runs out, nobody can tell it from a slow one.
+    const during = await call("GET", at);
+    expect(during.body.view).toEqual({ ...view, revision: view.revision + 1 });
+    expect(during.body.status).toBeUndefined();
+    expect((await act<ApiError>(during.body.view, "ask", { person: "P1", question: "Where were you at nine?" })).body.error.code).toBe("busy");
+
+    await pause(380);
+    // The click that asked, delivered again with no look in between: stale, and nothing is sent.
+    const redelivered = await act<ApiError>(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect([redelivered.status, redelivered.body.error.code]).toEqual([409, "stale"]);
+    expect(provider.dispatched).toBe(1);
+
+    const after = await call("GET", at);
+    expect(after.body.view).toEqual({ ...view, revision: view.revision + 1, cost: { ...view.cost, unfinished: 1 } });
+    expect(after.body.status).toMatchObject({ code: "interrupted" });
+
+    const again = await act(after.body.view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(again.status).toBe(200);
+    expect(again.body.ask).toMatchObject({ recorded: true, shown: { source: "model" } });
+    expect(again.body.ask!.notice).toBeUndefined();
+    expect(again.body.status).toBeUndefined();
+    expect(ids.slice(firstIds.length).filter((id) => firstIds.includes(id))).toEqual([]);
+    expect(provider.dispatched).toBe(3);
+    expect((await call("GET", at)).body.status).toBeUndefined();
+  });
+
+  it("a worker that stalls, loses the session to another and comes back sends nothing more", async () => {
+    const { sessions, state } = withDoomedWorker(own());
+    const { provider, metered: inner } = live();
+    let reached!: () => void;
+    const arrived = new Promise<void>((resolve) => (reached = resolve));
+    let resume!: () => void;
+    const resumed = new Promise<void>((resolve) => (resume = resolve));
+    let first = true;
+    const metered: Metered = async (request) => {
+      const result = await inner(request);
+      if (first) {
+        // Worker A: its first request, which picks the topic, came back. It stalls here, long enough to lose its lease.
+        first = false;
+        reached();
+        await resumed;
+      }
+      return result;
+    };
+    const { act, call, start } = server({ sessions, metered, modelOff: false });
+    const view = await start(archivePass.id);
+    const at = `/api/sessions/${view.session}`;
+    const stalled = act<ApiError>(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    await arrived;
+    state.lost = true;
+    expect(provider.dispatched).toBe(1);
+    await pause(380);
+
+    // Worker B: a deliberate retry from a fresh look, and it finishes.
+    const looked = await call("GET", at);
+    expect(looked.body.status).toMatchObject({ code: "interrupted" });
+    const retry = await act(looked.body.view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect(retry.status).toBe(200);
+    expect(provider.dispatched).toBe(3);
+
+    // Worker A comes back to life. It no longer holds the session: its answer is never asked for.
+    resume();
+    const late = await stalled;
+    expect([late.status, late.body.error.code]).toEqual([500, "server"]);
+    expect(provider.dispatched).toBe(3);
+    expect(provider.requests.map((r) => (r.tools?.length ? "recall" : "answer"))).toEqual(["recall", "recall", "answer"]);
+    // The game is as worker B left it: one action, two requests, and one question that never finished.
+    const end = await call("GET", at);
+    expect(end.body.view).toEqual(retry.body.view);
+    expect(end.body.view.actions.used).toBe(1);
+    expect(end.body.view.cost).toMatchObject({ requests: 2, unfinished: 1 });
+  });
+
+  it("a game that runs out in Redis while a question is being answered says it has expired, and the next look finds nothing", async () => {
+    const p = own();
+    const sessions = redisSessions(connections[0]!.runner, { prefix: p, ttlMs: 400 });
+    const { provider, metered: inner } = live();
+    const metered: Metered = async (request) => {
+      const result = await inner(request);
+      // The game's time runs out while the model answers.
+      if (provider.dispatched === 2) await pause(450);
+      return result;
+    };
+    const { act, call, start } = server({ sessions, metered, modelOff: false });
+    const view = await start(archivePass.id);
+    const r = await act<ApiError>(view, "ask", { person: "P1", question: "Where were you at nine?" });
+    expect([r.status, r.body.error.code]).toEqual([410, "expired"]);
+    expect(provider.dispatched).toBe(2);
+    const after = await call<ApiError>("GET", `/api/sessions/${view.session}`);
+    expect([after.status, after.body.error.code]).toEqual([404, "not-found"]);
   });
 });

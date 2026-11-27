@@ -32,6 +32,8 @@ export const S = {
   actionsLeft: s("Actions left", "剩余行动"),
   requests: s("requests", "次请求"),
   confirmed: s("confirmed", "已确认"),
+  unfinished: s("unfinished", "次未完成"),
+  unfinishedHint: s("Questions that were begun and never finished. What they cost, if anything, is counted on the server and is not in this total.", "已开始但没有完成的提问。它们如果产生了费用，由服务器计入，不在这个合计里。"),
   working: s("Working…", "处理中…"),
   caseOver: s("This case is over.", "本案已结束。"),
 

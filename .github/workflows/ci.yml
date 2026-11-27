@@ -22,7 +22,8 @@ jobs:
       - run: npm ci
       - run: npm run check
 
-  # The durable spend store, tested against a throwaway Redis on this runner only.
+  # What is kept in Redis (the spend store, the run lease, the web sessions and the visitor
+  # allowance), tested against a throwaway Redis on this runner only.
   # Still no key and no model request: the provider is the fake one here too.
   redis-store:
     runs-on: ubuntu-latest
@@ -45,7 +46,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx vitest run test/spend-store.test.ts test/pilot.test.ts
+      - run: npx vitest run test/spend-store.test.ts test/pilot.test.ts test/session-stores.test.ts test/allowance.test.ts test/web-api.test.ts
       # The tests clean up after themselves: no key of theirs may be left in the store. This
       # runs when the tests failed too, which is when a leftover key is most likely; the job
       # still fails on the tests' own result.
