@@ -186,6 +186,11 @@ export function App() {
               <span className="meter" title={t(view.model === "on" ? S.modelOn : S.modelOff)}>
                 <strong>{view.cost.requests}</strong> {t(S.requests)} · <strong>{dollars(view.cost.nano)}</strong> {t(S.confirmed)}
               </span>
+              {view.cost.unfinished > 0 && (
+                <span className="meter" title={t(S.unfinishedHint)}>
+                  <strong>{view.cost.unfinished}</strong> {t(S.unfinished)}
+                </span>
+              )}
             </div>
           )}
           <button className="lang" onClick={() => setLang(lang === "en" ? "zh" : "en")} aria-label={t(S.languageLabel)}>

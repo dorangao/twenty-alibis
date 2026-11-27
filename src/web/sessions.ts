@@ -35,10 +35,32 @@ export interface SessionRecord {
    * question's requests may have been charged, and its number is never used again.
    */
   inFlight?: number;
+  /**
+   * How many questions were begun and never finished. What their requests cost, if anything,
+   * is counted by the spend guard and is in no turn of this session.
+   */
+  lost?: number;
 }
 
-/** Keeps a record now, in the middle of a piece of work, without ending the work. */
-export type SaveRecord = (record: SessionRecord) => Promise<void>;
+/**
+ * What a piece of work is handed besides the record: its hold on the session. Both calls
+ * reject when the work no longer holds it, because another worker has taken the session or
+ * because the session is gone. The work must then send nothing more.
+ */
+export interface Hold {
+  /** Keep a record now, in the middle of the work, without ending the work. */
+  save(record: SessionRecord): Promise<void>;
+  /** Make sure this work still holds the session. Asked before each further request to the model. */
+  check(): Promise<void>;
+}
+
+/** Thrown inside a piece of work when its session ran out or was dropped while it was at work. */
+export class SessionGoneError extends Error {
+  override readonly name = "SessionGoneError";
+  constructor() {
+    super("the session is gone");
+  }
+}
 
 /**
  * Where sessions are kept. Its one rule is that a session's requests run one at a time. Two
@@ -58,9 +80,13 @@ export interface SessionStore {
    * Run `work` on a record, alone, and keep the record it returns. If `work` throws, nothing
    * more is kept and the error is passed on.
    *
-   * `work` is also handed `save`, which keeps a record at once, while the work goes on. The
-   * API uses it for one thing: to write down that a question has begun before the first
-   * request for it is sent. What `save` kept stays kept even if the work never finishes.
+   * `work` is also handed its hold on the session. `hold.save` keeps a record at once, while
+   * the work goes on: the API uses it to write down that a question has begun before the
+   * first request for it is sent. What it kept stays kept even if the work never finishes.
+   * `hold.check` says whether the work still holds the session.
+   *
+   * "expired": the session ran out while this work was on it. Nothing more is kept, and the
+   * work's answer is not given: it would describe a game that can no longer be read.
    *
    * `owner` is checked first, before anything else is said: to anyone but its owner a session
    * is "missing", whether or not it exists and whether or not it is at work. Only its owner
@@ -69,8 +95,8 @@ export interface SessionStore {
   update<T>(
     id: string,
     owner: string,
-    work: (record: SessionRecord, save: SaveRecord) => Promise<{ record: SessionRecord; value: T }>,
-  ): Promise<{ ok: true; value: T } | { ok: false; why: "missing" | "busy" }>;
+    work: (record: SessionRecord, hold: Hold) => Promise<{ record: SessionRecord; value: T }>,
+  ): Promise<{ ok: true; value: T } | { ok: false; why: "missing" | "busy" | "expired" }>;
 }
 
 /**
@@ -122,13 +148,24 @@ export function memorySessions(options: { max?: number; ttlMs?: number; now?: ()
       if (busy.has(id)) return { ok: false, why: "busy" };
       busy.add(id);
       try {
-        // Still there: a session that was dropped while this ran stays dropped.
-        const keep = (next: SessionRecord): void => {
-          if (kept.has(id)) kept.set(id, next);
+        // A session whose time ran out while this was at work is gone, like one that was dropped.
+        const here = (): void => {
+          if (!kept.has(id) || now() - record.createdAt >= ttl) throw new SessionGoneError();
         };
-        const done = await work(record, async (next) => keep(next));
-        keep(done.record);
+        const done = await work(record, {
+          save: async (next) => {
+            here();
+            kept.set(id, next);
+          },
+          check: async () => here(),
+        });
+        here();
+        kept.set(id, done.record);
         return { ok: true, value: done.value };
+      } catch (error) {
+        if (!(error instanceof SessionGoneError)) throw error;
+        kept.delete(id);
+        return { ok: false, why: "expired" };
       } finally {
         busy.delete(id);
       }

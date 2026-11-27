@@ -92,8 +92,8 @@ function contract(name: string, make: (options: { max?: number; ttlMs?: number }
       await store.create(blank(a));
       const { opened, open } = gate();
       const saved = gate();
-      const working = store.update(a, "o", async (r, save) => {
-        await save({ ...r, inFlight: 1 });
+      const working = store.update(a, "o", async (r, hold) => {
+        await hold.save({ ...r, inFlight: 1 });
         saved.open();
         await opened;
         throw new Error("the worker died");
@@ -104,16 +104,46 @@ function contract(name: string, make: (options: { max?: number; ttlMs?: number }
       await expect(working).rejects.toThrow("the worker died");
       expect(await store.read(a)).toMatchObject({ busy: false, record: { inFlight: 1, revision: 1 } });
       // The next piece of work starts from what was saved, and may save more than once.
-      await store.update(a, "o", async (r, save) => {
+      await store.update(a, "o", async (r, hold) => {
         expect(r.inFlight).toBe(1);
-        await save({ ...r, inFlight: 2 });
-        await save({ ...r, inFlight: 3, revision: 2 });
+        await hold.save({ ...r, inFlight: 2 });
+        await hold.save({ ...r, inFlight: 3, revision: 2 });
         const { inFlight: _, ...rest } = r;
         return { record: { ...rest, revision: 3 }, value: null };
       });
       const after = (await store.read(a))!.record;
       expect(after.revision).toBe(3);
       expect(after.inFlight).toBeUndefined();
+    });
+
+    it("a session whose time runs out while a worker is on it is gone, and the worker is told it expired", async () => {
+      const store = make({ ttlMs: 300 });
+      const a = id();
+      await store.create(blank(a));
+      const done = await store.update(a, "o", async (r) => {
+        await wait(350);
+        return { record: { ...r, revision: 2 }, value: "answer" };
+      });
+      expect(done).toEqual({ ok: false, why: "expired" });
+      expect(await store.read(a)).toBeNull();
+      // And when it finds out in the middle, by asking or by saving, the work goes no further.
+      for (const how of ["check", "save"] as const) {
+        const b = id();
+        await store.create(blank(b));
+        let went = false;
+        const stopped = await store.update(b, "o", async (r, hold) => {
+          await hold.check();
+          await hold.save({ ...r, inFlight: 1 });
+          await wait(350);
+          if (how === "check") await hold.check();
+          else await hold.save({ ...r, inFlight: 2 });
+          went = true;
+          return { record: r, value: "answer" };
+        });
+        expect(stopped, how).toEqual({ ok: false, why: "expired" });
+        expect(went, how).toBe(false);
+        expect(await store.read(b), how).toBeNull();
+      }
     });
 
     it("when every place is taken a new game is refused; a place is given up only by a game that has ended or expired", async () => {
@@ -290,8 +320,8 @@ describe.skipIf(!redisUrl)("sessions in Redis", () => {
     await store.create(blank(a));
     const saved = gate();
     const never = gate();
-    const lost = redisSessions(dead, { prefix: p, leaseMs: 200 }).update(a, "o", async (r, save) => {
-      await save({ ...r, inFlight: 1 });
+    const lost = redisSessions(dead, { prefix: p, leaseMs: 200 }).update(a, "o", async (r, hold) => {
+      await hold.save({ ...r, inFlight: 1 });
       saved.open();
       await never.opened;
       return { record: { ...r, revision: 99 }, value: "late" };
@@ -317,10 +347,10 @@ describe.skipIf(!redisUrl)("sessions in Redis", () => {
     const taken = gate();
     const resume = gate();
     let saveError: unknown;
-    const slow = store.update(a, "o", async (r, save) => {
+    const slow = store.update(a, "o", async (r, hold) => {
       taken.open();
       await resume.opened;
-      await save({ ...r, inFlight: 7 }).catch((error: unknown) => (saveError = error));
+      await hold.save({ ...r, inFlight: 7 }).catch((error: unknown) => (saveError = error));
       return { record: { ...r, revision: 50 }, value: "slow" };
     });
     await taken.opened;
@@ -364,9 +394,9 @@ describe.skipIf(!redisUrl)("sessions in Redis", () => {
     const b = id();
     await store.create(blank(b));
     const saves: unknown[] = [];
-    const taken = store.update(b, "o", async (r, save) => {
+    const taken = store.update(b, "o", async (r, hold) => {
       await admin.hset(`${p}:s:${b}`, "owner", "someone-else");
-      await save({ ...r, inFlight: 1 }).catch((error: unknown) => saves.push(error));
+      await hold.save({ ...r, inFlight: 1 }).catch((error: unknown) => saves.push(error));
       return { record: { ...r, revision: 2 }, value: null };
     });
     await expect(taken).rejects.toBeInstanceOf(SessionWriteError);
@@ -377,18 +407,58 @@ describe.skipIf(!redisUrl)("sessions in Redis", () => {
     expect(kept.inFlight).toBeUndefined();
   });
 
-  it("a session that ran out while a worker was on it stays gone; the worker's answer is still given", async () => {
+  it("a session that ran out while a worker was on it stays gone, and the worker is told it expired, at whatever point it finds out", async () => {
     const p = own();
     const store = redisSessions(runner, { prefix: p });
+    // Found out at the end.
     const a = id();
     await store.create(blank(a));
     const done = await store.update(a, "o", async (r) => {
       await admin.del(`${p}:s:${a}`);
       return { record: { ...r, revision: 2 }, value: "answer" };
     });
-    expect(done).toEqual({ ok: true, value: "answer" });
+    expect(done).toEqual({ ok: false, why: "expired" });
     expect(await store.read(a)).toBeNull();
     expect(await admin.exists(`${p}:s:${a}:lease`)).toBe(0);
+    // Found out in the middle, by a save or by a check: the work stops there.
+    for (const how of ["save", "check"] as const) {
+      const b = id();
+      await store.create(blank(b));
+      let went = false;
+      const stopped = await store.update(b, "o", async (r, hold) => {
+        await admin.del(`${p}:s:${b}`);
+        if (how === "save") await hold.save({ ...r, inFlight: 1 });
+        else await hold.check();
+        went = true;
+        return { record: r, value: "answer" };
+      });
+      expect(stopped, how).toEqual({ ok: false, why: "expired" });
+      expect(went, how).toBe(false);
+      expect(await store.read(b)).toBeNull();
+      expect(await admin.exists(`${p}:s:${b}:lease`)).toBe(0);
+    }
+  });
+
+  it("a check says whether the work still holds the session, and keeps the lease alive", async () => {
+    const p = own();
+    const store = redisSessions(runner, { prefix: p, leaseMs: 60_000 });
+    const a = id();
+    await store.create(blank(a));
+    const errors: unknown[] = [];
+    const done = store.update(a, "o", async (r, hold) => {
+      // Held: the check passes, and renews a lease that was about to run out.
+      await admin.pexpire(`${p}:s:${a}:lease`, 500);
+      await hold.check();
+      expect(await admin.pttl(`${p}:s:${a}:lease`)).toBeGreaterThan(50_000);
+      // Taken by another worker: the check rejects, and does not touch the other's lease.
+      await admin.set(`${p}:s:${a}:lease`, "another-worker", "PX", 500);
+      await hold.check().catch((error: unknown) => errors.push(error));
+      expect(await admin.get(`${p}:s:${a}:lease`)).toBe("another-worker");
+      expect(await admin.pttl(`${p}:s:${a}:lease`)).toBeLessThanOrEqual(500);
+      return { record: r, value: null };
+    });
+    await expect(done).rejects.toBeInstanceOf(SessionWriteError);
+    expect(errors[0]).toBeInstanceOf(SessionWriteError);
   });
 
   it("a record that cannot be read is an error, never a guess, and the session is not left held", async () => {

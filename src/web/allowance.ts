@@ -9,11 +9,17 @@ import type { ScriptRunner } from "../spend/redis-store";
  * that starts games in a loop. What stops the spending for good is the spend guard's
  * envelope, in dollars, which does not care who is asking.
  *
- *   sessions per visitor   new games one visitor may start in the window
- *   requests per visitor   requests to the model one visitor's games may send in the window,
- *                          across all of their games. Every physical request counts: the
- *                          one that picks the topic, the answer, and a retry.
- *   sessions per hour      new games everyone together may start in an hour
+ *   sessions per visitor   times one visitor may start a game in the window
+ *   requests per visitor   attempts one visitor's games may make to send a request to the
+ *                          model in the window, across all of their games. Every physical
+ *                          attempt counts: the one that picks the topic, the answer, and a
+ *                          retry.
+ *   sessions per hour      times everyone together may start a game in an hour
+ *
+ * These count attempts, and each is counted before anything else is asked. A request that
+ * the spend guard then refuses has still used one, and so has a start that then found the
+ * server full. Nothing is given back: for a fairness rule that is close enough, and it
+ * keeps the count to one atomic step.
  *
  * The visitor's window starts with the first thing they do and is not moved by what they do
  * later. The hour is the clock's own hour-long blocks, so a little more than the limit can

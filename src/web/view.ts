@@ -61,8 +61,12 @@ export interface View {
   topics: { handle: string; person: string; label: Text; heard: boolean }[];
   inspections: { handle: string; label: Text; done: boolean }[];
   transcript: Line[];
-  /** This session's confirmed model use. */
-  cost: { requests: number; nano: number };
+  /**
+   * This session's confirmed model use: the requests and cost of the turns that were kept.
+   * `unfinished` counts questions that were begun and never finished. What those cost, if
+   * anything, is counted by the server's spend guard and is not in `nano`.
+   */
+  cost: { requests: number; nano: number; unfinished: number };
   over: boolean;
   verdict?: {
     accused: string;
@@ -133,7 +137,7 @@ export function lineOf(c: Case, record: SessionRecord, n: number, question: stri
   return { n, person: handlesOf(c, record).person.handle(turn.suspect), question, line: turn.line, language: turn.language, source: turn.source, noted: turn.statements.length };
 }
 
-export function viewOf(c: Case, record: SessionRecord, model: "on" | "off"): View {
+export function viewOf(c: Case, record: SessionRecord, model: "on" | "off", interrupted = false): View {
   const s = record.session;
   const h = handlesOf(c, record);
   const room = (id: string): Text => {
@@ -180,7 +184,12 @@ export function viewOf(c: Case, record: SessionRecord, model: "on" | "off"): Vie
       return m ? [{ handle: h.inspection.handle(id), label: { ...m.label }, done: m.done }] : [];
     }),
     transcript: s.turns.map((r) => lineOf(c, record, r.n, r.question, r.turn)),
-    cost: { requests: s.turns.reduce((sum, r) => sum + r.turn.requests, 0), nano: s.turns.reduce((sum, r) => sum + r.turn.costNano, 0) },
+    cost: {
+      requests: s.turns.reduce((sum, r) => sum + r.turn.requests, 0),
+      nano: s.turns.reduce((sum, r) => sum + r.turn.costNano, 0),
+      // `interrupted`: the question marked as begun is lost, not in progress. Only the caller knows which.
+      unfinished: (record.lost ?? 0) + (interrupted ? 1 : 0),
+    },
     over: s.verdict !== undefined,
   };
   if (s.verdict) {

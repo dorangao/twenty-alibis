@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ScriptRunner } from "../spend/redis-store";
-import { MAX_SESSIONS, SESSION_TTL_MS, type SaveRecord, type SessionRecord, type SessionStore } from "./sessions";
+import { MAX_SESSIONS, SESSION_TTL_MS, SessionGoneError, type Hold, type SessionRecord, type SessionStore } from "./sessions";
 
 /**
  * Sessions in Redis, for a server that runs as many short-lived workers.
@@ -18,7 +18,8 @@ import { MAX_SESSIONS, SESSION_TTL_MS, type SaveRecord, type SessionRecord, type
  *   no overwrite    A record is written only by the worker whose token is in the lease, and
  *                   only if the session's owner and revision are still what that worker read.
  *                   A worker that was slow, lost its lease and comes back later changes
- *                   nothing: its write is refused.
+ *                   nothing: its write is refused. It can ask the same question without
+ *                   writing (`hold.check`), and does before each further request it sends.
  *
  * What is kept, under `prefix`:
  *
@@ -104,6 +105,15 @@ redis.call('HSET', KEYS[1], 'record', ARGV[4], 'revision', ARGV[5])
 return 'ok'
 `;
 
+// KEYS: session, lease.  ARGV: token, owner, revision read, lease term
+// Still this worker's, and still as it left it: the lease is renewed on the spot.
+const CHECK = `${MAY_WRITE}
+local said = may_write()
+if said ~= 'ok' then return said end
+redis.call('PEXPIRE', KEYS[2], ARGV[4])
+return 'ok'
+`;
+
 // KEYS: session, lease, open.  ARGV: token, owner, revision read, record, its revision, '1' if the game is over, id
 // The lease is given up in the same step, whatever the answer, unless it was not this worker's.
 const COMMIT = `${MAY_WRITE}
@@ -178,19 +188,30 @@ export function redisSessions(redis: ScriptRunner, options: RedisSessionOptions)
         const record = parse(id, admitted[1]);
         // The revision Redis holds, as this worker knows it. A write is taken only if it still is.
         let revision = String(admitted[2]);
-        const save: SaveRecord = async (next) => {
-          const said = String(await redis.eval(SAVE, [key(id), lease(id)], [token, owner, revision, JSON.stringify(next), String(next.revision)]));
-          if (said !== "ok") throw new SessionWriteError(said);
-          revision = String(next.revision);
+        /** What a script said, as an error: "gone" is the session running out, anything else a lost hold. */
+        const refused = (said: string): Error => (said === "gone" ? new SessionGoneError() : new SessionWriteError(said));
+        const hold: Hold = {
+          save: async (next) => {
+            const said = String(await redis.eval(SAVE, [key(id), lease(id)], [token, owner, revision, JSON.stringify(next), String(next.revision)]));
+            if (said !== "ok") throw refused(said);
+            revision = String(next.revision);
+          },
+          check: async () => {
+            const said = String(await redis.eval(CHECK, [key(id), lease(id)], [token, owner, revision, String(leaseMs)]));
+            if (said !== "ok") throw refused(said);
+          },
         };
-        const done = await work(record, save);
+        const done = await work(record, hold);
         const over = done.record.session.verdict !== undefined ? "1" : "0";
         const said = String(await redis.eval(COMMIT, [key(id), lease(id), open], [token, owner, revision, JSON.stringify(done.record), String(done.record.revision), over, id]));
-        // Whatever it said, the lease is no longer held by this worker.
-        ours = false;
-        // "gone": the session ran out while this was at work. It stays gone; the answer is still given.
-        if (said !== "ok" && said !== "gone") throw new SessionWriteError(said);
+        // Whatever it said, unless the lease was no longer this worker's, the lease has been given up.
+        if (said !== "lease-lost") ours = false;
+        if (said !== "ok") throw refused(said);
         return { ok: true, value: done.value };
+      } catch (error) {
+        // The session ran out while this was at work. It stays gone, and the work's answer is not given.
+        if (error instanceof SessionGoneError) return { ok: false, why: "expired" };
+        throw error;
       } finally {
         clearInterval(beat);
         if (ours) await redis.eval(RELEASE, [lease(id)], [token]).catch(() => undefined);

@@ -34,9 +34,11 @@ import { caseCard, handlesOf, viewOf, withHandles, type CaseCard, type View } fr
  * the session and sees where it stands.
  *
  * Lost work. A question is written down as begun before its first request to the model is
- * sent. If the server stops before the answer is kept, the game stands where it stood, the
- * next view says so, and the question's number is not used again, so its requests can never
- * be sent a second time under the same ids. What they cost stays counted by the spend guard.
+ * sent, and that already moves the revision: the click that asked it cannot be taken twice.
+ * If the server stops before the answer is kept, the game stands where it stood, the next
+ * view says so, and the question's number is not used again, so its requests can never be
+ * sent a second time under the same ids. Asking again is a new click on the new view. What
+ * the lost requests cost stays counted by the spend guard.
  *
  * Names. A request names things by the handles its view gave it (P3, T7, I2, E4), never by
  * the case file's ids, and a handle is taken only if it is on the menu or in the notebook.
@@ -280,11 +282,10 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
    * A view of a record, with the word that its last question was lost. A question that is
    * written down as begun while a request is at work on the session is simply in progress.
    */
-  const replyOf = (c: Case, record: SessionRecord, busy: boolean, note?: AskNote): ViewReply => ({
-    view: viewOf(c, record, modelFor(record)),
-    ...(note ? { ask: note } : {}),
-    ...(record.inFlight !== undefined && !busy ? { status: { code: "interrupted", text: INTERRUPTED } } : {}),
-  });
+  const replyOf = (c: Case, record: SessionRecord, busy: boolean, note?: AskNote): ViewReply => {
+    const interrupted = record.inFlight !== undefined && !busy;
+    return { view: viewOf(c, record, modelFor(record), interrupted), ...(note ? { ask: note } : {}), ...(interrupted ? { status: { code: "interrupted", text: INTERRUPTED } } : {}) };
+  };
 
   if (parts.length === 2 && parts[1] === "cases") {
     if (request.method !== "GET") return fail("method");
@@ -348,18 +349,27 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
   if (typeof body.revision !== "number" || !Number.isSafeInteger(body.revision)) return fail("bad-request");
   const revision = body.revision;
 
-  const done = await deps.sessions.update<ViewReply>(id, owner, async (record, save) => {
+  const done = await deps.sessions.update<ViewReply>(id, owner, async (record, hold) => {
     const c = caseFor(record);
     // The page acted on a view the session has since left behind. Nothing is done.
     if (record.revision !== revision) throw new Refused("stale");
     const h = handlesOf(c, record);
     const model = modelFor(record);
+    /** The record as the store has it now: the one this work was handed, or the one it saved when a question began. */
+    let base = record;
+    /** True once a question has been written down as begun, which happens before its first request. */
+    let begun = false;
+    /** True once the visitor's allowance has refused a request of this question. */
+    let spent = false;
     const keep = (next: Session, note?: AskNote): { record: SessionRecord; value: ViewReply } => {
       // The revision moves only when the session did: a saved answer given again changes nothing.
-      const changed = JSON.stringify(next) !== JSON.stringify(record.session);
+      // A question that was begun always moved it: its number is used, whatever came of it.
+      const changed = begun || JSON.stringify(next) !== JSON.stringify(base.session);
       // Once something new is kept, the question that was begun is either in it or behind it.
-      const { inFlight: _begun, ...settled } = record;
-      const kept = changed ? withHandles(c, { ...settled, session: next, revision: record.revision + 1 }) : record;
+      const { inFlight: _begun, ...settled } = base;
+      // A mark that was already there when this work started is a question that never finished.
+      const lost = (record.lost ?? 0) + (record.inFlight !== undefined ? 1 : 0);
+      const kept = changed ? withHandles(c, { ...settled, session: next, revision: base.revision + 1, ...(lost > 0 ? { lost } : {}) }) : base;
       // This request holds the session, so a question still marked as begun is one that was lost.
       return { record: kept, value: replyOf(c, kept, false, note) };
     };
@@ -390,17 +400,22 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
     };
     // A session that began with the model off never reaches the real one, whatever the server holds now.
     const refuse: Metered = async (r) => ({ ok: false, attemptId: r.attemptId, sent: false, reason: "kill-switch" });
-    /** True once the visitor's allowance has refused a request of this question. */
-    let spent = false;
-    let begun = false;
     const live: Metered = async (r) => {
       // Before the question's first request: write down that it has begun, and move its number
-      // on. If this worker is lost from here on, the number is used up and the next view says
-      // so. If this cannot be written, it throws, and nothing is sent.
+      // and the session's revision on. From here the click that asked it is used up: delivered
+      // again, it is stale and does nothing. If this worker is lost, the next view says so, and
+      // asking again is a new click on that view. If this cannot be written, it throws, and
+      // nothing is sent.
       if (!begun) {
         const n = record.session.asked + 1;
-        await save({ ...record, session: { ...record.session, asked: n }, inFlight: n });
+        const admitted: SessionRecord = { ...record, session: { ...record.session, asked: n }, inFlight: n, revision: record.revision + 1 };
+        await hold.save(admitted);
+        base = admitted;
         begun = true;
+      } else {
+        // A further request of the same question: only if this worker still holds the session.
+        // A worker that stalled and lost it to another must send nothing more. This throws then.
+        await hold.check();
       }
       if (spent) return refuse(r);
       if (deps.allowance) {
@@ -429,6 +444,6 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
     return keep(result.session, noteOf(result));
   });
 
-  if (!done.ok) return fail(done.why === "busy" ? "busy" : "not-found");
+  if (!done.ok) return fail(done.why === "missing" ? "not-found" : done.why);
   return json(200, done.value);
 }
