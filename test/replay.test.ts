@@ -549,18 +549,7 @@ describe("what the page does with a replay file", () => {
   /** Every place in a JSON value, as the list of keys that leads to it. */
   const places = (x: unknown, at: (string | number)[] = []): (string | number)[][] =>
     Array.isArray(x) ? x.flatMap((v, i) => [[...at, i], ...places(v, [...at, i])]) : typeof x === "object" && x !== null ? Object.entries(x).flatMap(([k, v]) => [[...at, k], ...places(v, [...at, k])]) : [];
-  /** A copy of `x` with the value at `path` changed by `change`, or removed when it returns the `GONE` mark. */
-  const GONE = Symbol("gone");
-  const altered = (x: unknown, path: (string | number)[], change: (v: unknown) => unknown): unknown => {
-    const copy = JSON.parse(JSON.stringify(x)) as unknown;
-    let parent = copy as Record<string | number, unknown>;
-    for (const key of path.slice(0, -1)) parent = parent[key] as Record<string | number, unknown>;
-    const last = path.at(-1)!;
-    const next = change(parent[last]);
-    if (next === GONE) delete parent[last];
-    else parent[last] = next;
-    return copy;
-  };
+  const reach = (root: unknown, path: (string | number)[]): unknown => path.reduce<unknown>((x, key) => (x as Record<string | number, unknown>)[key], root);
 
   it("takes a replay file only if it is the replay that was asked for, whole and in order", () => {
     const good = file();
@@ -601,35 +590,51 @@ describe("what the page does with a replay file", () => {
   });
 
   it("reads nothing it has not checked: with any one part of the file missing, of another kind, or added, it is not a replay", () => {
-    const good = file();
-    const all = places(good);
+    // One copy of the file, changed in one place at a time and put right again: several thousand
+    // variants, each checked whole. Whatever is taken for a replay when it should not be is listed.
+    const doc = file() as unknown;
+    const all = places(doc);
     expect(all.length).toBeGreaterThan(2_000);
+    const taken: string[] = [];
+    const tried = (what: string): void => {
+      if (replayOf(doc, "lighthouse") !== null) taken.push(what);
+    };
     for (const path of all) {
-      const where = path.join(".");
+      const parent = reach(doc, path.slice(0, -1)) as Record<string | number, unknown>;
+      const key = path.at(-1)!;
+      const was = parent[key];
       // Taken away. (An item taken out of a list leaves a shorter list, which can still be a replay: lists are checked item by item.)
-      if (typeof path.at(-1) === "string") expect(replayOf(altered(good, path, () => GONE), "lighthouse"), `without ${where}`).toBeNull();
+      if (typeof key === "string") {
+        delete parent[key];
+        tried(`without ${path.join(".")}`);
+      }
       // Of another kind.
-      expect(replayOf(altered(good, path, (v) => (typeof v === "number" ? "7" : typeof v === "string" ? 7 : typeof v === "boolean" ? "true" : null)), "lighthouse"), `wrong kind at ${where}`).toBeNull();
+      parent[key] = typeof was === "number" ? "7" : typeof was === "string" ? 7 : typeof was === "boolean" ? "true" : null;
+      tried(`wrong kind at ${path.join(".")}`);
+      parent[key] = was;
     }
-    // A part that no replay has, in every object of the file.
-    const objects = [[] as (string | number)[], ...all].filter((path) => {
-      const target = path.reduce<unknown>((x, key) => (x as Record<string | number, unknown>)[key], good);
-      return typeof target === "object" && target !== null && !Array.isArray(target);
-    });
+    // A part that no replay has, in every object of the file. "constructor" and "toString" are
+    // names every object answers to without having them: they are not parts either.
+    const objects = [[] as (string | number)[], ...all].map((path) => [path, reach(doc, path)] as const).filter(([, x]) => typeof x === "object" && x !== null && !Array.isArray(x));
     expect(objects.length).toBeGreaterThan(500);
-    // "constructor" and "toString" are names every object answers to without having them: they are not parts either.
-    for (const added of ["culprit", "constructor", "toString", "hasOwnProperty", "__proto__"]) {
-      for (const path of objects) {
-        const copy = JSON.parse(JSON.stringify(good)) as unknown;
-        Object.defineProperty(path.reduce<unknown>((x, key) => (x as Record<string | number, unknown>)[key], copy) as object, added, { value: "s-03", enumerable: true, configurable: true, writable: true });
-        expect(replayOf(copy, "lighthouse"), `${added} added at ${path.join(".")}`).toBeNull();
+    for (const added of ["hidden-answer", "constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      for (const [path, target] of objects) {
+        // A name the object does not have: adding it must not write over a real part.
+        expect(Object.hasOwn(target as object, added)).toBe(false);
+        Object.defineProperty(target, added, { value: "s-03", enumerable: true, configurable: true, writable: true });
+        tried(`${added} added at ${path.join(".")}`);
+        delete (target as Record<string, unknown>)[added];
       }
     }
+    expect(taken).toEqual([]);
+    // Every change was put right again: the file is the replay it was, so each refusal above was for that one change.
+    expect(replayOf(doc, "lighthouse")).toEqual(file());
     // And a part that is only inherited does not count as being there.
-    const inherited = JSON.parse(JSON.stringify(good)) as Record<string, unknown>;
+    const inherited = file() as unknown as Record<string, unknown>;
+    const title = inherited.title;
     delete inherited.title;
-    expect(replayOf(Object.assign(Object.create({ title: good.title }) as object, inherited), "lighthouse")).toBeNull();
-  });
+    expect(replayOf(Object.assign(Object.create({ title }) as object, inherited), "lighthouse")).toBeNull();
+  }, 30_000);
 
   it("steps stay inside the replay", () => {
     const replay = file();

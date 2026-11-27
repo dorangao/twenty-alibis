@@ -29,7 +29,10 @@ const shape = (parts: Record<string, Check>): Check => (x) =>
   Object.entries(parts).every(([key, check]) => check(Object.hasOwn(x, key) ? (x as Record<string, unknown>)[key] : undefined));
 
 const text = shape({ en: str, zh: str });
-const handle = (prefix: string): Check => (x) => typeof x === "string" && new RegExp(`^${prefix}[1-9]\\d{0,3}$`).test(x);
+const handle = (prefix: string): Check => {
+  const pattern = new RegExp(`^${prefix}[1-9]\\d{0,3}$`);
+  return (x) => typeof x === "string" && pattern.test(x);
+};
 const person = handle("P");
 const place = shape({ slot: str, room: text });
 
@@ -52,7 +55,7 @@ const reveal = shape({
 });
 
 /** A view as a replay holds it. Before the last frame the game is not over and there is no verdict or reveal; in the last it is solved. */
-const view = (last: boolean): Check =>
+const viewCheck = (last: boolean): Check =>
   shape({
     session: str,
     revision: count,
@@ -77,6 +80,11 @@ const view = (last: boolean): Check =>
     verdict: last ? verdict : absent,
     reveal: last ? reveal : absent,
   });
+const viewBefore = viewCheck(false);
+const viewAtEnd = viewCheck(true);
+const firstFrame = shape({ move: absent, view: viewBefore });
+const laterFrame = shape({ move, view: viewBefore });
+const lastFrame = shape({ move, view: viewAtEnd });
 
 /** A list file's replays. Null when the file is not a list of replay cards, every one of them whole. */
 export function indexOf(data: unknown): ReplayCard[] | null {
@@ -96,8 +104,8 @@ export function replayOf(data: unknown, id: string): Replay | null {
   const frames = (data as { frames?: unknown }).frames;
   if (!Array.isArray(frames) || frames.length < 2) return null;
   const last = frames.length - 1;
-  const frame = (i: number): Check => shape({ move: i === 0 ? absent : move, view: view(i === last) });
-  if (!shape({ ...card, version: oneOf(1), frames: (x) => (x as unknown[]).every((f, i) => frame(i)(f)) })(data)) return null;
+  const frame = (f: unknown, i: number): boolean => (i === 0 ? firstFrame : i === last ? lastFrame : laterFrame)(f);
+  if (!shape({ ...card, version: oneOf(1), frames: (x) => (x as unknown[]).every(frame) })(data)) return null;
   const replay = data as Replay;
   if (replay.id !== id) return null;
   // People a move or a statement names are on the roster.
