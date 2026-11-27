@@ -256,6 +256,28 @@ describe("the dev server hands out the page, and nothing else in the checkout", 
   }, 60_000);
 });
 
+describe("starting the dev server", () => {
+  it("names its config, so a cold start in a checkout without one stops instead of serving the folder", () => {
+    // Vite started without a config serves the folder it is in, all of it. That is what happens
+    // if the config is merely looked for and is not there, as on a commit from before the page.
+    const scripts = (JSON.parse(readFileSync("package.json", "utf8")) as { scripts: Record<string, string> }).scripts;
+    expect(scripts.dev).toMatch(/\bvite --config vite\.config\.ts\b/);
+    expect(scripts["build:web"]).toMatch(/\bvite build --config vite\.config\.ts\b/);
+    // In a folder with no config, holding one harmless file: the named config is missing, and Vite refuses to start.
+    const empty = mkdtempSync(join(tmpdir(), "no-config-"));
+    writeFileSync(join(empty, "sentinel.txt"), "harmless");
+    const vite = join(process.cwd(), "node_modules/.bin/vite");
+    const run = spawnSync(vite, ["--config", "vite.config.ts", "--port", "0"], { cwd: empty, encoding: "utf8", timeout: 20_000, env: { ...process.env, VITE_CONFIG_NATIVE_IGNORE_WARNING: "true" } });
+    expect(run.error).toBeUndefined();
+    expect(run.status).toBe(1);
+    // It stopped because the config it was told to use is not there, and it never listened.
+    const said = `${run.stdout}${run.stderr}`;
+    expect(said).toContain("failed to load config from");
+    expect(said).toContain("vite.config.ts");
+    expect(said).not.toMatch(/Local:\s+http/);
+  }, 30_000);
+});
+
 describe("the cases a local server offers", () => {
   it("is the handwritten case, plus every case file in the folder that passes the gate", () => {
     const dir = mkdtempSync(join(tmpdir(), "library-"));
@@ -333,7 +355,7 @@ describe("the page", () => {
 
   it("builds, and the built files hold no case: no title, no person, no record", () => {
     const out = mkdtempSync(join(tmpdir(), "page-"));
-    const build = spawnSync("npx", ["vite", "build", "--outDir", out, "--emptyOutDir"], { encoding: "utf8", env: { ...process.env, VITE_CONFIG_NATIVE_IGNORE_WARNING: "true" } });
+    const build = spawnSync("npx", ["vite", "build", "--config", "vite.config.ts", "--outDir", out, "--emptyOutDir"], { encoding: "utf8", env: { ...process.env, VITE_CONFIG_NATIVE_IGNORE_WARNING: "true" } });
     expect(build.status, build.stderr).toBe(0);
     const files = readdirSync(join(out, "assets"));
     expect(files.some((name) => name.endsWith(".js"))).toBe(true);

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { DetectiveReply } from "../src/agents/detective";
 import { archivePass } from "../src/case/fixtures/archive";
 import { createMetered, type Metered, type TraceEvent } from "../src/metered";
@@ -657,7 +657,23 @@ describe("one runner at a time", () => {
 
 const redisUrl = process.env.TEST_REDIS_URL;
 describe.skipIf(!redisUrl)("the lease in Redis", () => {
-  const key = () => `ta-test-lease-${randomUUID()}`;
+  // Each test's lease has a key of its own. They are remembered by name and removed after each
+  // test, whether it passed or not: an assertion that fails before the release would otherwise
+  // leave the lease in the store until its term ran out.
+  const made: string[] = [];
+  const key = () => {
+    const k = `ta-test-lease-${randomUUID()}`;
+    made.push(k);
+    return k;
+  };
+  afterEach(async () => {
+    const { runner, close } = await connectRedis(redisUrl!);
+    try {
+      for (const k of made.splice(0)) await runner.eval("return redis.call('DEL', KEYS[1])", [k], []);
+    } finally {
+      await close();
+    }
+  });
   const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
   it("is held by one run at a time, across connections, and only its holder can renew or release it", async () => {
@@ -690,20 +706,30 @@ describe.skipIf(!redisUrl)("the lease in Redis", () => {
     const { runner, close } = await connectRedis(redisUrl!);
     try {
       const k = key();
-      const lock = redisRunLock(runner, k, { ttlMs: 150 });
+      // Terms long enough for a Redis that is a network hop away: against a hosted one a single
+      // command took about 93 ms, which a 150 ms term could not survive.
+      const lock = redisRunLock(runner, k, { ttlMs: 1_000 });
       const crashed = await lock.acquire();
       expect(crashed).not.toBeNull();
       expect(await lock.acquire()).toBeNull();
-      await wait(250);
+      await wait(1_300);
       // The holder never released. The lease ran out, and the next run gets it.
       const next = await lock.acquire();
       expect(next).not.toBeNull();
       // The crashed run, coming back, finds the lease is no longer its own.
       expect(await crashed!.renew()).toBe(false);
-      // Renewing keeps it past its first term.
-      await wait(100);
+      // Renewing moves the deadline: more of the term is left after it than before. A renewal
+      // that only said it had worked would leave the remaining time where it was.
+      const left = async () => Number(await runner.eval("return redis.call('PTTL', KEYS[1])", [k], []));
+      await wait(300);
+      const before = await left();
       expect(await next!.renew()).toBe(true);
-      await wait(100);
+      const after = await left();
+      expect(before).toBeGreaterThan(0);
+      expect(before).toBeLessThanOrEqual(700);
+      expect(after).toBeGreaterThan(before + 150);
+      expect(after).toBeLessThanOrEqual(1_000);
+      await wait(300);
       expect(await lock.acquire()).toBeNull();
       await next!.release();
     } finally {
