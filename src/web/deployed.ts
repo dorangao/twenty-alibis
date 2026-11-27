@@ -30,6 +30,12 @@ import { redisSessions } from "./redis-sessions";
  * still checks every one of these again at each request; what is decided here is only what a
  * visitor is told and how a new game starts.
  *
+ * "Room" is judged by the numbers the guard itself uses: the smaller of the configured limit
+ * and the limit fixed in Redis when the envelope was made, both read with the totals in one
+ * step. For a request that only reads, the answer may be up to five seconds old. For one
+ * that changes something it is read afresh: a new game's mode is fixed for good when it
+ * starts, so it must be decided on what is true at that moment.
+ *
  * It fails closed. Without its configuration the server answers every request with the fixed
  * server error and sends nothing. If Redis cannot be reached, no game starts and no request
  * is sent.
@@ -58,7 +64,7 @@ export interface DeployedConfig {
 export const WEB_PREFIX = "ta:web";
 /** How many trace lines are kept in Redis. Older lines are dropped. */
 const TRACE_LINES = 50_000;
-/** How long the answer to "is the model on?" is reused. The spend guard itself asks every time. */
+/** How long the answer to "is the model on?" is reused for requests that only read. The spend guard itself asks every time. */
 const MODEL_STATE_MS = 5_000;
 
 /**
@@ -200,7 +206,9 @@ export interface DeployedParts {
   /** Null when the server has no key: the model is off, and nothing can turn it on. */
   model: {
     metered: Metered;
-    totals(): Promise<EnvelopeTotals>;
+    /** The envelope's totals and the limit fixed in Redis, read in one step. */
+    snapshot(): Promise<{ totals: EnvelopeTotals; limitNano: number }>;
+    /** The limit this server is configured with. The one in force is the smaller of the two. */
     limitNano: number;
     /** The server's own switch, read at every request. */
     disabled(): boolean;
@@ -220,14 +228,15 @@ export function deployedApi(parts: DeployedParts): (request: Request) => Promise
   // The most one request can hold. With less room than this in the envelope, none can be sent.
   const oneRequest = absoluteWorstNano(ANSWER_OUTPUT_TOKENS);
   let seen: { at: number; off: boolean } | null = null;
-  const modelOff = async (): Promise<boolean> => {
+  const modelOff = async (fresh: boolean): Promise<boolean> => {
     const model = parts.model;
     if (!model || model.disabled()) return true;
-    if (seen && now() - seen.at < MODEL_STATE_MS) return seen.off;
+    if (!fresh && seen && now() - seen.at < MODEL_STATE_MS) return seen.off;
     let off = true;
     try {
-      const totals = await model.totals();
-      off = totals.suspended !== null || totals.paidAllowed === null || model.limitNano - totals.committedNano < oneRequest;
+      const { totals, limitNano } = await model.snapshot();
+      // The limit in force is the smaller of the two, as it is when a request is reserved.
+      off = totals.suspended !== null || totals.paidAllowed === null || Math.min(model.limitNano, limitNano) - totals.committedNano < oneRequest;
     } catch {
       // The counter cannot be read: nothing would be admitted, so the model is off.
       off = true;
@@ -236,7 +245,9 @@ export function deployedApi(parts: DeployedParts): (request: Request) => Promise
     return off;
   };
   return async (request) => {
-    const response = await handleRequest(request, { cases: parts.cases, sessions, allowance, origin: parts.origin, metered: parts.model?.metered ?? refuse, modelOff: await modelOff() });
+    // Anything but a read may start a game or ask a question: it goes by what is true now.
+    const fresh = request.method !== "GET" && request.method !== "HEAD";
+    const response = await handleRequest(request, { cases: parts.cases, sessions, allowance, origin: parts.origin, metered: parts.model?.metered ?? refuse, modelOff: await modelOff(fresh) });
     await parts.model?.settle();
     return response;
   };
@@ -254,7 +265,7 @@ export function deployedParts(env: Env = process.env): DeployedParts {
     const { metered, store } = guardedModel({ env, config, apiKey: key.key, redis, trace: redisTrace(redis, `${config.prefix}:trace:${config.envelope}`, pending) });
     model = {
       metered,
-      totals: () => store.totals(config.envelope),
+      snapshot: () => store.snapshot(config.envelope),
       limitNano: config.limitNano,
       disabled: () => env.EMBER_DISABLED === "1",
       settle: async () => void (await Promise.allSettled([...pending])),

@@ -315,6 +315,15 @@ export class RedisSpendStore implements SpendStore {
     return (await this.run(envelope, TOTALS, [])).totals;
   }
 
+  /**
+   * The totals and the limit fixed at initialization, read in one step: what a caller needs
+   * to say whether one more request would be admitted, by the same numbers `reserve` uses.
+   */
+  async snapshot(envelope: string): Promise<{ totals: EnvelopeTotals; limitNano: number }> {
+    const { totals, limitNano } = await this.run(envelope, TOTALS, []);
+    return { totals, limitNano };
+  }
+
   /** The limit fixed at initialization. */
   async limit(envelope: string): Promise<number> {
     return (await this.run(envelope, TOTALS, [])).limitNano;

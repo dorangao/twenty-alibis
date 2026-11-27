@@ -226,6 +226,15 @@ describe.skipIf(!redisUrl)("Redis spend store", () => {
   });
   afterAll(() => admin.disconnect());
 
+  it("gives the totals and the limit fixed at initialization in one step", async () => {
+    const envelope = fresh();
+    await store.init({ envelope, limitNano: 5_000 });
+    await store.reserve({ envelope, attemptId: "a", amountNano: 1_200, limitNano: 9_000 });
+    expect(await store.snapshot(envelope)).toEqual({ totals: await store.totals(envelope), limitNano: 5_000 });
+    expect((await store.snapshot(envelope)).totals).toMatchObject({ heldNano: 1_200, committedNano: 1_200, attempts: 1 });
+    await expect(store.snapshot(fresh())).rejects.toBeInstanceOf(EnvelopeNotInitializedError);
+  });
+
   it("refuses everything for an envelope that was never initialized", async () => {
     const envelope = fresh();
     await expect(store.reserve({ envelope, attemptId: "a", amountNano: 1, limitNano: 1_000 })).rejects.toBeInstanceOf(EnvelopeNotInitializedError);

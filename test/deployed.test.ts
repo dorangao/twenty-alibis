@@ -1,10 +1,11 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { prepareOutputDir } from "../scripts/build-output-dir";
 import { archivePass } from "../src/case/fixtures/archive";
 import { createMetered, type TraceEvent } from "../src/metered";
 import { FakeProvider } from "../src/provider/fake";
@@ -30,6 +31,8 @@ function wellBehaved(request: ProviderRequest): ProviderResponse {
   return { text: JSON.stringify({ assertions: recalled.statements.map((s) => s.id), line: recalled.statements.map((s) => s.en).join(" "), language: "en" }), toolCalls: [], usage, finishReason: "stop" };
 }
 const open: EnvelopeTotals = { settledNano: 0, heldNano: 0, retainedNano: 0, committedNano: 0, attempts: 0, suspended: null, paidAllowed: "judges" };
+
+const prefix = redisRun();
 
 describe("the deployed server's configuration", () => {
   it("reads the origin, the spend settings and the allowance, with defaults for what is optional", () => {
@@ -178,37 +181,52 @@ describe("one Redis connection, opened again when it has died", () => {
 describe("whether the model is on, for a deployed server", () => {
   const down: ScriptRunner = { eval: () => Promise.reject(new Error("no redis in this test")) };
   const metered = createMetered({ inputBound: { tokensPerByte: 100 }, provider: new FakeProvider(wellBehaved), store: new MemorySpendStore(), envelope: "e", limitNano: usdToNano(1) });
+  const LIMIT = usdToNano(2.5);
+  /** A snapshot of the envelope: its totals, and the limit fixed in Redis. */
+  const snap = (totals: Partial<EnvelopeTotals> = {}, limitNano = LIMIT) => async () => ({ totals: { ...open, ...totals }, limitNano });
   const parts = (model: Partial<NonNullable<DeployedParts["model"]>> | null, now?: () => number): DeployedParts => ({
     cases: [archivePass],
     redis: down,
     origin: "https://game.test",
     limits: DEFAULT_LIMITS,
     prefix: "ta-test-unused",
-    model: model === null ? null : { metered, totals: async () => open, limitNano: usdToNano(2.5), disabled: () => false, settle: async () => undefined, ...model },
+    model: model === null ? null : { metered, snapshot: snap(), limitNano: LIMIT, disabled: () => false, settle: async () => undefined, ...model },
     ...(now ? { now } : {}),
   });
   const model = async (api: (request: Request) => Promise<Response>): Promise<string> => ((await (await api(new Request("https://game.test/api/cases"))).json()) as CasesReply).model;
+  const begin = (api: (request: Request) => Promise<Response>) => api(new Request("https://game.test/api/sessions", { method: "POST", headers: { origin: "https://game.test" }, body: JSON.stringify({ caseId: archivePass.id }) }));
 
   it("is on only with a key, the switch off, paid requests authorized, no suspension, and room for one more request", async () => {
     expect(await model(deployedApi(parts({})))).toBe("on");
     expect(await model(deployedApi(parts(null)))).toBe("off");
     expect(await model(deployedApi(parts({ disabled: () => true })))).toBe("off");
-    expect(await model(deployedApi(parts({ totals: async () => ({ ...open, paidAllowed: null }) })))).toBe("off");
-    expect(await model(deployedApi(parts({ totals: async () => ({ ...open, suspended: "a reply cost more than its hold" }) })))).toBe("off");
-    expect(await model(deployedApi(parts({ totals: async () => Promise.reject(new Error("the envelope is not initialized")) })))).toBe("off");
+    expect(await model(deployedApi(parts({ snapshot: snap({ paidAllowed: null }) })))).toBe("off");
+    expect(await model(deployedApi(parts({ snapshot: snap({ suspended: "a reply cost more than its hold" }) })))).toBe("off");
+    expect(await model(deployedApi(parts({ snapshot: async () => Promise.reject(new Error("the envelope is not initialized")) })))).toBe("off");
     // Room: the envelope must be able to hold one request at its worst case, about 31 cents.
-    expect(await model(deployedApi(parts({ totals: async () => ({ ...open, committedNano: usdToNano(2.1) }) })))).toBe("on");
-    expect(await model(deployedApi(parts({ totals: async () => ({ ...open, committedNano: usdToNano(2.3) }) })))).toBe("off");
+    expect(await model(deployedApi(parts({ snapshot: snap({ committedNano: usdToNano(2.1) }) })))).toBe("on");
+    expect(await model(deployedApi(parts({ snapshot: snap({ committedNano: usdToNano(2.3) }) })))).toBe("off");
   });
 
-  it("asks the counter at most once in five seconds, and the server's own switch every time", async () => {
+  it("judges room by the limit in force: the smaller of the configured one and the one fixed in Redis, as the guard does", async () => {
+    const spent = { committedNano: usdToNano(0.8) };
+    // Configured for 2.50, but the envelope was made with 1.00: 20 cents are left, not room for a request.
+    expect(await model(deployedApi(parts({ snapshot: snap(spent, usdToNano(1)) })))).toBe("off");
+    // Configured lower than the envelope was made with: the lower one counts too.
+    expect(await model(deployedApi(parts({ limitNano: usdToNano(1), snapshot: snap(spent, usdToNano(2.5)) })))).toBe("off");
+    // Both leave room.
+    expect(await model(deployedApi(parts({ limitNano: usdToNano(2), snapshot: snap(spent, usdToNano(2.5)) })))).toBe("on");
+    expect(await model(deployedApi(parts({ limitNano: usdToNano(2.5), snapshot: snap(spent, usdToNano(2)) })))).toBe("on");
+  });
+
+  it("for a request that only reads, asks the counter at most once in five seconds, and the server's own switch every time", async () => {
     let clock = 0;
     let asked = 0;
-    let totals = open;
+    let totals: Partial<EnvelopeTotals> = {};
     let disabled = false;
-    const api = deployedApi(parts({ totals: async () => (asked++, totals), disabled: () => disabled }, () => clock));
+    const api = deployedApi(parts({ snapshot: async () => (asked++, { totals: { ...open, ...totals }, limitNano: LIMIT }), disabled: () => disabled }, () => clock));
     expect(await model(api)).toBe("on");
-    totals = { ...open, paidAllowed: null };
+    totals = { paidAllowed: null };
     clock = 4_999;
     expect(await model(api)).toBe("on");
     expect(asked).toBe(1);
@@ -222,6 +240,51 @@ describe("whether the model is on, for a deployed server", () => {
     expect(asked).toBe(2);
   });
 
+  it("for a request that changes something, asks the counter afresh every time, and what it learns is what reads are then told", async () => {
+    let asked = 0;
+    let totals: Partial<EnvelopeTotals> = {};
+    const api = deployedApi(parts({ snapshot: async () => (asked++, { totals: { ...open, ...totals }, limitNano: LIMIT }) }, () => 0));
+    expect(await model(api)).toBe("on");
+    expect(asked).toBe(1);
+    totals = { paidAllowed: null };
+    // Redis is out of reach in this test, so no game starts; the counter was asked all the same.
+    expect((await begin(api)).status).toBe(500);
+    expect(asked).toBe(2);
+    expect((await begin(api)).status).toBe(500);
+    expect(asked).toBe(3);
+    // A read right after, with the clock where it was, is told what the last fresh look found.
+    expect(await model(api)).toBe("off");
+    expect(asked).toBe(3);
+  });
+
+  it.skipIf(!redisUrl)("a new game's mode is decided on what is true when it starts, not on what was true up to five seconds before", async () => {
+    const { runner, close } = await connectRedis(redisUrl!);
+    try {
+      let totals: Partial<EnvelopeTotals> = {};
+      const provider = new FakeProvider(wellBehaved);
+      const live = createMetered({ inputBound: { tokensPerByte: 100 }, provider, store: new MemorySpendStore(), envelope: "e", limitNano: usdToNano(1) });
+      const api = deployedApi({ ...parts({ metered: live, snapshot: async () => ({ totals: { ...open, ...totals }, limitNano: LIMIT }) }, () => 0), redis: runner, prefix: `${prefix}:fresh-${randomUUID()}` });
+      const start = async () => {
+        const r = await begin(api);
+        return { view: ((await r.json()) as ViewReply).view, cookie: r.headers.get("set-cookie")!.split(";")[0]! };
+      };
+      // The library was shown with the model on. Then paid requests are closed. The clock does not move.
+      expect(await model(api)).toBe("on");
+      totals = { paidAllowed: null };
+      const closed = await start();
+      expect(closed.view.model).toBe("off");
+      // Reopened: that game stays off for good, and sends nothing when asked in the player's own words.
+      totals = {};
+      const typed = await api(new Request(`https://game.test/api/sessions/${closed.view.session}/ask`, { method: "POST", headers: { origin: "https://game.test", cookie: closed.cookie }, body: JSON.stringify({ revision: closed.view.revision, person: "P1", question: "Where were you at nine?" }) }));
+      expect(((await typed.json()) as ApiError).error.code).toBe("model-off");
+      expect(provider.dispatched).toBe(0);
+      // And a game begun now is live at once, though a read a moment ago was told "off".
+      expect((await start()).view.model).toBe("on");
+    } finally {
+      await close();
+    }
+  });
+
   it("waits for the trace lines that are still being written before it answers", async () => {
     let settled = 0;
     const api = deployedApi(parts({ settle: async () => void settled++ }));
@@ -232,7 +295,7 @@ describe("whether the model is on, for a deployed server", () => {
   it("with Redis out of reach the library is still listed, and no game starts", async () => {
     const api = deployedApi(parts({}));
     expect((await api(new Request("https://game.test/api/cases"))).status).toBe(200);
-    const start = await api(new Request("https://game.test/api/sessions", { method: "POST", headers: { origin: "https://game.test" }, body: JSON.stringify({ caseId: archivePass.id }) }));
+    const start = await begin(api);
     expect(start.status).toBe(500);
     expect(((await start.json()) as ApiError).error.code).toBe("server");
     expect(start.headers.get("set-cookie")).toBeNull();
@@ -310,7 +373,85 @@ describe("the deployed listener", () => {
   });
 });
 
-const prefix = redisRun();
+describe("the folder a build writes into", () => {
+  const dirs: string[] = [];
+  const fresh = () => {
+    const dir = mkdtempSync(join(tmpdir(), "ta-out-"));
+    dirs.push(dir);
+    return dir;
+  };
+  afterAll(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  });
+  const tree = (dir: string): string[] => readdirSync(dir, { recursive: true, encoding: "utf8" }).sort();
+
+  it("takes a folder that does not exist yet, and one that is empty", () => {
+    const parent = fresh();
+    expect(prepareOutputDir(join(parent, "new/deeper"))).toEqual({ ok: true });
+    expect(existsSync(join(parent, "new/deeper"))).toBe(true);
+    expect(prepareOutputDir(fresh())).toEqual({ ok: true });
+  });
+
+  it("takes an earlier build's output and removes that, and only that", () => {
+    const out = fresh();
+    mkdirSync(join(out, "static/assets"), { recursive: true });
+    mkdirSync(join(out, "functions/api.func"), { recursive: true });
+    writeFileSync(join(out, "static/assets/old.js"), "old");
+    writeFileSync(join(out, "functions/api.func/index.mjs"), "old");
+    writeFileSync(join(out, "config.json"), JSON.stringify({ version: 3, routes: [] }));
+    expect(prepareOutputDir(out)).toEqual({ ok: true });
+    expect(tree(out)).toEqual([]);
+  });
+
+  it("refuses a folder that holds anything else, and touches nothing in it", () => {
+    // Somebody's work, with or without a build's output beside it.
+    for (const withBuild of [false, true]) {
+      const out = fresh();
+      mkdirSync(join(out, "notes"));
+      writeFileSync(join(out, "notes/draft.md"), "three days of work");
+      writeFileSync(join(out, "package.json"), "{}");
+      if (withBuild) {
+        mkdirSync(join(out, "static"));
+        writeFileSync(join(out, "static/index.html"), "old page");
+        writeFileSync(join(out, "config.json"), JSON.stringify({ version: 3 }));
+      }
+      const before = tree(out);
+      expect(prepareOutputDir(out), String(withBuild)).toEqual({ ok: false, why: "holds-other-files" });
+      expect(tree(out)).toEqual(before);
+      expect(readFileSync(join(out, "notes/draft.md"), "utf8")).toBe("three days of work");
+    }
+  });
+
+  it("refuses a folder whose files only have a build's names: without a build's config file it is not a build", () => {
+    for (const config of [undefined, "{not json", JSON.stringify({ version: 2 }), JSON.stringify({ name: "my-app" }), "null"]) {
+      const out = fresh();
+      mkdirSync(join(out, "static"));
+      writeFileSync(join(out, "static/thesis.pdf"), "a site somebody keeps in a folder called static");
+      if (config !== undefined) writeFileSync(join(out, "config.json"), config);
+      const before = tree(out);
+      expect(prepareOutputDir(out), String(config)).toEqual({ ok: false, why: "not-a-build" });
+      expect(tree(out)).toEqual(before);
+    }
+  });
+
+  it("refuses a path that is a file", () => {
+    const file = join(fresh(), "output");
+    writeFileSync(file, "a file");
+    expect(prepareOutputDir(file)).toEqual({ ok: false, why: "not-a-folder" });
+    expect(readFileSync(file, "utf8")).toBe("a file");
+  });
+
+  it("the build command itself refuses such a folder before it builds anything, and says so in both languages", () => {
+    const out = fresh();
+    writeFileSync(join(out, "keep.txt"), "mine");
+    const built = spawnSync(process.execPath, ["--import", "tsx", "scripts/build-vercel.ts", "--out", out], { cwd: repo, encoding: "utf8", env: { ...process.env, VITE_CONFIG_NATIVE_IGNORE_WARNING: "true" } });
+    expect(built.status).toBe(1);
+    expect(built.stdout).toContain("Nothing was changed");
+    expect(built.stdout).toContain("没有改动任何内容");
+    expect(tree(out)).toEqual(["keep.txt"]);
+    expect(readFileSync(join(out, "keep.txt"), "utf8")).toBe("mine");
+  });
+});
 
 describe("the function as it is built for the host", () => {
   let out: string;
@@ -365,6 +506,16 @@ server.listen(0, "127.0.0.1", () => console.log("PORT " + server.address().port)
     expect(["/api", "/api/cases", "/api/sessions/x/ask"].every((p) => route.test(p))).toBe(true);
     expect(["/", "/apiary", "/assets/api.js", "/index.html"].some((p) => route.test(p))).toBe(false);
   });
+
+  it("builds again into the same folder: what the earlier build left is replaced, stale files and all", () => {
+    writeFileSync(join(out, "static/stale.txt"), "left by an earlier build");
+    const again = spawnSync(process.execPath, ["--import", "tsx", "scripts/build-vercel.ts", "--out", out], { cwd: repo, encoding: "utf8", env: { ...process.env, VITE_CONFIG_NATIVE_IGNORE_WARNING: "true" } });
+    expect(again.status, again.stdout + again.stderr).toBe(0);
+    expect(existsSync(join(out, "static/stale.txt"))).toBe(false);
+    expect(readdirSync(out).sort()).toEqual(["config.json", "functions", "static"]);
+    // The function is the same file as before, byte for byte: the one the other tests run.
+    expect(readFileSync(join(out, "functions/api.func/index.mjs"), "utf8")).toBe(readFileSync(join(home, "index.mjs"), "utf8"));
+  }, 60_000);
 
   it("puts no case text in the page's files: the cases are in the function only", () => {
     const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]));

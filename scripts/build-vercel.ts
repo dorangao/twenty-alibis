@@ -4,6 +4,9 @@
  *
  *   npm run build:vercel [-- --out <folder>]        default folder: .vercel/output
  *
+ * The folder must be new, empty, or hold an earlier build's output and nothing else. A
+ * folder with anything else in it is refused, and nothing in it is touched.
+ *
  *   <out>/config.json                     the routes: /api/* goes to the function, the rest is files
  *   <out>/static/                         the page, built by Vite. No case text is in it.
  *   <out>/functions/api.func/index.mjs    the game API, bundled into one file with all it imports
@@ -14,9 +17,10 @@
  * the file that was tested: test/deployed.test.ts copies it out of the repository and runs
  * it with plain Node. Nothing is uploaded or deployed by this script.
  */
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { build } from "vite";
+import { prepareOutputDir } from "./build-output-dir";
 import { say } from "./say";
 
 const args = process.argv.slice(2);
@@ -31,7 +35,17 @@ const func = join(out, "functions/api.func");
 /** How long the host lets the function run. One question is at most three requests of a minute each. */
 const MAX_DURATION_S = 200;
 
-rmSync(out, { recursive: true, force: true });
+// The folder must be new, empty, or an earlier build's output. Nothing else is ever removed.
+const ready = prepareOutputDir(out);
+if (!ready.ok) {
+  const why = {
+    "not-a-folder": ["it is not a folder", "它不是一个目录"],
+    "holds-other-files": ["it holds files that are not a build's output", "里面有不属于构建产物的文件"],
+    "not-a-build": ["what is in it is not an earlier build's output", "里面的内容不是之前的构建产物"],
+  }[ready.why];
+  say(`Not built: ${out} cannot be used, because ${why[0]}. Nothing was changed. Name a new or empty folder.`, `没有构建：不能使用 ${out}，因为${why[1]}。没有改动任何内容。请指定一个新的或空的目录。`);
+  process.exit(1);
+}
 mkdirSync(func, { recursive: true });
 
 // The page.
