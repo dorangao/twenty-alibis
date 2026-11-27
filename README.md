@@ -131,6 +131,24 @@ The server keeps the case and your session. The page is sent only what you have 
 
 案件和你的进度都保存在服务器上。页面只会收到你已经拿到或查到的内容，并且用的是页面自己的编号（P3、T7、I2、E4），不是案件文件里的编号。浏览器会拿到一个页面脚本读不到的 cookie；让你回到自己那一局的是它，而不是网址。
 
+### Build it for a host · 为托管平台构建
+
+```bash
+npm run build:vercel
+```
+
+This writes `.vercel/output/` in the layout Vercel reads: the page as static files, the game API as one bundled function, and a routes file that sends `/api/*` to it. It uploads and deploys nothing. The function is the same `handleRequest` the dev server uses, with its sessions, its visitor allowance and its usage trace kept in Redis, because a host runs many short-lived workers that share nothing else.
+
+The deployed server reads its settings from the environment: `PUBLIC_ORIGIN` (the site's https origin; a request that changes something must come from exactly there), `REDIS_URL`, `SPEND_ENVELOPE`, `SPEND_LIMIT_USD`, and optionally `VISITOR_GAMES_PER_DAY`, `VISITOR_REQUESTS_PER_DAY`, `GAMES_PER_HOUR` and the model's key. It fails closed. Without its settings it answers every request with one fixed error. Without a key, or while paid requests are not authorized on the envelope, the model is off: games are played from the topic menus, worded by code, and nothing is sent. If a worker is lost in the middle of a question, the game stands where it was, the page says so, and the question's requests are never sent twice.
+
+The tests copy the built function out of the repository, run it with plain Node and play a game against it (`test/deployed.test.ts`).
+
+这条命令按 Vercel 读取的目录结构写出 `.vercel/output/`：页面是静态文件，游戏接口是一个打包好的函数，另有一个路由文件把 `/api/*` 交给它。它不上传也不部署任何东西。函数用的就是开发服务器的那个 `handleRequest`，只是会话、访客额度和用量记录都保存在 Redis 里，因为托管平台上是许多彼此不共享内存的短命进程。
+
+部署后的服务器从环境变量读取设置：`PUBLIC_ORIGIN`（站点的 https 源；会改动数据的请求必须正好来自这里）、`REDIS_URL`、`SPEND_ENVELOPE`、`SPEND_LIMIT_USD`，以及可选的 `VISITOR_GAMES_PER_DAY`、`VISITOR_REQUESTS_PER_DAY`、`GAMES_PER_HOUR` 和模型密钥。它默认拒绝：没有设置时，对每个请求都只回一个固定的错误。没有密钥，或者该额度上尚未授权付费请求时，模型是关闭的：游戏靠话题菜单进行，回答由代码写成，不发送任何请求。如果进程在一个提问中途丢失，这一局停在原处，页面会说明，这个提问的请求绝不会发送第二次。
+
+测试会把构建出的函数复制到仓库之外，用普通的 Node 运行，并对它玩一局（`test/deployed.test.ts`）。
+
 ### The durable spend counter · 持久化的额度计数
 
 The spend guard counts in Redis, so the count survives restarts and is shared by every process. For local work, Docker provides it:

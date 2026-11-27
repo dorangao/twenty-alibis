@@ -19,22 +19,28 @@ import { handleRequest, type ApiDeps } from "./api";
  * origin in `deps.origin`, which is what the origin check and the cookie's Secure flag go by.
  */
 export function nodeListener(deps: ApiDeps, options: { trustProxy?: boolean } = {}): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  return async (req, res) => {
-    const method = req.method ?? "GET";
-    const headers = new Headers();
-    for (const [name, value] of Object.entries(req.headers)) if (typeof value === "string") headers.set(name, value);
-    const scheme = options.trustProxy && req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
-    const url = `${scheme}://${req.headers.host ?? "localhost"}${req.url ?? "/"}`;
-    const hasBody = method !== "GET" && method !== "HEAD";
-    const request = new Request(url, { method, headers, ...(hasBody ? { body: bodyOf(req), duplex: "half" } : {}) } as RequestInit);
+  return async (req, res) => respond(req, res, await handleRequest(requestOf(req, options), deps));
+}
 
-    const response = await handleRequest(request, deps);
-    res.statusCode = response.status;
-    response.headers.forEach((value, name) => res.setHeader(name, value));
-    // Part of the body was never read: do not keep this connection for another request.
-    if (hasBody && !req.complete) res.setHeader("connection", "close");
-    res.end(await response.text());
-  };
+/** A Node request as a web-standard Request. Its body is not read here. */
+export function requestOf(req: IncomingMessage, options: { trustProxy?: boolean } = {}): Request {
+  const method = req.method ?? "GET";
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(req.headers)) if (typeof value === "string") headers.set(name, value);
+  const scheme = options.trustProxy && req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+  const url = `${scheme}://${req.headers.host ?? "localhost"}${req.url ?? "/"}`;
+  return new Request(url, { method, headers, ...(hasBody(req) ? { body: bodyOf(req), duplex: "half" } : {}) } as RequestInit);
+}
+
+const hasBody = (req: IncomingMessage): boolean => req.method !== undefined && req.method !== "GET" && req.method !== "HEAD";
+
+/** Write a web-standard Response back through Node. */
+export async function respond(req: IncomingMessage, res: ServerResponse, response: Response): Promise<void> {
+  res.statusCode = response.status;
+  response.headers.forEach((value, name) => res.setHeader(name, value));
+  // Part of the body was never read: do not keep this connection for another request.
+  if (hasBody(req) && !req.complete) res.setHeader("connection", "close");
+  res.end(await response.text());
 }
 
 /** The request's body as a stream that reads from the socket one chunk at a time, on demand. */

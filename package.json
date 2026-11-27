@@ -26,6 +26,7 @@
     "pilot": "node --env-file-if-exists=.env.local --import tsx scripts/pilot.ts",
     "dev": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true vite --config vite.config.ts",
     "build:web": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true vite build --config vite.config.ts",
+    "build:vercel": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true node --import tsx scripts/build-vercel.ts",
     "check:redis-clean": "node --import tsx scripts/redis-clean-check.ts"
   },
   "dependencies": {
