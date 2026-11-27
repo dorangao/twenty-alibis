@@ -23,6 +23,8 @@ export const S = {
   rooms: s("rooms", "个房间"),
   actionsCap: s("actions", "次行动"),
   loading: s("Loading…", "加载中…"),
+  libraryDown: s("The cases cannot be reached right now. Reload the page to try again.", "现在连不上案件服务器。请刷新页面重试。"),
+  libraryDownReplays: s("The cases cannot be reached right now. The replays below still play. Reload the page to try again.", "现在连不上案件服务器。下面的回放仍然可以观看。请刷新页面重试。"),
   noCases: s("No case is available.", "暂无可玩的案件。"),
   backToCases: s("All cases", "所有案件"),
 

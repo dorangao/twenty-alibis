@@ -46,6 +46,8 @@ export function App() {
   const [shown, setShown] = useState<Shown | null>(null);
   /** The replays that can be watched. They are files beside the page, so they are listed whether or not the server answers. */
   const [replays, setReplays] = useState<Listed[]>([]);
+  /** True once it is known that the library could not be read: the page stops saying "loading". */
+  const [libraryDown, setLibraryDown] = useState(false);
   /** The replay being watched, and the step it is at. */
   const [playing, setPlaying] = useState<{ replay: Replay; step: number } | null>(null);
   const t = useCallback((text: Text) => pick(lang, text), [lang]);
@@ -116,10 +118,16 @@ export function App() {
   // On arrival: the library, and the game that was open, if it is still there.
   useEffect(() => {
     let gone = false;
+    const mine = generation.current;
     api
       .cases()
       .then((reply) => !gone && setCases(reply))
-      .catch((e: unknown) => !gone && setError({ text: e instanceof GameError ? e.text : S.networkError }));
+      .catch((e: unknown) => {
+        if (gone) return;
+        setLibraryDown(true);
+        // If the page has moved on meanwhile, to a game or a replay, this failure is no news there.
+        if (generation.current === mine) setError({ text: e instanceof GameError ? e.text : S.networkError });
+      });
     const session = remembered.get("ta.session");
     if (session) void read(session, S.resumeFailed, S.tryAgain);
     // The replays: the published ones, and on a dev server also the ones waiting to be looked at.
@@ -266,7 +274,7 @@ export function App() {
           onLeave={leave}
         />
       ) : (
-        <Library cases={cases} replays={replays} lang={lang} busy={busy} onOpen={(id) => run(() => api.start(id), null)} onWatch={(card) => void watch(card)} />
+        <Library cases={cases} down={libraryDown} replays={replays} lang={lang} busy={busy} onOpen={(id) => run(() => api.start(id), null)} onWatch={(card) => void watch(card)} />
       )}
     </div>
   );
@@ -279,20 +287,20 @@ function playedBy(lang: Lang, player: Replay["player"]): string {
   // Each language orders the sentence its own way.
   if (lang === "zh") {
     const unused = player.unused > 0 ? `，其中 ${player.unused} 次无法使用` : "";
-    return `每一步都由侦探智能体（${player.model}）选择：共 ${player.turns} 次回复${unused}，当时实际计费 ${dollars(player.costNano)}。${t(S.replayStatements)}`;
+    return `根据侦探智能体（${player.model}）当时保存的回复重建：每一步都是它选的，共 ${player.turns} 次回复${unused}；按保存的用量计算，费用为 ${dollars(player.costNano)}。${t(S.replayStatements)}`;
   }
   const unused = player.unused > 0 ? `, ${player.unused} of them not usable` : "";
-  return `Every move was chosen by the detective agent (${player.model}): ${player.turns} replies${unused}, ${dollars(player.costNano)} as billed when it was played. ${t(S.replayStatements)}`;
+  return `Rebuilt from the replies the detective agent (${player.model}) gave, as they were saved: it chose every move, in ${player.turns} replies${unused}; their cost, calculated from the saved token counts, is ${dollars(player.costNano)}. ${t(S.replayStatements)}`;
 }
 
-function Library({ cases, replays, lang, busy, onOpen, onWatch }: { cases: CasesReply | null; replays: Listed[]; lang: Lang; busy: boolean; onOpen: (id: string) => void; onWatch: (card: Listed) => void }) {
+function Library({ cases, down, replays, lang, busy, onOpen, onWatch }: { cases: CasesReply | null; down: boolean; replays: Listed[]; lang: Lang; busy: boolean; onOpen: (id: string) => void; onWatch: (card: Listed) => void }) {
   const t = (text: Text) => pick(lang, text);
   return (
     <main className="library">
       <h1>{t(S.library)}</h1>
       <p className="hint">{t(S.libraryHint)}</p>
       {cases && <p className={`model ${cases.model}`}>{t(cases.model === "on" ? S.modelOn : S.modelOff)}</p>}
-      {!cases && <p className="hint">{t(S.loading)}</p>}
+      {!cases && <p className="hint">{t(down ? (replays.length > 0 ? S.libraryDownReplays : S.libraryDown) : S.loading)}</p>}
       {cases && cases.cases.length === 0 && <p className="hint">{t(S.noCases)}</p>}
       <div className="cards">
         {cases?.cases.map((c) => (

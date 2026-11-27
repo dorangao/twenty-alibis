@@ -32,8 +32,10 @@ export type ReplayPlayer =
   /** The case's own solver: the proof it found when it checked the case. No model was involved. */
   | { kind: "solver" }
   /**
-   * The detective agent: the model chose every move. `turns` is how many replies it gave,
-   * `unused` how many of them could not be used, `costNano` their cost as billed.
+   * The detective agent: the model chose every move. This is worked out again from the
+   * replies that were saved when the game was played: `turns` is how many there are, `unused`
+   * how many of them could not be used, and `costNano` what their saved token counts come
+   * to at the model's prices. It is a calculation from the saved file, not a bill.
    */
   | { kind: "detective"; model: string; turns: number; unused: number; requests: number; costNano: number };
 
@@ -89,9 +91,13 @@ export type ReplayRefusal =
   /** The case has no proof to follow. */
   | "no-proof"
   /** The saved replies are not one game's, in order, with their cost confirmed. */
-  | "bad-replies";
+  | "bad-replies"
+  /** They are one game's, and that game was of another case. */
+  | "another-case";
 
 const ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+/** A replay's name. "index" is the name of the list of replays, so no replay may have it. */
+const isReplayId = (id: string): boolean => ID.test(id) && id.length <= 60 && id !== "index";
 const refuse: Metered = async (request) => ({ ok: false, attemptId: request.attemptId, sent: false, reason: "kill-switch" });
 
 export const cardOf = (replay: Replay): ReplayCard => ({ id: replay.id, title: replay.title, setting: replay.setting, suspects: replay.suspects, actions: replay.actions, player: replay.player });
@@ -101,7 +107,7 @@ export const cardOf = (replay: Replay): ReplayCard => ({ id: replay.id, title: r
  * be legal in order, end with an accusation, and the scorer must call it solved.
  */
 export async function makeReplay(c: Case, moves: readonly Move[], meta: { id: string; player: ReplayPlayer }): Promise<{ ok: true; replay: Replay } | { ok: false; why: ReplayRefusal }> {
-  if (!ID.test(meta.id) || meta.id.length > 60) return { ok: false, why: "bad-id" };
+  if (!isReplayId(meta.id)) return { ok: false, why: "bad-id" };
   // The session's name is in every view. It is the replay's name: no live session is called this.
   let record: SessionRecord = withHandles(c, { session: startSession(c, `replay-${meta.id}`), owner: "", revision: 1, mode: "off", caseVersion: caseVersion(c), topics: [], inspections: [], createdAt: 0 });
   const frames: ReplayFrame[] = [{ view: viewOf(c, record, "off") }];
@@ -164,11 +170,21 @@ export async function solverMoves(c: Case): Promise<{ ok: true; moves: Move[] } 
  * The moves of a detective's game, from its saved replies: the detective's own code is run
  * again with those replies in place of a model, and what it does with them is read off.
  * Nothing is sent. Every reply must be this game's, in order, with its cost confirmed.
+ *
+ * The game must be a game of this case. A game is named after its case: "<case id>" for the
+ * first, "<case id>:g<n>" for a later one, and every reply carries that name. Replies saved
+ * for another case are refused, even if their moves happen to be legal here: the replay
+ * says the detective played this case, and that has to be what the file says too.
+ *
+ * What this cannot show is that the case file is unchanged since the game was played: the
+ * saved replies carry the case's name and not its contents. The moves are replayed on the
+ * case as it is now, and the verdict is the scorer's now.
  */
-export async function detectiveMoves(c: Case, replies: readonly DetectiveReply[]): Promise<{ ok: true; moves: Move[]; player: ReplayPlayer } | { ok: false; why: "bad-replies" }> {
+export async function detectiveMoves(c: Case, replies: readonly DetectiveReply[]): Promise<{ ok: true; moves: Move[]; player: ReplayPlayer } | { ok: false; why: "bad-replies" | "another-case" }> {
   const first = replies[0];
   const gameId = typeof first?.attemptId === "string" && first.attemptId.endsWith(":d1") ? first.attemptId.slice(0, -":d1".length) : null;
   if (gameId === null || gameId === "") return { ok: false, why: "bad-replies" };
+  if (gameId !== c.id && !(gameId.startsWith(`${c.id}:g`) && /^[1-9]\d{0,3}$/.test(gameId.slice(c.id.length + 2)))) return { ok: false, why: "another-case" };
   let cost = 0;
   for (const [i, reply] of replies.entries()) {
     if (reply?.attemptId !== `${gameId}:d${i + 1}` || reply.turn !== i + 1 || reply.settled !== true || reply.breached !== false || !reply.usage) return { ok: false, why: "bad-replies" };

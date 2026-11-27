@@ -103,6 +103,7 @@ if (from === "solver") {
   }
   const game = await detectiveMoves(c, replies);
   if (!game.ok) {
+    if (game.why === "another-case") stop("The saved replies are from a game of another case.", "保存的回复来自另一个案件的一局。");
     stop("The saved replies are not one game's, in order, with their cost confirmed.", "保存的回复不是同一局按顺序、且费用已确认的回复。");
     throw new Error("unreachable");
   }
@@ -119,13 +120,20 @@ if (!made.ok) {
     "not-solved": ["The scorer does not call this game solved.", "判分结果不是“已破解”。"],
     "no-proof": ["The solver has no proof for this case.", "求解器没有找到这个案件的证明。"],
     "bad-replies": ["The saved replies cannot be used.", "保存的回复无法使用。"],
+    "another-case": ["The saved replies are from a game of another case.", "保存的回复来自另一个案件的一局。"],
   };
   stop(why[made.why][0], why[made.why][1]);
   throw new Error("unreachable");
 }
 const written = writeReplay(out, made.replay);
 if (!written.ok) {
-  stop(`${out} has an index.json that is not a replay index.`, `${out} 里的 index.json 不是回放索引。`);
+  const why: Record<typeof written.why, [string, string]> = {
+    "bad-replay": ["The replay that was made is not whole.", "生成的回放不完整。"],
+    "bad-index": [`${out} has an index.json that is not a list of replays.`, `${out} 里的 index.json 不是回放列表。`],
+    "not-a-replay": [`${out} already has a file called ${id}.json that is not this replay.`, `${out} 里已经有一个名为 ${id}.json 的文件，但它不是这个回放。`],
+    busy: [`Another run is writing to ${out} (or left .replays.lock behind).`, `另一次运行正在写入 ${out}（或者留下了 .replays.lock）。`],
+  };
+  stop(why[written.why][0], why[written.why][1]);
   throw new Error("unreachable");
 }
 say(
