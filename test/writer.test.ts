@@ -43,6 +43,15 @@ const rename = (index: number, name: { en: string; zh: string }): Skeleton => ({
 describe("a handwritten 20-person plot compiles to a case the gates accept", () => {
   const c = compiled();
 
+  it("says why the others in the room saw nothing", () => {
+    // Two people besides the culprit were at the scene when the victim died. A player would
+    // rightly ask why they did not see the blow, so the scene description has to say.
+    const { slot, location } = c.victim.death;
+    expect(c.suspects.filter((s) => s.whereabouts[slot] === location).map((s) => s.id)).toEqual(["s-03", "s-05", "s-09"]);
+    expect(c.victim.cause.en).toContain("in the dark no one in the room could see who struck");
+    expect(c.victim.cause.zh).toContain("屋里一片漆黑，在场的人看不见是谁动的手");
+  });
+
   it("passes the validator and the solver", () => {
     const checked = checkCase(c);
     expect(checked.reasons).toEqual([]);
