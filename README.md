@@ -212,11 +212,11 @@ The model is off in both: nothing is sent and nothing is spent. You get the brie
 npm run dev
 ```
 
-Then open the address it prints (http://localhost:5173). The model is off here too: nothing is sent and nothing is spent. Pick a case, read the briefing and the rules of proof, question people from their topic menus, inspect records, watch the notebook mark what contradicts what, then accuse with the evidence you tick. The page has a language switch; a topic you have heard can be asked again in the other language at no cost.
+Then open the address it prints (http://localhost:5173). The model is off here too: nothing is sent and nothing is spent. Two cases are there to pick from, the same two the deployed game offers: the handwritten eight-person archive, and the handwritten 20-person lighthouse, which is released as a file in [`cases/released/`](cases/released/) and is long enough for several rounds of gossip. The lighthouse's answer is public, since the replay below plays it to the end; watch the replay afterwards if you want to solve it yourself. Pick a case, read the briefing and the rules of proof, question people from their topic menus, inspect records, watch the notebook mark what contradicts what, then accuse with the evidence you tick. The page has a language switch; a topic you have heard can be asked again in the other language at no cost.
 
 The server keeps the case and your session. The page is sent only what you have been given or have found, under its own names (P3, T7, I2, E4), never the case file's. Your browser gets a cookie the page's scripts cannot read; that, not the address, is what lets you back into your game.
 
-然后打开它打印出的地址（http://localhost:5173）。这里模型同样是关闭的：不发送任何内容，也不花钱。选一个案件，读案情简报和证明规则，从话题菜单里询问人物，查看记录，看笔记本标出哪些陈述与证据矛盾，然后勾选证据进行指认。页面可以切换语言；听过的话题可以用另一种语言再问一遍，不消耗行动。
+然后打开它打印出的地址（http://localhost:5173）。这里模型同样是关闭的：不发送任何内容，也不花钱。有两个案件可选，和部署后的游戏提供的一样：手写的 8 人档案室案，以及手写的 20 人灯塔案。灯塔案以文件形式发布在 [`cases/released/`](cases/released/) 里，篇幅足够进行好几轮私下交谈。它的答案是公开的，因为下面的回放会把它一直放到结局；想自己破案的话，请先玩再看回放。选一个案件，读案情简报和证明规则，从话题菜单里询问人物，查看记录，看笔记本标出哪些陈述与证据矛盾，然后勾选证据进行指认。页面可以切换语言；听过的话题可以用另一种语言再问一遍，不消耗行动。
 
 案件和你的进度都保存在服务器上。页面只会收到你已经拿到或查到的内容，并且用的是页面自己的编号（P3、T7、I2、E4），不是案件文件里的编号。浏览器会拿到一个页面脚本读不到的 cookie；让你回到自己那一局的是它，而不是网址。
 
@@ -250,7 +250,7 @@ npm run dev
 npm run replay:make -- --case cases/generated/my-case.json --solver --id my-case --out cases/generated/replays
 ```
 
-The first plays it in the terminal (add `--zh` for Chinese). The second lists every case file in `cases/generated/` that passes the gate, beside the built-in case, in the browser. The third makes a replay of it along the proof its own solver found, which the dev server then lists under Replays. `cases/generated/` is ignored by git: a case file holds its own answer.
+The first plays it in the terminal (add `--zh` for Chinese). The second lists every case file in `cases/generated/` that passes the gate, beside the built-in case and the released ones, in the browser. The third makes a replay of it along the proof its own solver found, which the dev server then lists under Replays. `cases/generated/` is ignored by git: a case file holds its own answer.
 
 Passing the gate means a case is fair to play. It is not the case writer's quality check, which also asks whether the briefing leaves enough people to suspect. And there is no upload on a hosted game: a case reaches a server only as a file its operator put there.
 
@@ -258,7 +258,7 @@ Passing the gate means a case is fair to play. It is not the case writer's quali
 
 第一条命令把手写的八人案件以你起的名字写到 `cases/generated/my-case.json`，供你修改；它从不覆盖已有文件。改掉人物、房间、凶手和记录之后，用第二条命令过一遍检查。这道检查和所有案件要过的是同一道：文件格式正确、隐藏的真相自洽、玩家用案件真正提供的行动能够证明。没通过时命令会逐条说明原因：先是检查给出的英文原文，再是中文说明和要找的 id。原因里会提到答案，所以是给作者看的，玩家只会被告知文件未通过。有一个名字不能用：`index` 是回放列表的名称，案件不能叫这个。
 
-通过的案件有三种玩法，都不需要模型：第三条命令在终端里玩（加 `--zh` 用中文）；第四条在浏览器里把 `cases/generated/` 中所有通过检查的案件文件和内置案件一起列出来；第五条按案件自己的求解器找到的证明生成一个回放，之后开发服务器会把它列在"回放"里。git 忽略 `cases/generated/`：案件文件包含它自己的答案。
+通过的案件有三种玩法，都不需要模型：第三条命令在终端里玩（加 `--zh` 用中文）；第四条在浏览器里把 `cases/generated/` 中所有通过检查的案件文件和内置案件、已发布的案件一起列出来；第五条按案件自己的求解器找到的证明生成一个回放，之后开发服务器会把它列在"回放"里。git 忽略 `cases/generated/`：案件文件包含它自己的答案。
 
 通过检查说明案件玩起来是公平的，但这不等于案件写作的质量检查（后者还会看简报是否留下足够多的可怀疑对象）。部署后的游戏没有上传功能：案件只能由运营者作为文件放到服务器上。
 

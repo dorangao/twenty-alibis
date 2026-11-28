@@ -6,9 +6,10 @@ import { loadCase } from "../game/load-case";
 import { indexOf, replayOf } from "../../web/src/replay-shape";
 
 /**
- * The cases a server offers: the handwritten case, and every case file in `dir` that passes
- * the gate (well formed, consistent, provable by a player). A file that does not pass is
- * left out and named in `skipped`, by file name only.
+ * The cases a server offers: the handwritten case, and every case file in the folders given
+ * that passes the gate (well formed, consistent, provable by a player). A file that does not
+ * pass is left out and named in `skipped`, by file name only. The folders are read in the
+ * order given, and a case is listed once: a file whose case is already listed is skipped.
  *
  * Only whole-case files are read: "<id>.json". The writer's working files beside them
  * ("<id>.skeleton.json", "<id>.game.json" …) are not cases.
@@ -59,26 +60,28 @@ export function previewReplayFile(dir: string, name: string): string | null {
   return replay === null ? null : JSON.stringify(replay);
 }
 
-export function loadLibrary(dir?: string): { cases: Case[]; skipped: string[] } {
+export function loadLibrary(...dirs: string[]): { cases: Case[]; skipped: string[] } {
   const cases: Case[] = [archivePass];
   const skipped: string[] = [];
-  if (!dir) return { cases, skipped };
-  let names: string[];
-  try {
-    names = readdirSync(dir).filter((name) => /^[a-z0-9-]+\.json$/.test(name)).sort();
-  } catch {
-    return { cases, skipped };
-  }
-  for (const name of names) {
-    let loaded: ReturnType<typeof loadCase>;
+  for (const dir of dirs) {
+    let names: string[];
     try {
-      loaded = loadCase(readFileSync(join(dir, name), "utf8"));
+      names = readdirSync(dir).filter((name) => /^[a-z0-9-]+\.json$/.test(name)).sort();
     } catch {
-      skipped.push(name);
+      // A folder that is not there offers nothing.
       continue;
     }
-    if (!loaded.ok || cases.some((c) => c.id === loaded.c.id)) skipped.push(name);
-    else cases.push(loaded.c);
+    for (const name of names) {
+      let loaded: ReturnType<typeof loadCase>;
+      try {
+        loaded = loadCase(readFileSync(join(dir, name), "utf8"));
+      } catch {
+        skipped.push(name);
+        continue;
+      }
+      if (!loaded.ok || cases.some((c) => c.id === loaded.c.id)) skipped.push(name);
+      else cases.push(loaded.c);
+    }
   }
   return { cases, skipped };
 }

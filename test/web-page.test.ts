@@ -11,6 +11,7 @@ import { archiveFailTwin, archivePass } from "../src/case/fixtures/archive";
 import { noModel } from "../src/game/terminal";
 import { MAX_BODY_BYTES, type ApiError, type CasesReply, type ViewReply } from "../src/web/api";
 import { loadLibrary } from "../src/web/library";
+import { lighthouseCase, lighthouseFileText, RELEASED_LIGHTHOUSE } from "../src/web/released";
 import { bodyOf, nodeListener } from "../src/web/node";
 import { memorySessions } from "../src/web/sessions";
 import { compilePlot } from "../src/writer/compile";
@@ -312,6 +313,38 @@ describe("the cases a local server offers", () => {
   it("is the handwritten case alone when there is no folder", () => {
     expect(loadLibrary().cases.map((c) => c.id)).toEqual([archivePass.id]);
     expect(loadLibrary("/no/such/folder")).toEqual({ cases: [archivePass], skipped: [] });
+  });
+
+  it("reads several folders in the order given, and lists a case once", () => {
+    const first = mkdtempSync(join(tmpdir(), "library-a-"));
+    const second = mkdtempSync(join(tmpdir(), "library-b-"));
+    writeFileSync(join(first, "lighthouse.json"), JSON.stringify(lighthouse));
+    // The same case again under another file name, and a case of its own.
+    writeFileSync(join(second, "copy.json"), JSON.stringify(lighthouse));
+    writeFileSync(join(second, "mine.json"), JSON.stringify({ ...archivePass, id: "mine" }));
+    const library = loadLibrary(first, "/no/such/folder", second);
+    expect(library.cases.map((c) => c.id)).toEqual([archivePass.id, lighthouse.id, "mine"]);
+    expect(library.skipped).toEqual(["copy.json"]);
+  });
+});
+
+describe("the released lighthouse", () => {
+  const repo = join(import.meta.dirname, "..");
+
+  it("is the handwritten plot, compiled today: the file in the repository cannot drift from it", () => {
+    // If this fails after a change to the plot or to the code that compiles it: npm run release:lighthouse
+    expect(readFileSync(join(repo, RELEASED_LIGHTHOUSE), "utf8")).toBe(lighthouseFileText());
+    expect(lighthouseCase()).toEqual(lighthouse);
+  });
+
+  it("is the one case in the released folder, and passes the gate a server puts it through", () => {
+    const library = loadLibrary(join(repo, "cases/released"));
+    expect(library.skipped).toEqual([]);
+    expect(library.cases.map((c) => c.id)).toEqual([archivePass.id, "lighthouse"]);
+    expect(library.cases[1]).toEqual(lighthouse);
+    expect(library.cases[1]!.suspects).toHaveLength(20);
+    // Releasing a case is a person's decision, one case at a time: nothing else is in the folder.
+    expect(readdirSync(join(repo, "cases/released")).sort()).toEqual(["README.md", "lighthouse.json"]);
   });
 });
 

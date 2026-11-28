@@ -1,0 +1,1684 @@
+{
+  "id": "lighthouse",
+  "title": {
+    "en": "The Lamp Went Out",
+    "zh": "灯灭之夜"
+  },
+  "setting": {
+    "en": "A lighthouse on a rock, cut off by a storm.",
+    "zh": "礁石上的一座灯塔，被风暴困住。"
+  },
+  "slots": [
+    "22:00",
+    "22:20",
+    "22:40"
+  ],
+  "locations": [
+    {
+      "id": "l-01",
+      "name": {
+        "en": "Lamp room",
+        "zh": "灯室"
+      },
+      "adjacent": [
+        "l-02"
+      ]
+    },
+    {
+      "id": "l-02",
+      "name": {
+        "en": "Gallery",
+        "zh": "回廊"
+      },
+      "adjacent": [
+        "l-01",
+        "l-03"
+      ]
+    },
+    {
+      "id": "l-03",
+      "name": {
+        "en": "Kitchen",
+        "zh": "厨房"
+      },
+      "adjacent": [
+        "l-02",
+        "l-04",
+        "l-05"
+      ]
+    },
+    {
+      "id": "l-04",
+      "name": {
+        "en": "Cellar",
+        "zh": "地窖"
+      },
+      "adjacent": [
+        "l-03"
+      ]
+    },
+    {
+      "id": "l-05",
+      "name": {
+        "en": "Boathouse",
+        "zh": "船屋"
+      },
+      "adjacent": [
+        "l-03"
+      ]
+    }
+  ],
+  "victim": {
+    "name": {
+      "en": "Mr. Hale",
+      "zh": "何先生"
+    },
+    "death": {
+      "slot": "22:20",
+      "location": "l-01"
+    },
+    "found": {
+      "slot": "22:40",
+      "location": "l-01"
+    },
+    "means": "m-01",
+    "cause": {
+      "en": "Found at the foot of the lamp, struck with the winding handle. The lamp room was locked.",
+      "zh": "倒在灯座下，被摇柄击中。灯室当时锁着。"
+    }
+  },
+  "means": [
+    {
+      "id": "m-01",
+      "name": {
+        "en": "A key to the lamp room",
+        "zh": "灯室钥匙"
+      }
+    }
+  ],
+  "motives": [
+    {
+      "id": "mo-01",
+      "text": {
+        "en": "Stood to lose their post in the inspector's report.",
+        "zh": "督察的报告会让此人丢掉职位。"
+      }
+    },
+    {
+      "id": "mo-02",
+      "text": {
+        "en": "Owed the victim money that was due this week.",
+        "zh": "欠死者一笔本周到期的钱。"
+      }
+    },
+    {
+      "id": "mo-03",
+      "text": {
+        "en": "Had been refused a share of the salvage.",
+        "zh": "打捞所得的分成被拒绝。"
+      }
+    }
+  ],
+  "suspects": [
+    {
+      "id": "s-01",
+      "name": {
+        "en": "Aldric Varga",
+        "zh": "魏立群"
+      },
+      "role": {
+        "en": "Keeper",
+        "zh": "灯塔看守"
+      },
+      "persona": {
+        "en": "Blunt and unhurried.",
+        "zh": "直来直去，不紧不慢。"
+      },
+      "whereabouts": {
+        "22:00": "l-02",
+        "22:20": "l-02",
+        "22:40": "l-02"
+      },
+      "means": [
+        "m-01"
+      ],
+      "motives": [
+        "mo-01"
+      ],
+      "lies": []
+    },
+    {
+      "id": "s-02",
+      "name": {
+        "en": "Beatrix Okonkwo",
+        "zh": "欧碧翠"
+      },
+      "role": {
+        "en": "Cook",
+        "zh": "厨师"
+      },
+      "persona": {
+        "en": "Careful, and fond of detail.",
+        "zh": "谨慎，爱讲细节。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-03",
+      "name": {
+        "en": "Cormac Brandt",
+        "zh": "柏康默"
+      },
+      "role": {
+        "en": "Assistant keeper",
+        "zh": "看守助手"
+      },
+      "persona": {
+        "en": "Blunt and unhurried.",
+        "zh": "直来直去，不紧不慢。"
+      },
+      "whereabouts": {
+        "22:00": "l-02",
+        "22:20": "l-01",
+        "22:40": "l-02"
+      },
+      "means": [
+        "m-01"
+      ],
+      "motives": [
+        "mo-02"
+      ],
+      "lies": [
+        "a-03-says"
+      ]
+    },
+    {
+      "id": "s-04",
+      "name": {
+        "en": "Delphine Marchetti",
+        "zh": "马黛芬"
+      },
+      "role": {
+        "en": "Surveyor",
+        "zh": "测量员"
+      },
+      "persona": {
+        "en": "Careful, and fond of detail.",
+        "zh": "谨慎，爱讲细节。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-05",
+      "name": {
+        "en": "Edmund Soler",
+        "zh": "苏艾蒙"
+      },
+      "role": {
+        "en": "Mechanic",
+        "zh": "机修工"
+      },
+      "persona": {
+        "en": "Blunt and unhurried.",
+        "zh": "直来直去，不紧不慢。"
+      },
+      "whereabouts": {
+        "22:00": "l-01",
+        "22:20": "l-01",
+        "22:40": "l-01"
+      },
+      "means": [
+        "m-01"
+      ],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-06",
+      "name": {
+        "en": "Fenella Nakamura",
+        "zh": "纪菲娜"
+      },
+      "role": {
+        "en": "Radio operator",
+        "zh": "报务员"
+      },
+      "persona": {
+        "en": "Careful, and fond of detail.",
+        "zh": "谨慎，爱讲细节。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-07",
+      "name": {
+        "en": "Gideon Petrov",
+        "zh": "裴吉登"
+      },
+      "role": {
+        "en": "Supply captain",
+        "zh": "补给船长"
+      },
+      "persona": {
+        "en": "Blunt and unhurried.",
+        "zh": "直来直去，不紧不慢。"
+      },
+      "whereabouts": {
+        "22:00": "l-05",
+        "22:20": "l-05",
+        "22:40": "l-05"
+      },
+      "means": [
+        "m-01"
+      ],
+      "motives": [
+        "mo-03"
+      ],
+      "lies": []
+    },
+    {
+      "id": "s-08",
+      "name": {
+        "en": "Helena Lindqvist",
+        "zh": "林海伦"
+      },
+      "role": {
+        "en": "Doctor",
+        "zh": "医生"
+      },
+      "persona": {
+        "en": "Careful, and fond of detail.",
+        "zh": "谨慎，爱讲细节。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-09",
+      "name": {
+        "en": "Isidore Abara",
+        "zh": "阿伊多"
+      },
+      "role": {
+        "en": "Painter",
+        "zh": "油漆工"
+      },
+      "persona": {
+        "en": "Blunt and unhurried.",
+        "zh": "直来直去，不紧不慢。"
+      },
+      "whereabouts": {
+        "22:00": "l-01",
+        "22:20": "l-01",
+        "22:40": "l-01"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-10",
+      "name": {
+        "en": "Jocasta Castell",
+        "zh": "卡乔莎"
+      },
+      "role": {
+        "en": "Inspector's clerk",
+        "zh": "督察文书"
+      },
+      "persona": {
+        "en": "Careful, and fond of detail.",
+        "zh": "谨慎，爱讲细节。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-11",
+      "name": {
+        "en": "Kasimir Dufresne",
+        "zh": "杜卡西"
+      },
+      "role": {
+        "en": "Deckhand",
+        "zh": "水手"
+      },
+      "persona": {
+        "en": "Blunt and unhurried.",
+        "zh": "直来直去，不紧不慢。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-12",
+      "name": {
+        "en": "Leonie Eklund",
+        "zh": "艾莱昂"
+      },
+      "role": {
+        "en": "Bookkeeper",
+        "zh": "账房"
+      },
+      "persona": {
+        "en": "Careful, and fond of detail.",
+        "zh": "谨慎，爱讲细节。"
+      },
+      "whereabouts": {
+        "22:00": "l-04",
+        "22:20": "l-04",
+        "22:40": "l-04"
+      },
+      "means": [
+        "m-01"
+      ],
+      "motives": [
+        "mo-01"
+      ],
+      "lies": []
+    },
+    {
+      "id": "s-13",
+      "name": {
+        "en": "Magnus Farrow",
+        "zh": "法马南"
+      },
+      "role": {
+        "en": "Stoker",
+        "zh": "司炉"
+      },
+      "persona": {
+        "en": "Blunt and unhurried.",
+        "zh": "直来直去，不紧不慢。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-14",
+      "name": {
+        "en": "Nerissa Galvez",
+        "zh": "高妮莎"
+      },
+      "role": {
+        "en": "Botanist",
+        "zh": "植物学者"
+      },
+      "persona": {
+        "en": "Careful, and fond of detail.",
+        "zh": "谨慎，爱讲细节。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-15",
+      "name": {
+        "en": "Octavia Hadley",
+        "zh": "哈奥薇"
+      },
+      "role": {
+        "en": "Schoolteacher",
+        "zh": "教师"
+      },
+      "persona": {
+        "en": "Blunt and unhurried.",
+        "zh": "直来直去，不紧不慢。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [
+        "mo-02"
+      ],
+      "lies": []
+    },
+    {
+      "id": "s-16",
+      "name": {
+        "en": "Percival Ivers",
+        "zh": "易柏西"
+      },
+      "role": {
+        "en": "Carpenter",
+        "zh": "木匠"
+      },
+      "persona": {
+        "en": "Careful, and fond of detail.",
+        "zh": "谨慎，爱讲细节。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-17",
+      "name": {
+        "en": "Quentin Jurado",
+        "zh": "胡昆廷"
+      },
+      "role": {
+        "en": "Chaplain",
+        "zh": "牧师"
+      },
+      "persona": {
+        "en": "Blunt and unhurried.",
+        "zh": "直来直去，不紧不慢。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-18",
+      "name": {
+        "en": "Rosalind Kessler",
+        "zh": "柯罗琳"
+      },
+      "role": {
+        "en": "Photographer",
+        "zh": "摄影师"
+      },
+      "persona": {
+        "en": "Careful, and fond of detail.",
+        "zh": "谨慎，爱讲细节。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-19",
+      "name": {
+        "en": "Sebastian Lorne",
+        "zh": "洛赛邦"
+      },
+      "role": {
+        "en": "Apprentice",
+        "zh": "学徒"
+      },
+      "persona": {
+        "en": "Blunt and unhurried.",
+        "zh": "直来直去，不紧不慢。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    },
+    {
+      "id": "s-20",
+      "name": {
+        "en": "Tamsin Mendes",
+        "zh": "孟谭欣"
+      },
+      "role": {
+        "en": "Guest",
+        "zh": "客人"
+      },
+      "persona": {
+        "en": "Careful, and fond of detail.",
+        "zh": "谨慎，爱讲细节。"
+      },
+      "whereabouts": {
+        "22:00": "l-03",
+        "22:20": "l-03",
+        "22:40": "l-03"
+      },
+      "means": [],
+      "motives": [],
+      "lies": []
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a-01-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-01",
+        "slot": "22:20",
+        "location": "l-02"
+      }
+    },
+    {
+      "id": "a-01-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-01",
+        "slot": "22:20",
+        "location": "l-02"
+      }
+    },
+    {
+      "id": "a-02-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-02",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-02-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-02",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-03-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-03",
+        "slot": "22:20",
+        "location": "l-02"
+      }
+    },
+    {
+      "id": "a-03-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-03",
+        "slot": "22:20",
+        "location": "l-01"
+      }
+    },
+    {
+      "id": "a-04-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-04",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-04-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-04",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-05-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-05",
+        "slot": "22:20",
+        "location": "l-01"
+      }
+    },
+    {
+      "id": "a-05-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-05",
+        "slot": "22:20",
+        "location": "l-01"
+      }
+    },
+    {
+      "id": "a-06-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-06",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-06-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-06",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-07-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-07",
+        "slot": "22:20",
+        "location": "l-05"
+      }
+    },
+    {
+      "id": "a-07-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-07",
+        "slot": "22:20",
+        "location": "l-05"
+      }
+    },
+    {
+      "id": "a-08-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-08",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-08-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-08",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-09-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-09",
+        "slot": "22:20",
+        "location": "l-01"
+      }
+    },
+    {
+      "id": "a-09-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-09",
+        "slot": "22:20",
+        "location": "l-01"
+      }
+    },
+    {
+      "id": "a-10-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-10",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-10-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-10",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-11-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-11",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-11-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-11",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-12-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-12",
+        "slot": "22:20",
+        "location": "l-04"
+      }
+    },
+    {
+      "id": "a-12-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-12",
+        "slot": "22:20",
+        "location": "l-04"
+      }
+    },
+    {
+      "id": "a-13-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-13",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-13-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-13",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-14-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-14",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-14-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-14",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-15-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-15",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-15-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-15",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-16-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-16",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-16-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-16",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-17-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-17",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-17-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-17",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-18-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-18",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-18-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-18",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-19-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-19",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-19-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-19",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-20-says",
+      "prop": {
+        "kind": "at",
+        "subject": "s-20",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-20-was",
+      "prop": {
+        "kind": "at",
+        "subject": "s-20",
+        "slot": "22:20",
+        "location": "l-03"
+      }
+    },
+    {
+      "id": "a-01-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-01",
+        "means": "m-01",
+        "value": true
+      }
+    },
+    {
+      "id": "a-02-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-02",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-03-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-03",
+        "means": "m-01",
+        "value": true
+      }
+    },
+    {
+      "id": "a-04-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-04",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-05-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-05",
+        "means": "m-01",
+        "value": true
+      }
+    },
+    {
+      "id": "a-06-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-06",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-07-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-07",
+        "means": "m-01",
+        "value": true
+      }
+    },
+    {
+      "id": "a-08-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-08",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-09-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-09",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-10-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-10",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-11-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-11",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-12-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-12",
+        "means": "m-01",
+        "value": true
+      }
+    },
+    {
+      "id": "a-13-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-13",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-14-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-14",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-15-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-15",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-16-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-16",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-17-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-17",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-18-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-18",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-19-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-19",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-20-means",
+      "prop": {
+        "kind": "means",
+        "subject": "s-20",
+        "means": "m-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-01-mo-01",
+      "prop": {
+        "kind": "motive",
+        "subject": "s-01",
+        "motive": "mo-01",
+        "value": true
+      }
+    },
+    {
+      "id": "a-03-mo-02",
+      "prop": {
+        "kind": "motive",
+        "subject": "s-03",
+        "motive": "mo-02",
+        "value": true
+      }
+    },
+    {
+      "id": "a-05-mo-01",
+      "prop": {
+        "kind": "motive",
+        "subject": "s-05",
+        "motive": "mo-01",
+        "value": false
+      }
+    },
+    {
+      "id": "a-05-mo-02",
+      "prop": {
+        "kind": "motive",
+        "subject": "s-05",
+        "motive": "mo-02",
+        "value": false
+      }
+    },
+    {
+      "id": "a-05-mo-03",
+      "prop": {
+        "kind": "motive",
+        "subject": "s-05",
+        "motive": "mo-03",
+        "value": false
+      }
+    },
+    {
+      "id": "a-07-mo-03",
+      "prop": {
+        "kind": "motive",
+        "subject": "s-07",
+        "motive": "mo-03",
+        "value": true
+      }
+    },
+    {
+      "id": "a-12-mo-01",
+      "prop": {
+        "kind": "motive",
+        "subject": "s-12",
+        "motive": "mo-01",
+        "value": true
+      }
+    },
+    {
+      "id": "a-15-mo-02",
+      "prop": {
+        "kind": "motive",
+        "subject": "s-15",
+        "motive": "mo-02",
+        "value": true
+      }
+    }
+  ],
+  "evidence": [
+    {
+      "id": "e-register",
+      "kind": "record",
+      "authoritative": true,
+      "proves": [
+        "a-01-means",
+        "a-02-means",
+        "a-03-means",
+        "a-04-means",
+        "a-05-means",
+        "a-06-means",
+        "a-07-means",
+        "a-08-means",
+        "a-09-means",
+        "a-10-means",
+        "a-11-means",
+        "a-12-means",
+        "a-13-means",
+        "a-14-means",
+        "a-15-means",
+        "a-16-means",
+        "a-17-means",
+        "a-18-means",
+        "a-19-means",
+        "a-20-means"
+      ],
+      "text": {
+        "en": "Register for \"A key to the lamp room\": held by Aldric Varga, Cormac Brandt, Edmund Soler, Gideon Petrov and Leonie Eklund. Nobody else holds one.",
+        "zh": "“灯室钥匙”登记：持有者为魏立群、柏康默、苏艾蒙、裴吉登、艾莱昂。其他人都没有。"
+      }
+    },
+    {
+      "id": "e-papers-01",
+      "kind": "record",
+      "authoritative": true,
+      "proves": [
+        "a-01-mo-01",
+        "a-12-mo-01"
+      ],
+      "text": {
+        "en": "The victim's papers: \"Stood to lose their post in the inspector's report.\" This is true of Aldric Varga and Leonie Eklund.",
+        "zh": "死者的文件：“督察的报告会让此人丢掉职位。”符合这一条的有魏立群、艾莱昂。"
+      }
+    },
+    {
+      "id": "e-papers-02",
+      "kind": "record",
+      "authoritative": true,
+      "proves": [
+        "a-03-mo-02",
+        "a-15-mo-02"
+      ],
+      "text": {
+        "en": "The victim's papers: \"Owed the victim money that was due this week.\" This is true of Cormac Brandt and Octavia Hadley.",
+        "zh": "死者的文件：“欠死者一笔本周到期的钱。”符合这一条的有柏康默、哈奥薇。"
+      }
+    },
+    {
+      "id": "e-papers-03",
+      "kind": "record",
+      "authoritative": true,
+      "proves": [
+        "a-07-mo-03"
+      ],
+      "text": {
+        "en": "The victim's papers: \"Had been refused a share of the salvage.\" This is true of Gideon Petrov.",
+        "zh": "死者的文件：“打捞所得的分成被拒绝。”符合这一条的有裴吉登。"
+      }
+    },
+    {
+      "id": "e-papers-none",
+      "kind": "record",
+      "authoritative": true,
+      "proves": [
+        "a-05-mo-01",
+        "a-05-mo-02",
+        "a-05-mo-03"
+      ],
+      "text": {
+        "en": "The victim's papers give Edmund Soler none of the listed motives.",
+        "zh": "死者的文件表明，苏艾蒙不符合上述任何一条动机。"
+      }
+    },
+    {
+      "id": "e-keeper",
+      "kind": "record",
+      "authoritative": false,
+      "proves": [],
+      "text": {
+        "en": "The record of who was in the lamp room is kept by Beatrix Okonkwo. Hear their account first.",
+        "zh": "灯室的出入记录由欧碧翠保管。先听听这个人的说法。"
+      }
+    },
+    {
+      "id": "e-room-01",
+      "kind": "record",
+      "authoritative": true,
+      "proves": [
+        "a-03-was",
+        "a-05-was",
+        "a-09-was"
+      ],
+      "text": {
+        "en": "Lamp room, 22:20: Cormac Brandt, Edmund Soler and Isidore Abara were here.",
+        "zh": "灯室，22:20：柏康默、苏艾蒙、阿伊多在这里。"
+      }
+    },
+    {
+      "id": "e-room-02",
+      "kind": "record",
+      "authoritative": true,
+      "proves": [
+        "a-01-was"
+      ],
+      "text": {
+        "en": "Gallery, 22:20: Aldric Varga was here.",
+        "zh": "回廊，22:20：魏立群在这里。"
+      }
+    },
+    {
+      "id": "e-room-03",
+      "kind": "record",
+      "authoritative": true,
+      "proves": [
+        "a-02-was",
+        "a-04-was",
+        "a-06-was",
+        "a-08-was",
+        "a-10-was",
+        "a-11-was",
+        "a-13-was",
+        "a-14-was",
+        "a-15-was",
+        "a-16-was",
+        "a-17-was",
+        "a-18-was",
+        "a-19-was",
+        "a-20-was"
+      ],
+      "text": {
+        "en": "Kitchen, 22:20: Beatrix Okonkwo, Delphine Marchetti, Fenella Nakamura, Helena Lindqvist, Jocasta Castell, Kasimir Dufresne, Magnus Farrow, Nerissa Galvez, Octavia Hadley, Percival Ivers, Quentin Jurado, Rosalind Kessler, Sebastian Lorne and Tamsin Mendes were here.",
+        "zh": "厨房，22:20：欧碧翠、马黛芬、纪菲娜、林海伦、卡乔莎、杜卡西、法马南、高妮莎、哈奥薇、易柏西、胡昆廷、柯罗琳、洛赛邦、孟谭欣在这里。"
+      }
+    },
+    {
+      "id": "e-room-04",
+      "kind": "record",
+      "authoritative": true,
+      "proves": [
+        "a-12-was"
+      ],
+      "text": {
+        "en": "Cellar, 22:20: Leonie Eklund was here.",
+        "zh": "地窖，22:20：艾莱昂在这里。"
+      }
+    },
+    {
+      "id": "e-room-05",
+      "kind": "record",
+      "authoritative": true,
+      "proves": [
+        "a-07-was"
+      ],
+      "text": {
+        "en": "Boathouse, 22:20: Gideon Petrov was here.",
+        "zh": "船屋，22:20：裴吉登在这里。"
+      }
+    }
+  ],
+  "briefing": {
+    "evidence": [
+      "e-register",
+      "e-papers-01",
+      "e-papers-02",
+      "e-papers-03",
+      "e-papers-none",
+      "e-keeper"
+    ]
+  },
+  "actions": {
+    "topics": [
+      {
+        "id": "t-01",
+        "suspect": "s-01",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-01-says"
+        ]
+      },
+      {
+        "id": "t-02",
+        "suspect": "s-02",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-02-says"
+        ]
+      },
+      {
+        "id": "t-03",
+        "suspect": "s-03",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-03-says"
+        ]
+      },
+      {
+        "id": "t-04",
+        "suspect": "s-04",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-04-says"
+        ]
+      },
+      {
+        "id": "t-05",
+        "suspect": "s-05",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-05-says"
+        ]
+      },
+      {
+        "id": "t-06",
+        "suspect": "s-06",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-06-says"
+        ]
+      },
+      {
+        "id": "t-07",
+        "suspect": "s-07",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-07-says"
+        ]
+      },
+      {
+        "id": "t-08",
+        "suspect": "s-08",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-08-says"
+        ]
+      },
+      {
+        "id": "t-09",
+        "suspect": "s-09",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-09-says"
+        ]
+      },
+      {
+        "id": "t-10",
+        "suspect": "s-10",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-10-says"
+        ]
+      },
+      {
+        "id": "t-11",
+        "suspect": "s-11",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-11-says"
+        ]
+      },
+      {
+        "id": "t-12",
+        "suspect": "s-12",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-12-says"
+        ]
+      },
+      {
+        "id": "t-13",
+        "suspect": "s-13",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-13-says"
+        ]
+      },
+      {
+        "id": "t-14",
+        "suspect": "s-14",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-14-says"
+        ]
+      },
+      {
+        "id": "t-15",
+        "suspect": "s-15",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-15-says"
+        ]
+      },
+      {
+        "id": "t-16",
+        "suspect": "s-16",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-16-says"
+        ]
+      },
+      {
+        "id": "t-17",
+        "suspect": "s-17",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-17-says"
+        ]
+      },
+      {
+        "id": "t-18",
+        "suspect": "s-18",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-18-says"
+        ]
+      },
+      {
+        "id": "t-19",
+        "suspect": "s-19",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-19-says"
+        ]
+      },
+      {
+        "id": "t-20",
+        "suspect": "s-20",
+        "label": {
+          "en": "Where were you at 22:20?",
+          "zh": "22:20 你在哪里？"
+        },
+        "yields": [
+          "a-20-says"
+        ]
+      }
+    ],
+    "inspections": [
+      {
+        "id": "i-01",
+        "label": {
+          "en": "Check who was in the lamp room at 22:20",
+          "zh": "查看 22:20 谁在灯室"
+        },
+        "yields": [
+          "e-room-01"
+        ],
+        "requires": [
+          "a-02-says"
+        ]
+      },
+      {
+        "id": "i-02",
+        "label": {
+          "en": "Check who was in the gallery at 22:20",
+          "zh": "查看 22:20 谁在回廊"
+        },
+        "yields": [
+          "e-room-02"
+        ]
+      },
+      {
+        "id": "i-03",
+        "label": {
+          "en": "Check who was in the kitchen at 22:20",
+          "zh": "查看 22:20 谁在厨房"
+        },
+        "yields": [
+          "e-room-03"
+        ]
+      },
+      {
+        "id": "i-04",
+        "label": {
+          "en": "Check who was in the cellar at 22:20",
+          "zh": "查看 22:20 谁在地窖"
+        },
+        "yields": [
+          "e-room-04"
+        ]
+      },
+      {
+        "id": "i-05",
+        "label": {
+          "en": "Check who was in the boathouse at 22:20",
+          "zh": "查看 22:20 谁在船屋"
+        },
+        "yields": [
+          "e-room-05"
+        ]
+      }
+    ]
+  },
+  "culprit": {
+    "suspect": "s-03",
+    "motive": "mo-02"
+  },
+  "sessionCap": 25
+}
