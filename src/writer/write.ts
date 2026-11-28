@@ -21,7 +21,8 @@ import { skeletonProblems } from "./skeleton";
  * reported as accepted, even when both replies arrived.
  */
 
-export const WRITER_PROMPT_ID = "writer-v1";
+/** v2: the skeleton must say why nobody saw the act (`victim.unseen`). A skeleton saved under v1 has no such sentence and is refused. */
+export const WRITER_PROMPT_ID = "writer-v2";
 /** Output limits per request, reasoning included. */
 // A twenty-person skeleton measured 3,900 to 5,100 output tokens, more than half of it reasoning.
 export const SKELETON_OUTPUT_TOKENS = 8_000;
@@ -121,8 +122,9 @@ export interface WriteArgs {
 
 /**
  * Everything code can tell about a skeleton before the second request: it has the right
- * shape, the right number of people and rooms, rooms that connect, and names the line guard
- * can tell apart. Surplus suspects are dropped here, where no answer exists yet; too few is
+ * shape, the right number of people and rooms, rooms that connect, names the line guard
+ * can tell apart, and a reason why nobody saw the act that names no person, room or time.
+ * Surplus suspects are dropped here, where no answer exists yet; too few is
  * a refusal. A new reply and a saved one go through this same check.
  */
 export function checkSkeleton(raw: unknown, brief: SkeletonBrief): { ok: true; skeleton: Skeleton; notes: string[] } | { ok: false; reasons: string[] } {

@@ -17,6 +17,9 @@ import { resolveDoors } from "./skeleton";
  *  - The record of the scene can only be inspected after one witness has been heard. The
  *    briefing says who that is. The witness is never one of the people the briefing shows
  *    with both means and motive, so who the witness is says nothing about who did it.
+ *  - What the briefing says about the death: the cause, then the plot's reason why nobody
+ *    saw it done, as one text. Other people may be at the scene, and the record of the scene
+ *    will show them; the reason is what stops a player asking why they saw nothing.
  *
  * A plot that cannot be compiled is refused with its reasons. A compiled case is not yet an
  * accepted case: the validator and the solver judge it next (`checkCase`), then the quality
@@ -34,6 +37,15 @@ export type CompileResult =
       sharedAlibi: boolean;
     }
   | { ok: false; problems: string[] };
+
+/** A sentence that ends as one: a full stop is added when the writer left it off. */
+const closedEn = (s: string) => (/[.!?…]["'”’)]?$/.test(s.trim()) ? s.trim() : `${s.trim()}.`);
+const closedZh = (s: string) => (/[。！？…．.!?]["”’）)]?$/.test(s.trim()) ? s.trim() : `${s.trim()}。`);
+
+/** What the briefing says about the death: what was used, then why nobody saw who did it. */
+export function sceneText(victim: Skeleton["victim"]): Text {
+  return { en: `${closedEn(victim.cause.en)} ${closedEn(victim.unseen.en)}`, zh: `${closedZh(victim.cause.zh)}${closedZh(victim.unseen.zh)}` };
+}
 
 const listEn = (names: string[]) => (names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`);
 const listZh = (names: string[]) => names.join("、");
@@ -205,7 +217,7 @@ export function compilePlot(id: string, skeleton: Skeleton, people: People): Com
     setting: skeleton.setting,
     slots: ids.slots,
     locations: skeleton.rooms.map((room, i) => ({ id: ids.rooms[i]!, name: room.name, adjacent: [...doors.get(ids.rooms[i]!)!] })),
-    victim: { name: skeleton.victim.name, death: { slot: death, location: scene }, found: { slot: ids.slots.at(-1)!, location: scene }, means: "m-01", cause: skeleton.victim.cause },
+    victim: { name: skeleton.victim.name, death: { slot: death, location: scene }, found: { slot: ids.slots.at(-1)!, location: scene }, means: "m-01", cause: sceneText(skeleton.victim) },
     means: [{ id: "m-01", name: skeleton.means }],
     motives: skeleton.motives.map((text, i) => ({ id: ids.motives[i]!, text })),
     suspects: skeleton.suspects.map((s, i) => {

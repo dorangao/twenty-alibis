@@ -6,7 +6,10 @@ import type { ChatMessage } from "../provider/types";
  *
  *  1. The skeleton: the setting, the rooms and their doors, the victim, the means, the
  *     possible motives, and the people with their voices. No answer key is in it, so the
- *     voices are written before anyone knows who did it.
+ *     voices are written before anyone knows who did it. It also says why nobody saw the act
+ *     (`victim.unseen`): other people may be in the room when the victim dies, and a player
+ *     would rightly ask why they saw nothing. It is written here, before the room or the
+ *     culprit is chosen, so it cannot point at either.
  *  2. The people: who did it, where each person was in every slot, who holds the means and
  *     who has which motive.
  *
@@ -40,7 +43,11 @@ export const SkeletonSchema = z
       .refine((slots) => slots.every((slot, i) => i === 0 || slot > slots[i - 1]!), "time slots must be in order, each later than the last"),
     /** `doors` lists the English names of the rooms this room opens onto. */
     rooms: z.array(z.object({ name: Text, doors: z.array(z.string()) }).strict()).min(3).max(8),
-    victim: z.object({ name: Text, cause: Text }).strict(),
+    /**
+     * `cause` says what was used. `unseen` says why nobody could see who did it, even someone
+     * in the same room. The briefing shows the two together: see `sceneText` in compile.ts.
+     */
+    victim: z.object({ name: Text, cause: Text, unseen: Text }).strict(),
     means: Text,
     motives: z.array(Text).min(2).max(4),
     suspects: z.array(z.object({ name: Text, role: Text, persona: Text }).strict()).min(4).max(24),
@@ -100,7 +107,7 @@ export const skeletonRequestSchema = {
     setting: text,
     slots: list({ type: "string" }),
     rooms: list(object({ name: text, doors: list({ type: "string" }) })),
-    victim: object({ name: text, cause: text }),
+    victim: object({ name: text, cause: text, unseen: text }),
     means: text,
     motives: list(text),
     suspects: list(object({ name: text, role: text, persona: text })),
@@ -144,6 +151,7 @@ export function skeletonMessages(brief: SkeletonBrief): ChatMessage[] {
         "- Three time slots, twenty minutes apart, written as clock times with four digits and a colon. Pick an hour that suits the setting.",
         `- ${brief.rooms} rooms that form one building. For each room list in "doors" the English names of the rooms it opens onto. Every room must be reachable.`,
         `- One victim, with a one-sentence cause of death that says what was used.`,
+        `- "unseen": one sentence, shown to the player right after the cause, that says why nobody could see who did it, even a person standing in the same room at that moment (the lights failed, thick smoke, a storm shutter slammed and the lamps blew out). Other people may be in that room, so without this the story has a hole. Which room it happens in is not decided yet: the reason must hold in any room of the building. It names no person and no room, and gives no clock time.`,
         `- "means": the one thing a person needed to do it (a key, a tool, a pass). Several people will hold it.`,
         `- Three possible motives, each a short sentence about what someone stood to lose or gain, written so it could be true of several people.`,
         `- ${brief.suspects} suspects. For each: a name, a role in the house, and a "persona": how they speak and carry themselves, in one sentence. A persona is voice and manner only: no facts about the evening, and nothing about guilt or innocence.`,

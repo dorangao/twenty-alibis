@@ -12,13 +12,13 @@ import { FakeProvider } from "../src/provider/fake";
 import type { ProviderResponse } from "../src/provider/types";
 import { usdToNano } from "../src/spend/pricing";
 import { MemorySpendStore } from "../src/spend/store";
-import { compilePlot } from "../src/writer/compile";
+import { compilePlot, sceneText } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
-import { NO_MOTIVE, peopleRequestSchema, plotIds, skeletonMessages, SkeletonSchema, type People, type Skeleton } from "../src/writer/plot";
+import { NO_MOTIVE, peopleRequestSchema, plotIds, skeletonMessages, skeletonRequestSchema, SkeletonSchema, type People, type Skeleton } from "../src/writer/plot";
 import { nameProblems, roleNotes } from "../src/writer/names";
 import { assessQuality, MIN_SHORTLIST } from "../src/writer/quality";
-import { skeletonProblems } from "../src/writer/skeleton";
-import { writeCase, type ReplyRecord } from "../src/writer/write";
+import { skeletonProblems, unseenProblems } from "../src/writer/skeleton";
+import { WRITER_PROMPT_ID, writeCase, type ReplyRecord } from "../src/writer/write";
 
 const compiled = (skeleton: Skeleton = lighthouseSkeleton, people: People = lighthousePeople): Case => {
   const result = compilePlot("lighthouse", skeleton, people);
@@ -50,6 +50,18 @@ describe("a handwritten 20-person plot compiles to a case the gates accept", () 
     expect(c.suspects.filter((s) => s.whereabouts[slot] === location).map((s) => s.id)).toEqual(["s-03", "s-05", "s-09"]);
     expect(c.victim.cause.en).toContain("in the dark no one in the room could see who struck");
     expect(c.victim.cause.zh).toContain("屋里一片漆黑，在场的人看不见是谁动的手");
+  });
+
+  it("shows the plot's reason right after the cause, as one text", () => {
+    // The plot keeps the two apart; the case, and so the briefing and every prompt that carries the cause, has them together.
+    expect(c.victim.cause).toEqual({
+      en: "Found at the foot of the lamp, struck with the winding handle. The lamp room was locked. The lamp had gone out, and in the dark no one in the room could see who struck.",
+      zh: "倒在灯座下，被摇柄击中。灯室当时锁着。当时灯灭了，屋里一片漆黑，在场的人看不见是谁动的手。",
+    });
+    expect(c.victim.cause).toEqual(sceneText(lighthouseSkeleton.victim));
+    // A writer that leaves off a full stop does not run two sentences together.
+    const loose = { name: lighthouseSkeleton.victim.name, cause: { en: "Struck with a poker ", zh: "被火钳击中" }, unseen: { en: "The lights had failed", zh: "灯都灭了！" } };
+    expect(sceneText(loose)).toEqual({ en: "Struck with a poker. The lights had failed.", zh: "被火钳击中。灯都灭了！" });
   });
 
   it("passes the validator and the solver", () => {
@@ -422,6 +434,47 @@ describe("what is wrong with a skeleton is known before the second request", () 
     expect(issues({ means: { en: "A key to the lamp room 钥匙", zh: "灯室钥匙" } })).toEqual(["means.en: the English text must be in English"]);
   });
 
+  it("must say why nobody saw the act, in both languages", () => {
+    const { unseen: _left, ...victim } = lighthouseSkeleton.victim;
+    const issues = (v: unknown) => {
+      const parsed = SkeletonSchema.safeParse({ ...lighthouseSkeleton, victim: v });
+      return parsed.success ? [] : [...new Set(parsed.error.issues.map((i) => i.path.join(".")))];
+    };
+    expect(issues(lighthouseSkeleton.victim)).toEqual([]);
+    expect(issues(victim)).toEqual(["victim.unseen"]);
+    expect(issues({ ...victim, unseen: { en: "The lamp had gone out.", zh: "" } })).toEqual(["victim.unseen.zh"]);
+    expect(issues({ ...victim, unseen: { en: "The lamp had gone out.", zh: "The lamp had gone out." } })).toEqual(["victim.unseen.zh"]);
+    // The request's own schema requires it, and the prompt says what it is for.
+    const asked = skeletonRequestSchema.schema as unknown as { properties: { victim: { required: string[] } } };
+    expect(asked.properties.victim.required).toEqual(["name", "cause", "unseen"]);
+    const prompt = skeletonMessages(brief).at(-1)!.content;
+    expect(prompt).toContain('"unseen": one sentence');
+    expect(prompt).toContain("even a person standing in the same room at that moment");
+    expect(prompt).toContain("It names no person and no room, and gives no clock time.");
+    expect(WRITER_PROMPT_ID).toBe("writer-v2");
+  });
+
+  it("refuses a reason that names a person, a room or a time", () => {
+    const unseen = (en: string, zh: string): Skeleton => ({ ...lighthouseSkeleton, victim: { ...lighthouseSkeleton.victim, unseen: { en, zh } } });
+    expect(unseenProblems(lighthouseSkeleton)).toEqual([]);
+    // A room is heard only in its whole name: "the lamp" and "the room" are not the "Lamp room".
+    expect(unseenProblems(unseen("The lamp had gone out and the room was dark.", "灯灭了，屋里很黑。"))).toEqual([]);
+    // The reason is written before anyone is the culprit: a person in it would be a fact code does not hold.
+    expect(skeletonProblems(unseen("Cormac had put out the lamp.", "灯被柏康默熄了。"), brief)).toEqual([
+      'the reason nobody saw the act names a person (cormac, 柏康, 康默, 柏康默): "Cormac had put out the lamp." / “灯被柏康默熄了。”',
+    ]);
+    // Nor is the room chosen yet: the death may happen in another.
+    expect(skeletonProblems(unseen("The lamp room was dark.", "当时很黑。"), brief)).toEqual([
+      'the reason nobody saw the act names a room (Lamp room), and the room of the death is not chosen yet: "The lamp room was dark." / “当时很黑。”',
+    ]);
+    expect(skeletonProblems(unseen("It was dark.", "当时灯室和回廊都很黑。"), brief)).toEqual([
+      'the reason nobody saw the act names a room (Lamp room, Gallery), and the room of the death is not chosen yet: "It was dark." / “当时灯室和回廊都很黑。”',
+    ]);
+    expect(skeletonProblems(unseen("The lamp went out at 22:20.", "十点二十分灯灭了。"), brief)).toEqual([
+      'the reason nobody saw the act gives a time (10:20 pm, 10:20): "The lamp went out at 22:20." / “十点二十分灯灭了。”',
+    ]);
+  });
+
   it("refuses a role or a manner that names a person", () => {
     const role = (en: string, zh: string): Skeleton => ({ ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 0 ? { ...s, role: { en, zh } } : s)) });
     expect(skeletonProblems(role("Assistant to Cormac", "柏康默的助手"), brief)).toEqual(['the role of "Aldric Varga" names a person (cormac, 柏康, 康默, 柏康默): "Assistant to Cormac" / “柏康默的助手”']);
@@ -571,7 +624,9 @@ describe("the writer: two requests, then code", () => {
   it("does not spend the second request on a skeleton that is already known to be bad", async () => {
     const cut: Skeleton = { ...lighthouseSkeleton, rooms: lighthouseSkeleton.rooms.map((r) => (r.name.en === "Boathouse" ? { ...r, doors: [] } : { ...r, doors: r.doors.filter((d) => d !== "Boathouse") })) };
     const named: Skeleton = { ...lighthouseSkeleton, suspects: lighthouseSkeleton.suspects.map((s, i) => (i === 3 ? { ...s, name: { en: "May Linden", zh: "林梅" } } : s)) };
+    const pointed: Skeleton = { ...lighthouseSkeleton, victim: { ...lighthouseSkeleton.victim, unseen: { en: "The gallery was dark.", zh: "当时很黑。" } } };
     for (const [skeleton, askFor, reason] of [
+      [pointed, brief, 'the reason nobody saw the act names a room (Gallery), and the room of the death is not chosen yet: "The gallery was dark." / “当时很黑。”'],
       [lighthouseSkeleton, { ...brief, rooms: 6 }, "the skeleton has 5 rooms; 6 were asked for"],
       [cut, brief, 'room "Boathouse" cannot be reached from "Lamp room" through any doors'],
       [named, brief, '"may" in the name "May Linden" is an everyday word, so ordinary lines would be refused'],
@@ -691,6 +746,14 @@ describe("the writer: two requests, then code", () => {
     const refused = await writeCase({ metered: bad.metered, attemptId: "w-1", brief: { ...brief, rooms: 6 }, skeleton: lighthouseSkeleton });
     expect(refused).toMatchObject({ accepted: false, failedAt: "skeleton", requests: 0 });
     expect(bad.provider.dispatched).toBe(0);
+
+    // So is a skeleton saved before plots had to say why nobody saw the act: it has no such sentence.
+    const { unseen: _left, ...before } = lighthouseSkeleton.victim;
+    const old = setup([json(lighthousePeople)]);
+    const stale = await writeCase({ metered: old.metered, attemptId: "w-1", brief, skeleton: { ...lighthouseSkeleton, victim: before } });
+    expect(stale).toMatchObject({ accepted: false, failedAt: "skeleton", requests: 0 });
+    expect(stale.reasons[0]).toContain("skeleton: victim.unseen");
+    expect(old.provider.dispatched).toBe(0);
   });
 
   it("gives each request room for its reasoning", async () => {
