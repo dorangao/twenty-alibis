@@ -549,6 +549,15 @@ server.listen(0, "127.0.0.1", () => console.log("PORT " + server.address().port)
       expect(page, text).not.toContain(text);
       expect(func, text).toContain(text);
     }
+    // The lighthouse has a public replay among those files, so its names and its solution are there on purpose.
+    // What a replay never carries is still kept out: a suspect's persona, and the case's own ids for what people say.
+    const lighthouse = JSON.parse(readFileSync(join(out, "functions/api.func/cases/released/lighthouse.json"), "utf8")) as { suspects: { persona: { en: string; zh: string } }[]; assertions: { id: string }[] };
+    const inner = [lighthouse.suspects[0]!.persona.en, lighthouse.suspects[0]!.persona.zh, lighthouse.assertions[0]!.id];
+    expect(inner.every((text) => text.length >= 8)).toBe(true);
+    for (const text of inner) {
+      expect(page, text).not.toContain(text);
+      expect(func, text).not.toContain(text);
+    }
   });
 
   it("with no configuration at all it answers with the fixed error and logs the setting's name", async () => {
