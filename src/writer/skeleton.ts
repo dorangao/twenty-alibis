@@ -1,3 +1,4 @@
+import { hearsWord, mentions } from "../agents/line-guard";
 import { nameProblems, type Roster } from "./names";
 import { plotIds, type Skeleton, type SkeletonBrief } from "./plot";
 
@@ -5,9 +6,10 @@ import { plotIds, type Skeleton, type SkeletonBrief } from "./plot";
  * What can be known to be wrong with a skeleton before the second request is spent on it.
  *
  * The second request costs money and cannot fix the first: a room nobody can reach, a
- * roster the line guard cannot tell apart, or the wrong number of people will sink the case
- * whatever the plot is. So these are checked first, and a bad skeleton ends the attempt
- * after one request.
+ * roster the line guard cannot tell apart, the wrong number of people, or a reason for
+ * nobody having seen the act that points at a person or a room will sink the case whatever
+ * the plot is. So these are checked first, and a bad skeleton ends the attempt after one
+ * request.
  */
 
 /** Which rooms open onto which. A door works both ways, whichever room lists it. */
@@ -41,6 +43,35 @@ export function skeletonRoster(skeleton: Skeleton): Roster {
   };
 }
 
+/**
+ * What is wrong with the reason nobody saw the act (`victim.unseen`).
+ *
+ * The reason is written before the culprit and the room are chosen, and the briefing shows
+ * it to the player as a fact. So it may not name a person: code holds no fact that would
+ * make that true, and it would point at someone. It may not name a room: the death may
+ * happen in another. It may not give a time: the death has its own. Code can check these
+ * three things and that the sentence is there in both languages. Whether it is a good
+ * reason is a person's call.
+ *
+ * A person is heard the way the line guard hears one, in any word of their name. A room is
+ * heard only in its whole name: "nobody in the room could see" must not count as naming the
+ * "Lamp room".
+ */
+export function unseenProblems(skeleton: Skeleton): string[] {
+  const { unseen } = skeleton.victim;
+  const both = `${unseen.en}\n${unseen.zh}`;
+  const shown = `"${unseen.en}" / “${unseen.zh}”`;
+  const problems: string[] = [];
+  const heard = mentions({ suspects: skeletonRoster(skeleton).suspects, locations: [], means: [], slots: [] }, both);
+  const people = heard.filter((m) => !m.startsWith("time "));
+  const times = heard.filter((m) => m.startsWith("time "));
+  if (people.length > 0) problems.push(`the reason nobody saw the act names a person (${people.join(", ")}): ${shown}`);
+  const rooms = skeleton.rooms.filter((r) => hearsWord(r.name.en.trim().toLowerCase(), unseen.en) || unseen.zh.includes(r.name.zh.trim()));
+  if (rooms.length > 0) problems.push(`the reason nobody saw the act names a room (${rooms.map((r) => r.name.en).join(", ")}), and the room of the death is not chosen yet: ${shown}`);
+  if (times.length > 0) problems.push(`the reason nobody saw the act gives a time (${times.map((t) => t.slice(5)).join(", ")}): ${shown}`);
+  return problems;
+}
+
 export function skeletonProblems(skeleton: Skeleton, brief?: SkeletonBrief): string[] {
   const problems: string[] = [];
   const ids = plotIds(skeleton);
@@ -64,5 +95,6 @@ export function skeletonProblems(skeleton: Skeleton, brief?: SkeletonBrief): str
   });
 
   problems.push(...nameProblems(skeletonRoster(skeleton)));
+  problems.push(...unseenProblems(skeleton));
   return problems;
 }

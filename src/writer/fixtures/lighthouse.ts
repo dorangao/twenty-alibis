@@ -7,8 +7,8 @@ import { plotIds, type People, type Skeleton } from "../plot";
  * be tested without a model. Four people hold the key and have a motive. One of them,
  * Cormac Brandt, was in the lamp room at 22:20. Edmund Soler was there too and holds a
  * key, but has no motive; Isidore Abara was there without a key. The lamp was out, so the
- * two of them saw nothing: the scene description says so, or a player would rightly ask why
- * two people in the room did not see the blow.
+ * two of them saw nothing: the plot says so in `unseen`, as every plot must, or a player
+ * would rightly ask why two people in the room did not see the blow.
  */
 const PEOPLE: [given: string, family: string, zh: string, roleEn: string, roleZh: string][] = [
   ["Aldric", "Varga", "魏立群", "Keeper", "灯塔看守"],
@@ -46,10 +46,8 @@ export const lighthouseSkeleton: Skeleton = {
   ],
   victim: {
     name: { en: "Mr. Hale", zh: "何先生" },
-    cause: {
-      en: "Found at the foot of the lamp, struck with the winding handle. The lamp room was locked. The lamp had gone out, and in the dark no one in the room could see who struck.",
-      zh: "倒在灯座下，被摇柄击中。灯室当时锁着。当时灯灭了，屋里一片漆黑，在场的人看不见是谁动的手。",
-    },
+    cause: { en: "Found at the foot of the lamp, struck with the winding handle. The lamp room was locked.", zh: "倒在灯座下，被摇柄击中。灯室当时锁着。" },
+    unseen: { en: "The lamp had gone out, and in the dark no one in the room could see who struck.", zh: "当时灯灭了，屋里一片漆黑，在场的人看不见是谁动的手。" },
   },
   means: { en: "A key to the lamp room", zh: "灯室钥匙" },
   motives: [
