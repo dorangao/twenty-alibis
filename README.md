@@ -34,7 +34,7 @@ Every model call in this project is `muse-ember-1.0`. It does three jobs, and co
 | **Case writer** | Writes a 20-person plot in two requests: the setting and people, then what happened | Builds all the evidence, then lets the validator, the solver and a quality gate decide whether the case is kept |
 | **Detective** | Plays a case as a player would: one action a turn, chosen from what is open, in a strict schema | Runs the same game and the same scorer a player gets; a case counts as agent-solved only on a "solved" verdict |
 
-What the runs so far showed. Each line is a measurement from a small batch, on Nov 25 and 26, 2026; none of them is a rate.
+What the runs so far showed. Each line is a measurement from a small batch, between Nov 25 and 27, 2026; none of them is a rate.
 
 | What | Measured |
 |---|---|
@@ -44,6 +44,7 @@ What the runs so far showed. Each line is a measurement from a small batch, on N
 | The same three model-written cases, one detective game each under the final rules | 3 of 3 solved |
 | Lines told to "say it your way, add no fact" | of seven lines read, seven were in character with no added time, place, object or person |
 | Reasoning effort "minimal" against "low", on two pairs of gossip prompts | 195 reasoning tokens against 606: about a third |
+| Gossip with the model on, run once: three rounds on the 20-person lighthouse, eight speakers a round, each speaker's agent picking one of four people to tell | 24 of 24 replies were a usable choice and none was cut off. $0.0023 for the three rounds: $0.00074 to $0.00078 a round, $0.00005 to $0.00014 a choice. A request took 0.9 seconds at the median and 2.0 at the slowest; a round, sent four at a time, took 2.2 to 3.2 seconds |
 | Second of two labelled requests sharing a long prefix | 7,796 of its 7,836 input tokens were cached (99.5%); it cost $0.000175 where the first cost $0.000824 |
 
 Why this matters for the game: at these prices every suspect, the author and the detective can each be an agent. A typed question, a written case and the detective's side of a solved game each cost a fraction of a cent. What a whole live game costs a player who types every question has not been measured: by the question prices above it is the number of questions times about $0.0004. And the model follows tools and schemas closely enough that code can decide what counts as evidence without ever taking the model's sentence for it.
@@ -56,6 +57,7 @@ What these runs do not show, and what the design does about it:
 - **The line guard reads words, not meaning.** A line could still bend a fact in words the case's vocabulary does not hold. The promise rests on the notebook and the scorer, which never read the model's sentence.
 - **The detective depends on how it is asked.** On the same three cases it solved none in the first setting, where two games ended on replies cut off at the output limit and one accused the right person too early; two after the limit was raised and the rules reworded, both at once; and all three once the rules of proof said plainly what a room's record does and does not show. Which change did what was not separated. It also asks more than it needs to: one to three questions a game that open nothing.
 - **Generated Chinese reads like a translation** in places. The game's own words, the rules and the notebook are written by hand in both languages.
+- **Gossip was measured for form, not for sense.** All 24 choices could be used; whether a speaker told the person that character would tell was not judged, and no reason was asked for. The first person offered was picked 10 times of 24, where an even spread would be 6, and one person was picked 5 of the 7 times they were offered. With 24 choices either may be chance. At the lowest effort, 2,569 of the 2,927 output tokens were still reasoning.
 - These are a handful of runs. They say what happened, not how often it will.
 
 本项目里每一次模型调用都是 `muse-ember-1.0`。它做三件事，每一件都由代码检查。
@@ -66,7 +68,7 @@ What these runs do not show, and what the design does about it:
 | **案件作者** | 用两次请求写出一个 20 人的剧情：先写场景和人物，再写发生了什么 | 生成全部证据，再由校验器、求解器和质量关决定是否保留 |
 | **侦探** | 像玩家一样玩一个案件：每回合一个行动，只能从当前开放的选项里选，按严格的格式回答 | 走的是玩家的同一套游戏和同一个判分器；只有判为"已破解"才算智能体破案 |
 
-目前的实测结果。每一行都来自 2026 年 11 月 25、26 日的小批量运行，都不是比率。
+目前的实测结果。每一行都来自 2026 年 11 月 25 日至 27 日的小批量运行，都不是比率。
 
 | 项目 | 实测 |
 |---|---|
@@ -76,6 +78,7 @@ What these runs do not show, and what the design does about it:
 | 同样三个模型写的案件，按最终规则各由侦探玩一局 | 3 个全部破解 |
 | 要求"用你的方式说，不要添加事实"的台词 | 读过的七句里，七句都符合角色，没有多出时间、地点、物品或人物 |
 | 推理强度"minimal"对比"low"，两组成对的传话提示词 | 推理 token 195 对 606，约三分之一 |
+| 开启模型的私下交谈，只运行了一次：在 20 人的灯塔案上跑三轮，每轮八位说话者，每位说话者的智能体从四个人里选一个来告诉 | 24 个回复全部是可用的选择，没有一个被截断。三轮共 $0.0023：每轮 $0.00074 到 $0.00078，每次选择 $0.00005 到 $0.00014。单个请求用时中位数 0.9 秒，最慢 2.0 秒；一轮每次同时发四个，用时 2.2 到 3.2 秒 |
 | 两次共用长前缀且带缓存标签的请求中，第二次 | 它的 7,836 个输入 token 中有 7,796 个命中缓存（99.5%）；这次花费 $0.000175，第一次是 $0.000824 |
 
 这对游戏意味着：按这样的价格，每个嫌疑人、作者和侦探都可以各是一个智能体。一个自己提的问题、写一个案件、侦探破一局所用的请求，各自都只要一美分的零头。玩家每个问题都自己打字的一整局要花多少，还没有实测过：按上面的单价，就是问题数乘以约 $0.0004。而且模型对工具和格式遵守得足够好，什么算证据可以完全由代码决定，从不以模型说的那句话为准。
@@ -88,6 +91,7 @@ What these runs do not show, and what the design does about it:
 - **台词守卫看的是字词，不是含义。** 一句台词仍然可能用案件词表里没有的说法把事实说歪。我们承诺的是笔记本和判分器，它们从不读模型说的那句话。
 - **侦探的表现取决于怎么问它。** 同样三个案件：第一种设置下一个都没破，其中两局是回复在输出上限处被截断，一局是过早指认了正确的人；同时提高上限并改写规则之后破了两个；把证明规则里“房间记录说明什么、不说明什么”写清楚之后三个全破。哪一项改动起了什么作用，没有分开测。它问得也比需要的多：每局有一到三个问题没有打开任何新东西。
 - **生成的中文有些地方读起来像翻译。** 游戏自己的文字、规则和笔记本是用两种语言手写的。
+- **私下交谈测的是形式，不是合不合情理。** 24 次选择都可用；说话者选的是不是这个角色会去告诉的人，没有评判，也没有要求给出理由。排在第一位的候选人被选中 10 次（共 24 次），平均分布应是 6 次；有一个人 7 次出现在候选里，被选中 5 次。只有 24 次选择，这两点都可能是偶然。在最低推理强度下，2,927 个输出 token 里仍有 2,569 个是推理。
 - 这只是少量运行，说明的是发生过什么，不是会有多经常发生。
 
 ## What is here now · 目前已有
@@ -156,7 +160,7 @@ Gossip only adds ways to reach statements the player could already reach, each f
 
 Every game started in the browser has gossip, and so has the terminal game with `--gossip`. In the browser a round runs by itself as soon as it is due, and a panel lists who has spoken with whom. On a server, a round is written down as closed and empty before its first request goes out: if the server is lost in the middle, the game stands with that round over, the page says it did not finish, and its requests are never sent again. What such a round cost, if anything, only the spend guard's own count knows; the page counts it as one unfinished thing.
 
-So far gossip has run only against a scripted stand-in for the model: how often a real reply is usable, and what a round costs, are not measured yet. A trial that would measure it is written and has not been run: three rounds on the lighthouse, at most 24 requests, each sent once, ever ([`src/trial/gossip-trial.ts`](src/trial/gossip-trial.ts); `npm run trial:gossip -- --plan` lists every request it would send and sends nothing). What a request will be billed is not known before it is sent, because the API limits output and not billed input, so the trial keeps two limits apart, both set by the person who runs it: a stop against its own estimate of each request, which keeps an ordinary run small and bounds nothing, and a bound counted in the spend guard's full hold for every request in flight or unresolved, which is the one that limits the bill. The self-play detective plays without it, and a replay of one of its games is shown without it, as it was played.
+Gossip with the model on has been run once, as a trial, on Nov 27, 2026: three rounds on the lighthouse, 24 requests, each sent once, ever ([`src/trial/gossip-trial.ts`](src/trial/gossip-trial.ts); `npm run trial:gossip -- --plan` lists every request and sends nothing). All 24 replies were a usable choice and the three rounds cost $0.0023 together; the table near the top has the rest. The trial is closed now: its ids are in the spend store, so a second run sends nothing. Gossip with the model on has not been played by a person yet, and the deployed game runs it with code choosing. What a request will be billed is not known before it is sent, because the API limits output and not billed input, so the trial keeps two limits apart, both set by the person who runs it: a stop against its own estimate of each request, which keeps an ordinary run small and bounds nothing, and a bound counted in the spend guard's full hold for every request in flight or unresolved, which is the one that limits the bill. The self-play detective plays without it, and a replay of one of its games is shown without it, as it was played.
 
 开启"私下交谈"的一局里，每用掉四次行动，在场的人就会私下谈一轮，最多三轮（案件自带的话题和可查看项不到八个时，比如手写案件，改为每两次行动一轮）。真相不变，每个人自己的说法也不变；变的只是谁能转述谁的话。谁开口、转述哪一句、可以告诉哪几个人，都由代码决定：每轮最多八人依次开口，各转述自己的一句陈述，而且只能是此刻玩家本来就问得到的那一句；每人有至多四个还没听过这句话的人可选。模型开启时，由开口者的智能体从中选一个人，它只做这一件事：有两个以上的人可选时，每人一次最低推理强度的 Muse Ember 请求，同时最多四个，回复必须指明一个字母；只剩一个人可告诉时不问模型，由代码告诉那个人，不发送请求；它看到的是公开案情、自己的口吻、自己的说法和候选人的名字，看不到任何隐藏的真相。回复不是候选字母、被截断，或者请求被额度守卫拒绝，就谁也不告诉：开局时模型是开着的一局里，代码不会替它免费选人。开局时模型就关着的一局里，由代码告诉第一个候选人，不发送任何请求。玩家只会被告知谁找谁谈过，不会被告知谈了什么；听的人会多出一个话题"某某跟你说了什么？"，问它要用一次行动，不发送请求，得到的是那个人的陈述，注明出处，由代码写成。转述也只是陈述，不能证明任何事：它能打开那句陈述能打开的东西，记录可以与它矛盾，经由转述传到玩家耳中的谎言也算"听到了"，但指认仍然只凭记录。
 
@@ -164,7 +168,7 @@ So far gossip has run only against a scripted stand-in for the model: how often 
 
 在浏览器里开始的每一局都带私下交谈，终端游戏加上 `--gossip` 也是。浏览器里，一轮到点就自动进行，页面上有一栏列出谁找谁谈过。在服务器上，一轮在发出第一个请求之前，就先被记成"已结束、无人传话"：如果服务器中途丢失，这一局就停在这一轮已经结束的状态，页面会说明它没有完成，它的请求也不会再发一次。这样的一轮如果产生了费用，只有额度守卫自己的计数知道；页面把它算作一项"未完成"。
 
-目前私下交谈只对着脚本化的模型替身跑过：真实回复有多少可用、一轮要花多少，都还没有测。用来测它的试验已经写好，还没有运行：在灯塔案上跑三轮，最多 24 个请求，每个只发一次（[`src/trial/gossip-trial.ts`](src/trial/gossip-trial.ts)；`npm run trial:gossip -- --plan` 会列出它将发送的每个请求，但不发送任何内容）。一个请求会被计多少费，发送之前无法确知，因为接口只限制输出、不限制计费的输入；所以试验把两个限额分开，都由运行它的人设定：一条停止线，对照试验自己对每个请求的估计，它让正常的运行保持很小，但不构成上限；一个硬上限，按额度守卫为每个在途或结果不明的请求保留的全额来计算，真正限制账单的是它。自我对弈的侦探不带私下交谈；它的对局做成回放时也不带，和当时玩的一样。
+开启模型的私下交谈已经作为试验运行过一次，时间是 2026 年 11 月 27 日：在灯塔案上跑三轮，共 24 个请求，每个只发一次（[`src/trial/gossip-trial.ts`](src/trial/gossip-trial.ts)；`npm run trial:gossip -- --plan` 会列出每个请求，但不发送任何内容）。24 个回复全部是可用的选择，三轮一共花了 $0.0023；其余数字见靠近开头的表格。试验现在已经结束：它的请求编号都在额度存储里，再运行一次不会发送任何内容。开启模型的私下交谈还没有由真人玩过；部署的游戏里，告诉谁由代码决定。一个请求会被计多少费，发送之前无法确知，因为接口只限制输出、不限制计费的输入；所以试验把两个限额分开，都由运行它的人设定：一条停止线，对照试验自己对每个请求的估计，它让正常的运行保持很小，但不构成上限；一个硬上限，按额度守卫为每个在途或结果不明的请求保留的全额来计算，真正限制账单的是它。自我对弈的侦探不带私下交谈；它的对局做成回放时也不带，和当时玩的一样。
 
 ### How a new case is written · 新案件怎么写出来
 
