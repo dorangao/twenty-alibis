@@ -79,7 +79,7 @@ describe("a handwritten 20-person plot compiles to a case the gates accept", () 
     expect(text("e-papers-none").en).toBe("The victim's papers give Edmund Soler none of the listed motives.");
     expect(text("e-room-01").en).toBe("Lamp room, 22:20: Cormac Brandt, Edmund Soler and Isidore Abara were here.");
     expect(text("e-room-05").zh).toBe("船屋，22:20：裴吉登在这里。");
-    expect(text("e-keeper").en).toBe("The record of who was in the lamp room is kept by Beatrix Okonkwo. Hear them first.");
+    expect(text("e-keeper").en).toBe("The record of who was in the lamp room is kept by Beatrix Okonkwo. Hear their account first.");
     // The note proves nothing and is not authoritative.
     expect(c.evidence.find((e) => e.id === "e-keeper")).toMatchObject({ authoritative: false, proves: [] });
   });

@@ -43,5 +43,7 @@ export const api = {
   askTopic: (view: View, topic: string, language: "en" | "zh") => call<ViewReply>("POST", `/api/sessions/${view.session}/ask`, { revision: view.revision, topic, language }),
   askOwn: (view: View, person: string, question: string) => call<ViewReply>("POST", `/api/sessions/${view.session}/ask`, { revision: view.revision, person, question }),
   inspect: (view: View, inspection: string) => call<ViewReply>("POST", `/api/sessions/${view.session}/inspect`, { revision: view.revision, inspection }),
+  /** Run the gossip round that is due. It uses no action. */
+  gossip: (view: View) => call<ViewReply>("POST", `/api/sessions/${view.session}/gossip`, { revision: view.revision }),
   accuse: (view: View, person: string, evidence: string[]) => call<ViewReply>("POST", `/api/sessions/${view.session}/accuse`, { revision: view.revision, person, evidence }),
 };

@@ -1,7 +1,7 @@
 import { playDetective, type DetectiveReply, type Move } from "../agents/detective";
 import type { Case, Text } from "../case/schema";
 import { solve } from "../case/solver";
-import { accuse, ask, inspect, SessionError, startSession, type Session } from "../game/session";
+import { accuse, ask, gossipDue, gossipRound, inspect, SessionError, startSession, type Session } from "../game/session";
 import type { Metered } from "../metered";
 import { costNano, MODEL } from "../spend/pricing";
 import { caseVersion } from "./api";
@@ -24,6 +24,10 @@ import { handlesOf, viewOf, withHandles, type View } from "./view";
  *
  * Playing it back takes no server: no session, no model, no request. The moves are played
  * here, once, with the model off, so every statement in it is worded by code.
+ *
+ * A replay made with gossip has the game's gossip rounds in it, each a frame of its own,
+ * run when it falls due as the live game runs it. The model is off, so code picks who is
+ * told. A replay of a game that was played without gossip is made without it.
  */
 export const REPLAY_VERSION = 1;
 
@@ -43,7 +47,9 @@ export type ReplayPlayer =
 export type ReplayMove =
   | { kind: "ask"; person: string; topic: string; label: Text }
   | { kind: "inspect"; inspection: string; label: Text }
-  | { kind: "accuse"; person: string; evidence: string[] };
+  | { kind: "accuse"; person: string; evidence: string[] }
+  /** Not the player's move: the gossip round that fell due after the move before it. */
+  | { kind: "gossip"; round: number };
 
 export interface ReplayFrame {
   /** The move that led here. The first frame has none. */
@@ -106,13 +112,20 @@ export const cardOf = (replay: Replay): ReplayCard => ({ id: replay.id, title: r
  * Play `moves` on `c` with the model off and write down the view after each. The moves must
  * be legal in order, end with an accusation, and the scorer must call it solved.
  */
-export async function makeReplay(c: Case, moves: readonly Move[], meta: { id: string; player: ReplayPlayer }): Promise<{ ok: true; replay: Replay } | { ok: false; why: ReplayRefusal }> {
+export async function makeReplay(c: Case, moves: readonly Move[], meta: { id: string; player: ReplayPlayer; gossip?: boolean }): Promise<{ ok: true; replay: Replay } | { ok: false; why: ReplayRefusal }> {
   if (!isReplayId(meta.id)) return { ok: false, why: "bad-id" };
   // The session's name is in every view. It is the replay's name: no live session is called this.
-  let record: SessionRecord = withHandles(c, { session: startSession(c, `replay-${meta.id}`), owner: "", revision: 1, mode: "off", caseVersion: caseVersion(c), topics: [], inspections: [], createdAt: 0 });
+  let record: SessionRecord = withHandles(c, { session: startSession(c, `replay-${meta.id}`, { gossip: meta.gossip === true }), owner: "", revision: 1, mode: "off", caseVersion: caseVersion(c), topics: [], inspections: [], createdAt: 0 });
   const frames: ReplayFrame[] = [{ view: viewOf(c, record, "off") }];
 
   for (const move of moves) {
+    // A round that the move before made due runs first, as the page runs it in a live game.
+    // The accusation does not wait for one.
+    while (move.type !== "accuse" && gossipDue(c, record.session)) {
+      const done = await gossipRound(refuse, c, record.session, { model: false });
+      record = withHandles(c, { ...record, session: done.session, revision: record.revision + 1 });
+      frames.push({ move: { kind: "gossip", round: done.round.n }, view: viewOf(c, record, "off") });
+    }
     // Nothing comes after the accusation: the game itself refuses any move once it is over.
     // The handles the player would have used are the ones on the view before the move.
     const h = handlesOf(c, record);

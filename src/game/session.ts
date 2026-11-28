@@ -129,15 +129,15 @@ function mustBeLive(session: Session): void {
 /**
  * The topics a suspect can be asked about now. `heard` is true when its statements are already
  * in the notebook. After the suspect's own topics come the things it has been told in gossip:
- * `gossip` is then the round it was told in.
+ * `gossip` is then the round it was told in, and `from` who told it.
  */
-export function topicMenu(c: Case, session: Session, suspect: string): { id: string; label: Text; heard: boolean; gossip?: number }[] {
+export function topicMenu(c: Case, session: Session, suspect: string): { id: string; label: Text; heard: boolean; gossip?: number; from?: string }[] {
   check(c, session);
   const held = heldBy(session);
   const heard = (topic: string): boolean => session.turns.some((r) => r.turn.suspect === suspect && r.turn.topic === topic);
   return [
     ...c.actions.topics.filter((t) => t.suspect === suspect && isOpen(t, held)).map((t) => ({ id: t.id, label: t.label, heard: heard(t.id) })),
-    ...hearsayTopics(c, session.gossip, suspect).map((t) => ({ id: t.id, label: t.label, heard: heard(t.id), gossip: t.round })),
+    ...hearsayTopics(c, session.gossip, suspect).map((t) => ({ id: t.id, label: t.label, heard: heard(t.id), gossip: t.round, from: t.from })),
   ];
 }
 

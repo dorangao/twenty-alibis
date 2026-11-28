@@ -231,8 +231,8 @@ describe("what a listener can then be asked", () => {
     const s = told("h");
     expect(topicMenu(c, s, listener)).toEqual([
       { id: "t-07", label: c.actions.topics.find((t) => t.id === "t-07")!.label, heard: false },
-      { id: hearsayId(c, 1, idx(WITNESS)), label: { en: `What did ${name(WITNESS).en} tell you?`, zh: `${name(WITNESS).zh}跟你说了什么？` }, heard: false, gossip: 1 },
-      { id: hearsayId(c, 1, idx(LIAR)), label: { en: `What did ${name(LIAR).en} tell you?`, zh: `${name(LIAR).zh}跟你说了什么？` }, heard: false, gossip: 1 },
+      { id: hearsayId(c, 1, idx(WITNESS)), label: { en: `What did ${name(WITNESS).en} tell you?`, zh: `${name(WITNESS).zh}跟你说了什么？` }, heard: false, gossip: 1, from: WITNESS },
+      { id: hearsayId(c, 1, idx(LIAR)), label: { en: `What did ${name(LIAR).en} tell you?`, zh: `${name(LIAR).zh}跟你说了什么？` }, heard: false, gossip: 1, from: LIAR },
     ]);
     expect(topicMenu(c, s, "s-08")).toHaveLength(1);
   });

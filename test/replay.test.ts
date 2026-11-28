@@ -37,7 +37,8 @@ afterAll(() => {
 const solved = async (c: Case, id = "a-case"): Promise<Replay> => {
   const proof = await solverMoves(c);
   if (!proof.ok) throw new Error("no proof");
-  const made = await makeReplay(c, proof.moves, { id, player: { kind: "solver" } });
+  // As the maker makes the solver's replay: a game with gossip, like one started on the page.
+  const made = await makeReplay(c, proof.moves, { id, player: { kind: "solver" }, gossip: true });
   if (!made.ok) throw new Error(made.why);
   return made.replay;
 };
@@ -60,6 +61,7 @@ async function liveViews(c: Case, replay: Replay): Promise<View[]> {
     const move = frame.move!;
     if (move.kind === "ask") views.push(await call("POST", `${base}/ask`, { revision: at.revision, topic: move.topic, language: "en" }));
     else if (move.kind === "inspect") views.push(await call("POST", `${base}/inspect`, { revision: at.revision, inspection: move.inspection }));
+    else if (move.kind === "gossip") views.push(await call("POST", `${base}/gossip`, { revision: at.revision }));
     else views.push(await call("POST", `${base}/accuse`, { revision: at.revision, person: move.person, evidence: move.evidence }));
   }
   return views;
@@ -71,7 +73,12 @@ describe("a replay is a solved game as the page would have seen it", () => {
       const replay = await solved(c);
       const proof = solve(c).proof!;
       expect(replay).toMatchObject({ version: REPLAY_VERSION, id: "a-case", title: c.title, setting: c.setting, suspects: c.suspects.length, actions: proof.actions.length, player: { kind: "solver" } });
-      expect(replay.frames).toHaveLength(proof.actions.length + 2);
+      // The opening, one frame for each action, one for each gossip round that fell due before
+      // a further action, and the accusation. The lighthouse's fifth action waits for a round;
+      // the archive's proof is two actions and an accusation, which waits for none.
+      const rounds = replay.frames.filter((f) => f.move?.kind === "gossip").length;
+      expect(rounds).toBe(c === lighthouse ? 1 : 0);
+      expect(replay.frames).toHaveLength(proof.actions.length + 2 + rounds);
       expect(Object.keys(replay).sort()).toEqual(["actions", "frames", "id", "player", "setting", "suspects", "title", "version"]);
       const live = await liveViews(c, replay);
       // The session's name is the one thing that differs: a replay's is its own.
@@ -113,6 +120,12 @@ describe("a replay is a solved game as the page would have seen it", () => {
         expect(frame.view.topics.find((t) => t.handle === move.topic)!.heard).toBe(true);
       } else if (move.kind === "inspect") {
         expect(before.inspections.find((x) => x.handle === move.inspection)).toMatchObject({ label: move.label, done: false });
+      } else if (move.kind === "gossip") {
+        // The round was due before it and is not after it, and it used no action.
+        expect(before.gossip!.due).toBe(true);
+        expect(frame.view.gossip!.due).toBe(false);
+        expect(frame.view.gossip!.rounds.at(-1)!.n).toBe(move.round);
+        expect(frame.view.actions).toEqual(before.actions);
       } else {
         expect(move.evidence).toEqual(before.evidence.map((e) => e.handle));
       }
@@ -589,6 +602,39 @@ describe("what the page does with a replay file", () => {
     expect(replayOf({ ...good, id: "index" }, "index")).toBeNull();
   });
 
+  it("takes a game with gossip and a game without, and nothing in between", async () => {
+    const proof = await solverMoves(lighthouse);
+    if (!proof.ok) throw new Error("expected a proof");
+    const make = async (gossip: boolean) => {
+      const made = await makeReplay(lighthouse, proof.moves, { id: "lighthouse", player: { kind: "solver" }, gossip });
+      if (!made.ok) throw new Error(made.why);
+      return JSON.parse(JSON.stringify(made.replay)) as Replay;
+    };
+    // Without gossip: the file as it was made before there was any. No frame has the part, and no move is a round.
+    const plain = await make(false);
+    expect(plain.frames.every((f) => f.view.gossip === undefined && f.move?.kind !== "gossip")).toBe(true);
+    expect(plain.frames).toHaveLength(7);
+    expect(replayOf(plain, "lighthouse")).toEqual(plain);
+    // With gossip: every frame has the part, and the round is a step of its own.
+    const talk = await make(true);
+    expect(talk.frames.every((f) => f.view.gossip !== undefined)).toBe(true);
+    expect(talk.frames.filter((f) => f.move?.kind === "gossip")).toHaveLength(1);
+    expect(replayOf(talk, "lighthouse")).toEqual(talk);
+    // A round among the moves of a game without gossip, or the part in some frames only: not a replay.
+    const stray = structuredClone(plain);
+    stray.frames[3]!.move = { kind: "gossip", round: 1 };
+    expect(replayOf(stray, "lighthouse")).toBeNull();
+    const mixed = structuredClone(plain);
+    mixed.frames[2]!.view.gossip = structuredClone(talk.frames[2]!.view.gossip!);
+    expect(replayOf(mixed, "lighthouse")).toBeNull();
+    // A round that claims a request, a listener the model picked, or a state other than done: not a replay's.
+    for (const change of [(r: Replay) => (r.frames[5]!.view.gossip!.rounds[0]!.requests = 1), (r: Replay) => (r.frames[5]!.view.gossip!.rounds[0]!.talks[0]!.by = "model"), (r: Replay) => (r.frames[5]!.view.gossip!.rounds[0]!.state = "interrupted"), (r: Replay) => (r.frames[5]!.view.gossip!.rounds[0]!.talks[0]!.to = "P99")]) {
+      const bad = structuredClone(talk);
+      change(bad);
+      expect(replayOf(bad, "lighthouse")).toBeNull();
+    }
+  });
+
   it("reads nothing it has not checked: with any one part of the file missing, of another kind, or added, it is not a replay", () => {
     // One copy of the file, changed in one place at a time and put right again: several thousand
     // variants, each checked whole. Whatever is taken for a replay when it should not be is listed.
@@ -604,7 +650,9 @@ describe("what the page does with a replay file", () => {
       const key = path.at(-1)!;
       const was = parent[key];
       // Taken away. (An item taken out of a list leaves a shorter list, which can still be a replay: lists are checked item by item.)
-      if (typeof key === "string") {
+      // Two marks may be left off: who told a topic's holder, and whose statement someone is
+      // repeating. Without the mark the topic or statement is an ordinary one, which is a replay too.
+      if (typeof key === "string" && key !== "told" && key !== "from") {
         delete parent[key];
         tried(`without ${path.join(".")}`);
       }

@@ -17,6 +17,8 @@ const str: Check = (x) => typeof x === "string";
 const bool: Check = (x) => typeof x === "boolean";
 const count: Check = (x) => typeof x === "number" && Number.isInteger(x) && x >= 0;
 const absent: Check = (x) => x === undefined;
+/** A part that may be left out. When it is there, it must be as it should be. */
+const optional = (check: Check): Check => (x) => x === undefined || check(x);
 const oneOf = (...values: readonly unknown[]): Check => (x) => values.includes(x);
 const list = (item: Check): Check => (x) => Array.isArray(x) && x.every(item);
 /** An object with exactly these parts in it, each as it should be. A part that is not named is not allowed. */
@@ -44,7 +46,21 @@ const card = { id: isReplayId as Check, title: text, setting: text, suspects: co
 const isCard = shape(card);
 
 const move: Check = (x) =>
-  shape({ kind: oneOf("ask"), person, topic: handle("T"), label: text })(x) || shape({ kind: oneOf("inspect"), inspection: handle("I"), label: text })(x) || shape({ kind: oneOf("accuse"), person, evidence: list(handle("E")) })(x);
+  shape({ kind: oneOf("ask"), person, topic: handle("T"), label: text })(x) ||
+  shape({ kind: oneOf("inspect"), inspection: handle("I"), label: text })(x) ||
+  shape({ kind: oneOf("accuse"), person, evidence: list(handle("E")) })(x) ||
+  shape({ kind: oneOf("gossip"), round: count })(x);
+
+/**
+ * Gossip as a replay holds it. A replay is played with the model off, so every round is done,
+ * code picked every listener, and nothing was sent. A replay of a game without gossip has no
+ * such part at all, and neither does one made before there was gossip.
+ */
+const gossip = shape({
+  every: count,
+  due: bool,
+  rounds: list(shape({ n: count, after: count, state: oneOf("done"), chosenBy: oneOf("code"), talks: list(shape({ from: person, to: person, by: oneOf("code") })), requests: oneOf(0), nano: oneOf(0) })),
+});
 
 const verdict = shape({ accused: person, cited: list(handle("E")), outcome: oneOf("solved"), missing: list(str), open: list(person), accusedRuledOut: bool, actions: count });
 const reveal = shape({
@@ -71,10 +87,11 @@ const viewCheck = (last: boolean): Check =>
     actions: shape({ used: count, cap: count, left: count }),
     model: oneOf("off"),
     evidence: list(shape({ handle: handle("E"), text, note: bool })),
-    statements: list(shape({ key: str, turn: count, person, text, contradictedBy: list(handle("E")) })),
-    topics: list(shape({ handle: handle("T"), person, label: text, heard: bool })),
+    statements: list(shape({ key: str, turn: count, person, text, contradictedBy: list(handle("E")), from: optional(person) })),
+    topics: list(shape({ handle: handle("T"), person, label: text, heard: bool, told: optional(shape({ by: person, round: count })) })),
     inspections: list(shape({ handle: handle("I"), label: text, done: bool })),
     transcript: list(shape({ n: count, person, question: str, line: str, language: oneOf("en", "zh"), source: str, noted: count })),
+    gossip: optional(gossip),
     cost: shape({ requests: count, nano: count, unfinished: count }),
     over: oneOf(last),
     verdict: last ? verdict : absent,
@@ -108,8 +125,20 @@ export function replayOf(data: unknown, id: string): Replay | null {
   if (!shape({ ...card, version: oneOf(1), frames: (x) => (x as unknown[]).every(frame) })(data)) return null;
   const replay = data as Replay;
   if (replay.id !== id) return null;
-  // People a move or a statement names are on the roster.
+  // A game has gossip from its first frame to its last, or not at all, and only a game with
+  // gossip has a round among its moves.
+  const withGossip = replay.frames[0]!.view.gossip !== undefined;
+  for (const f of replay.frames) if ((f.view.gossip !== undefined) !== withGossip || (f.move?.kind === "gossip" && !withGossip)) return null;
+  // People a move, a statement, a topic or a round of gossip names are on the roster.
   const roster = new Set(replay.frames[0]!.view.people.map((p) => p.handle));
-  for (const f of replay.frames) if (f.move && f.move.kind !== "inspect" && !roster.has(f.move.person)) return null;
+  for (const f of replay.frames) {
+    if (f.move && (f.move.kind === "ask" || f.move.kind === "accuse") && !roster.has(f.move.person)) return null;
+    const named = [
+      ...f.view.statements.flatMap((s) => (s.from === undefined ? [s.person] : [s.person, s.from])),
+      ...f.view.topics.flatMap((t) => (t.told === undefined ? [t.person] : [t.person, t.told.by])),
+      ...(f.view.gossip?.rounds ?? []).flatMap((r) => r.talks.flatMap((t) => [t.from, t.to])),
+    ];
+    if (named.some((p) => !roster.has(p))) return null;
+  }
   return replay;
 }
