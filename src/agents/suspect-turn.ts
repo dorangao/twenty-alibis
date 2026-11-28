@@ -67,6 +67,8 @@ export interface NotebookStatement {
   assertion: string;
   en: string;
   zh: string;
+  /** Set when the speaker is repeating someone else: whose statement it is. Absent when it is the speaker's own. */
+  source?: string;
 }
 
 export interface SuspectTurn {

@@ -130,11 +130,13 @@ describe("a case read from a file, for playing", () => {
 
 describe("the terminal game's arguments", () => {
   it("reads the forms it knows", () => {
-    expect(parsePlayArgs([])).toEqual({ ok: true, language: "en", live: false, casePath: null });
-    expect(parsePlayArgs(["--zh"])).toEqual({ ok: true, language: "zh", live: false, casePath: null });
-    expect(parsePlayArgs(["--live", "--zh"])).toEqual({ ok: true, language: "zh", live: true, casePath: null });
-    expect(parsePlayArgs(["--case", "a/b.json"])).toEqual({ ok: true, language: "en", live: false, casePath: "a/b.json" });
-    expect(parsePlayArgs(["--case=a/b.json", "--zh"])).toEqual({ ok: true, language: "zh", live: false, casePath: "a/b.json" });
+    expect(parsePlayArgs([])).toEqual({ ok: true, language: "en", live: false, gossip: false, casePath: null });
+    expect(parsePlayArgs(["--zh"])).toEqual({ ok: true, language: "zh", live: false, gossip: false, casePath: null });
+    expect(parsePlayArgs(["--live", "--zh"])).toEqual({ ok: true, language: "zh", live: true, gossip: false, casePath: null });
+    expect(parsePlayArgs(["--case", "a/b.json"])).toEqual({ ok: true, language: "en", live: false, gossip: false, casePath: "a/b.json" });
+    expect(parsePlayArgs(["--case=a/b.json", "--zh"])).toEqual({ ok: true, language: "zh", live: false, gossip: false, casePath: "a/b.json" });
+    expect(parsePlayArgs(["--gossip", "--zh"])).toEqual({ ok: true, language: "zh", live: false, gossip: true, casePath: null });
+    expect(parsePlayArgs(["--gossip", "--gossip"])).toMatchObject({ ok: false });
   });
 
   it("refuses everything else, so a mistyped flag never changes what the game may send", () => {

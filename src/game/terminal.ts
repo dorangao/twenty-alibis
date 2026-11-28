@@ -2,7 +2,8 @@ import type { Lang } from "../agents/render";
 import type { Case, Text } from "../case/schema";
 import type { Metered } from "../metered";
 import { NOTE_MARK, PROOF_RULES } from "./rules";
-import { accuse, actionsLeft, ask, inspect, inspectionMenu, notebook, reveal, SessionError, startSession, topicMenu, type Session, type Verdict } from "./session";
+import type { GossipRound } from "./gossip";
+import { accuse, actionsLeft, ask, gossipDue, gossipRound, inspect, inspectionMenu, notebook, reveal, SessionError, startSession, topicMenu, type Session, type Verdict } from "./session";
 
 /**
  * The game as lines of text: one command in, some lines out.
@@ -13,6 +14,10 @@ import { accuse, actionsLeft, ask, inspect, inspectionMenu, notebook, reveal, Se
  *
  * With the model off, a topic picked from the menu still works: the suspect's statement is
  * worded by code and nothing is sent. A typed question needs the model.
+ *
+ * With gossip on, a round runs by itself as soon as it is due, right after the action that
+ * made it due, and the game says who spoke with whom. With the model off, code picks who is
+ * told and nothing is sent.
  */
 
 export interface Game {
@@ -36,6 +41,7 @@ const HELP: Record<Lang, string[]> = {
     "  records                what you can inspect",
     "  inspect <n>            inspect record number n",
     "  notebook               what you hold: evidence, statements, contradictions",
+    "  talk                   who has spoken with whom between your questions",
     "  accuse <person> <n…>   name the culprit and cite the evidence that proves it, by number",
     "  accuse <person> all    the same, citing every numbered item of evidence you hold",
     "  reveal                 the truth, after you have accused",
@@ -52,6 +58,7 @@ const HELP: Record<Lang, string[]> = {
     "  records                可以查看的记录",
     "  inspect <n>            查看第 n 项",
     "  notebook               笔记本：证据、陈述、矛盾",
+    "  talk                   你提问的间隙，谁和谁私下谈过",
     "  accuse <人> <n…>       指认凶手，并按编号引用能证明的证据",
     "  accuse <人> all        同上，引用你手里所有带编号的证据条目",
     "  reveal                 指认之后公开真相",
@@ -80,6 +87,7 @@ const ERRORS: Record<string, Text> = {
   "not-available": { en: "There is nothing by that name open to you.", zh: "没有这一项，或者它还没有对你开放。" },
   "bad-question": { en: "A question needs some words, and at most 300 characters.", zh: "提问不能为空，且不超过 300 个字符。" },
   "not-held": { en: "You can only cite evidence that is in your notebook.", zh: "只能引用笔记本里已有的证据。" },
+  "gossip-due": { en: "The people in the house are talking among themselves. Try again in a moment.", zh: "在场的人正在私下交谈。请稍后再试。" },
 };
 
 /** The model switched off: every request is refused before anything is built or sent. */
@@ -101,10 +109,12 @@ export interface GameOptions {
   language?: Lang;
   /** True when the caller knows no request can be sent. The game then says so once per question instead of reporting a refusal. */
   modelOff?: boolean;
+  /** True for a game with gossip rounds. */
+  gossip?: boolean;
 }
 
 export function createGame(c: Case, metered: Metered, sessionId: string, options: GameOptions = {}): Game {
-  let s = startSession(c, sessionId);
+  let s = startSession(c, sessionId, { gossip: options.gossip === true });
   let lang: Lang = options.language ?? "en";
   let quit = false;
 
@@ -154,7 +164,37 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
   const topics = (id: string) => {
     const menu = topicMenu(c, s, id);
     if (menu.length === 0) return [say(`${nameOf(id)} has no topic to offer right now.`, `${nameOf(id)}现在没有可问的话题。`)];
-    return menu.map((m, i) => `  ${i + 1}. ${t(m.label)}${m.heard ? say("  (heard)", "（已听过）") : ""}`);
+    return menu.map((m, i) => `  ${i + 1}. ${t(m.label)}${m.gossip !== undefined && !m.heard ? say("  (new, from gossip)", "（新，来自私下交谈）") : ""}${m.heard ? say("  (heard)", "（已听过）") : ""}`);
+  };
+
+  /** One gossip round, as the player is told of it: who spoke with whom, never what was said. */
+  const talkOf = (round: GossipRound): string[] => {
+    const head = say(`Round ${round.n}, after ${round.at} actions:`, `第 ${round.n} 轮，在第 ${round.at} 次行动之后：`);
+    if (round.events.length === 0) return [head, say("  nobody passed anything on", "  没有人传话")];
+    return [head, ...round.events.map((e) => say(`  ${nameOf(e.from)} spoke with ${nameOf(e.to)}`, `  ${nameOf(e.from)}找${nameOf(e.to)}谈过`))];
+  };
+  const talk = (): string[] => {
+    if (!s.gossip) return [say("This game has no gossip rounds.", "这一局没有私下交谈。")];
+    if (s.gossip.rounds.length === 0) return [say("Nobody has spoken with anybody yet.", "还没有人私下交谈。")];
+    return s.gossip.rounds.flatMap(talkOf);
+  };
+  /** Run every round that is due, and say what happened. */
+  const rounds = async (): Promise<string[]> => {
+    const lines: string[] = [];
+    while (gossipDue(c, s)) {
+      const done = await gossipRound(metered, c, s, { model: options.modelOff !== true, cacheKey: `gossip:${c.id}` });
+      s = done.session;
+      lines.push(
+        say("While you were busy, the people in the house talked among themselves.", "你忙着查案的时候，在场的人私下谈了谈。"),
+        ...talkOf(done.round).slice(1),
+        say(
+          `  ${done.round.chosenBy === "model" ? "Where there was a choice, the speaker's agent chose whom to tell." : "Code chose who was told; nothing was sent."} Ask a listener what they were told with \`topics\`.`,
+          `  ${done.round.chosenBy === "model" ? "有不止一个人可选时，由说话者的智能体决定告诉谁。" : "由代码决定告诉谁，没有发送请求。"}用 topics 可以问听的人听到了什么。`,
+        ),
+      );
+      if (done.round.problem && options.modelOff !== true) lines.push(say(`  (the model could not be used for some of them: ${done.round.problem})`, `  （其中一些无法使用模型：${done.round.problem}）`));
+    }
+    return lines;
   };
   const records = () => {
     const menu = inspectionMenu(c, s);
@@ -170,7 +210,7 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
     if (b.contradictions.length > 0) {
       lines.push(say("Contradictions:", "矛盾："));
       for (const x of b.contradictions) {
-        const st = b.statements.find((y) => y.suspect === x.suspect && y.assertion === x.assertion)!;
+        const st = b.statements.find((y) => y.suspect === x.suspect && y.assertion === x.assertion && y.source === x.source)!;
         const n = b.evidence.findIndex((e) => e.id === x.evidence) + 1;
         lines.push(say(`  ${nameOf(x.suspect)} said “${st.en}” Record ${n} says otherwise.`, `  ${nameOf(x.suspect)}说“${st.zh}”，与第 ${n} 项记录不符。`));
       }
@@ -248,6 +288,9 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
       case "notebook":
       case "笔记":
         return book();
+      case "talk":
+      case "交谈":
+        return talk();
       case "accuse": {
         const id = person(words[1]);
         if (!id) return noSuchPerson();
@@ -299,7 +342,9 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
     opening,
     handle: async (line) => {
       try {
-        return await run(line);
+        const lines = await run(line);
+        // A round that this command made due runs now, so the next command never finds one waiting.
+        return [...lines, ...(await rounds())];
       } catch (error) {
         if (error instanceof SessionError) return [t(ERRORS[error.code] ?? { en: error.message, zh: error.message })];
         throw error;

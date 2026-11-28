@@ -6,13 +6,15 @@
  *   npm run play -- --zh              the same, in Chinese
  *   npm run play -- --case <file>     a saved case instead, for instance cases/generated/pilot-a-2.json
  *   npm run play -- --live            use Muse Ember through the spend guard
+ *   npm run play -- --gossip          with gossip rounds: every four actions the suspects talk among themselves
  *
  * A case from a file is checked before it is played: it must be well formed, hold together,
  * and be provable by a player. A file that does not pass is not played. That check is not the
  * case writer's quality check, so playing a file here does not mean it is fit for release.
  *
  * With the model off, a topic picked from the menu still gives the suspect's statement,
- * worded by code. A question in your own words needs the model.
+ * worded by code. A question in your own words needs the model. In a gossip round, code picks
+ * who is told and nothing is sent; with `--live`, each speaker's agent picks, one request each.
  *
  * `--live` sends real requests only if a person has authorized paid requests on the
  * envelope (`npm run spend -- allow-paid "..."`) before the game starts. If they are closed
@@ -32,7 +34,7 @@ import { say } from "./say";
 // The arguments and the case are settled before anything is connected.
 const args = parsePlayArgs(process.argv.slice(2));
 if (!args.ok) {
-  say(`${args.why[0]}. Usage: [--zh] [--case <file>] [--live].`, `${args.why[1]}。用法：[--zh] [--case <文件>] [--live]。`);
+  say(`${args.why[0]}. Usage: [--zh] [--case <file>] [--live] [--gossip].`, `${args.why[1]}。用法：[--zh] [--case <文件>] [--live] [--gossip]。`);
   process.exit(1);
 }
 const { live, language } = args;
@@ -75,7 +77,7 @@ if (runtime) {
 // on every request, so revoking the authorization stops it.
 const { metered, modelOff } = pinAtLaunch(runtime?.metered ?? null, paidAllowed);
 // A random session id, so no two runs can ever share a request id.
-const game = createGame(c, metered, `play-${randomUUID()}`, { language, modelOff });
+const game = createGame(c, metered, `play-${randomUUID()}`, { language, modelOff, gossip: args.gossip });
 console.log();
 for (const line of game.opening()) console.log(line);
 

@@ -130,6 +130,7 @@ const ERRORS: Record<ErrorCode, { status: number; text: Text }> = {
   "not-available": { status: 404, text: { en: "That is not open to you right now.", zh: "这一项现在还不能用。" } },
   "bad-question": { status: 400, text: { en: `A question must have some words in it, and at most ${MAX_QUESTION_CHARS} characters.`, zh: `提问不能为空，且最多 ${MAX_QUESTION_CHARS} 个字符。` } },
   "not-held": { status: 400, text: { en: "You can only cite evidence that is in your notebook.", zh: "只能引用笔记本里已有的证据。" } },
+  "gossip-due": { status: 409, text: { en: "The people in the house are talking among themselves. That comes first; then ask again.", zh: "在场的人正在私下交谈。等他们谈完，再问一次。" } },
 };
 
 const NOTICES: Record<NonNullable<AskNote["notice"]>["code"], Text> = {
