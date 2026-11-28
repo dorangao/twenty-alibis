@@ -1,11 +1,13 @@
 import { languageOf } from "../agents/line-guard";
-import type { Lang } from "../agents/render";
-import { deflection, suspectTurn, type SuspectTurn } from "../agents/suspect-turn";
+import { chooseRecipient } from "../agents/gossip-turn";
+import { renderHearsay, type Lang } from "../agents/render";
+import { deflection, suspectTurn, type NotebookStatement, type SuspectTurn } from "../agents/suspect-turn";
 import { isOpen } from "../case/access";
 import { proofRules } from "../case/proof";
 import type { Case, Evidence, Text } from "../case/schema";
 import { contradicts } from "../case/truth";
 import type { Metered } from "../metered";
+import { GOSSIP_WAVE, hearsayEvent, hearsayTopics, planRound, roundDue, type GossipEvent, type GossipRound, type GossipState } from "./gossip";
 
 /**
  * One player's game on one case.
@@ -23,6 +25,8 @@ import type { Metered } from "../metered";
  *    is shown when a held, authoritative record and a heard statement cannot both be true.
  *  - An accusation is scored with the solver's own rules of proof, on the evidence the
  *    player cites. It ends the session. Only then can the truth be revealed.
+ *  - A session started with gossip has rounds (see gossip.ts). When one is due, a new
+ *    question or inspection waits until it has run; a saved answer and the accusation do not.
  */
 
 export type SessionErrorCode =
@@ -34,7 +38,9 @@ export type SessionErrorCode =
   | "not-available"
   | "bad-question"
   /** An accusation cited evidence the player does not hold. */
-  | "not-held";
+  | "not-held"
+  /** A gossip round is due: it runs before the next new question or inspection. */
+  | "gossip-due";
 
 export class SessionError extends Error {
   override readonly name = "SessionError";
@@ -96,10 +102,12 @@ export interface Session {
   asked: number;
   turns: TurnRecord[];
   verdict?: Verdict;
+  /** Present when the session has gossip rounds. A session without it never has one. */
+  gossip?: GossipState;
 }
 
-export function startSession(c: Case, id: string): Session {
-  return { id, caseId: c.id, actions: 0, evidence: [...c.briefing.evidence], inspections: [], asked: 0, turns: [] };
+export function startSession(c: Case, id: string, options: { gossip?: boolean } = {}): Session {
+  return { id, caseId: c.id, actions: 0, evidence: [...c.briefing.evidence], inspections: [], asked: 0, turns: [], ...(options.gossip ? { gossip: { rounds: [] } } : {}) };
 }
 
 /** Everything the player holds: evidence, and the statements they have heard. */
@@ -118,13 +126,19 @@ function mustBeLive(session: Session): void {
 
 // ---- What is on offer ----
 
-/** The topics a suspect can be asked about now. `heard` is true when its statements are already in the notebook. */
-export function topicMenu(c: Case, session: Session, suspect: string): { id: string; label: Text; heard: boolean }[] {
+/**
+ * The topics a suspect can be asked about now. `heard` is true when its statements are already
+ * in the notebook. After the suspect's own topics come the things it has been told in gossip:
+ * `gossip` is then the round it was told in.
+ */
+export function topicMenu(c: Case, session: Session, suspect: string): { id: string; label: Text; heard: boolean; gossip?: number }[] {
   check(c, session);
   const held = heldBy(session);
-  return c.actions.topics
-    .filter((t) => t.suspect === suspect && isOpen(t, held))
-    .map((t) => ({ id: t.id, label: t.label, heard: session.turns.some((r) => r.turn.suspect === suspect && r.turn.topic === t.id) }));
+  const heard = (topic: string): boolean => session.turns.some((r) => r.turn.suspect === suspect && r.turn.topic === topic);
+  return [
+    ...c.actions.topics.filter((t) => t.suspect === suspect && isOpen(t, held)).map((t) => ({ id: t.id, label: t.label, heard: heard(t.id) })),
+    ...hearsayTopics(c, session.gossip, suspect).map((t) => ({ id: t.id, label: t.label, heard: heard(t.id), gossip: t.round })),
+  ];
 }
 
 /** The records and places a player can look at now. */
@@ -144,6 +158,7 @@ export function inspect(c: Case, session: Session, inspectionId: string): { sess
   const evidence = c.evidence.filter((e) => inspection.yields.includes(e.id));
   if (session.inspections.includes(inspectionId)) return { session, evidence, repeated: true };
   if (actionsLeft(c, session) === 0) throw new SessionError("cap", "no actions left");
+  mustNotBeDue(c, session);
   return {
     session: {
       ...session,
@@ -194,6 +209,25 @@ export async function ask(metered: Metered, c: Case, session: Session, args: Ask
   const typed = args.question?.trim() ?? "";
 
   let question: string;
+  const told = args.topic !== undefined ? hearsayEvent(c, session.gossip, args.topic) : null;
+  if (told && args.topic !== undefined) {
+    // Something this suspect was told in gossip. The answer is the speaker's statement,
+    // attributed to the speaker and worded by code. Nothing is sent.
+    if (told.event.to !== args.suspect) throw new SessionError("not-available", `${args.suspect} has no topic called ${args.topic}`);
+    const saved = session.turns.find((r) => r.turn.suspect === args.suspect && r.turn.topic === args.topic);
+    if (saved) return { session, turn: inLanguage(session, saved, args.language ?? saved.turn.language), replayed: true, recorded: true };
+    if (actionsLeft(c, session) === 0) throw new SessionError("cap", "no actions left");
+    mustNotBeDue(c, session);
+    const language = args.language ?? "en";
+    const statements: NotebookStatement[] = told.topic.yields.flatMap((id) => {
+      const assertion = c.assertions.find((a) => a.id === id);
+      return assertion ? [{ assertion: id, en: renderHearsay(c, told.event.from, assertion, "en"), zh: renderHearsay(c, told.event.from, assertion, "zh"), source: told.event.from }] : [];
+    });
+    const n = session.asked + 1;
+    const label = hearsayTopics(c, session.gossip, args.suspect).find((t) => t.id === args.topic)!.label;
+    const turn: SuspectTurn = { suspect: args.suspect, topic: args.topic, topicGiven: true, language, statements, line: statements.map((s) => s[language]).join(" "), source: "rendered", rejections: [], requests: 0, costNano: 0 };
+    return { session: { ...session, asked: n, actions: session.actions + 1, turns: [...session.turns, { n, question: label[language], menu, turn }] }, turn, replayed: false, recorded: true };
+  }
   if (args.topic !== undefined) {
     const topic = c.actions.topics.find((t) => t.id === args.topic && t.suspect === args.suspect && isOpen(t, held));
     if (!topic) throw new SessionError("not-available", `${args.suspect} has no topic called ${args.topic}`);
@@ -224,6 +258,7 @@ export async function ask(metered: Metered, c: Case, session: Session, args: Ask
   }
   if ([...question].length > MAX_QUESTION_CHARS) throw new SessionError("bad-question", `a question may have at most ${MAX_QUESTION_CHARS} characters`);
   if (actionsLeft(c, session) === 0) throw new SessionError("cap", "no actions left");
+  mustNotBeDue(c, session);
 
   const n = session.asked + 1;
   const turn = await suspectTurn({
@@ -258,14 +293,90 @@ function inLanguage(session: Session, saved: TurnRecord, language: Lang): Suspec
     : { ...turn, language, line: deflection(language, `${session.id}:${saved.n}`), source: "deflection" };
 }
 
+// ---- Gossip ----
+
+function mustNotBeDue(c: Case, session: Session): void {
+  if (roundDue(c, session)) throw new SessionError("gossip-due", "a gossip round is due before the next action");
+}
+
+/** True when a gossip round must run before the player's next new question or inspection. */
+export function gossipDue(c: Case, session: Session): boolean {
+  check(c, session);
+  return roundDue(c, session);
+}
+
+export interface GossipArgs {
+  /**
+   * True when the speakers' agents pick whom to tell. False when code does: the first
+   * candidate, and nothing is sent.
+   */
+  model: boolean;
+  cacheKey?: string;
+}
+
+/**
+ * Run the round that is due.
+ *
+ * Every speaker decides on the same snapshot: the session as it stands now. With the model
+ * on, the requests go out in waves of at most four, each named "<session>:g<round>:<speaker>".
+ * A speaker with a single candidate is not asked. A request that is refused, fails, or comes
+ * back unusable makes no event; after a wave with a refusal or a failure, no further wave is
+ * sent. The events are then applied together, in the speakers' order.
+ *
+ * The round is kept even when it has no events: the clock has moved.
+ */
+export async function gossipRound(metered: Metered, c: Case, session: Session, args: GossipArgs): Promise<{ session: Session; round: GossipRound }> {
+  check(c, session);
+  mustBeLive(session);
+  if (!session.gossip || !roundDue(c, session)) throw new SessionError("not-available", "no gossip round is due");
+  const n = session.gossip.rounds.length + 1;
+  const plans = planRound(c, session.gossip, heldBy(session), n);
+  const calls = args.model ? plans.filter((p) => p.candidates.length > 1) : [];
+  const picked = new Map<string, string>();
+  for (const plan of plans) if (!calls.includes(plan)) picked.set(plan.speaker, plan.candidates[0]!);
+
+  let requests = 0;
+  let costNano = 0;
+  let problem: string | undefined;
+  for (let i = 0; i < calls.length && problem === undefined; i += GOSSIP_WAVE) {
+    const wave = calls.slice(i, i + GOSSIP_WAVE);
+    const choices = await Promise.all(
+      wave.map((plan) => chooseRecipient({ metered, c, plan, attemptId: `${session.id}:g${n}:${plan.index}`, ...(args.cacheKey ? { cacheKey: args.cacheKey } : {}) })),
+    );
+    for (const [j, choice] of choices.entries()) {
+      requests += choice.requests;
+      costNano += choice.costNano;
+      problem ??= choice.problem;
+      if (choice.to !== null) picked.set(wave[j]!.speaker, choice.to);
+    }
+  }
+
+  const events: GossipEvent[] = plans.flatMap((plan) => (picked.has(plan.speaker) ? [{ from: plan.speaker, to: picked.get(plan.speaker)!, topic: plan.topic }] : []));
+  const round: GossipRound = {
+    n,
+    at: session.actions,
+    events,
+    chosenBy: args.model ? "model" : "code",
+    speakers: plans.length,
+    calls: calls.length,
+    requests,
+    costNano,
+    ...(problem !== undefined ? { problem } : {}),
+  };
+  return { session: { ...session, gossip: { rounds: [...session.gossip.rounds, round] } }, round };
+}
+
 // ---- The notebook ----
 
 export interface Notebook {
   evidence: { id: string; kind: Evidence["kind"]; authoritative: boolean; text: Text }[];
-  /** Each statement once, at the turn it was first heard, worded by code. */
-  statements: { turn: number; suspect: string; assertion: string; en: string; zh: string }[];
-  /** A heard statement and a held authoritative record that cannot both be true. */
-  contradictions: { suspect: string; assertion: string; evidence: string }[];
+  /**
+   * Each statement once for each person who made it to the player, at the turn it was first
+   * heard, worded by code. `source` is set when that person was repeating someone else.
+   */
+  statements: { turn: number; suspect: string; assertion: string; en: string; zh: string; source?: string }[];
+  /** A heard statement and a held authoritative record that cannot both be true. `suspect` is who said it to the player. */
+  contradictions: { suspect: string; assertion: string; evidence: string; source?: string }[];
 }
 
 export function notebook(c: Case, session: Session): Notebook {
@@ -275,7 +386,7 @@ export function notebook(c: Case, session: Session): Notebook {
   for (const record of session.turns) {
     for (const s of record.turn.statements) {
       if (statements.some((x) => x.suspect === record.turn.suspect && x.assertion === s.assertion)) continue;
-      statements.push({ turn: record.n, suspect: record.turn.suspect, assertion: s.assertion, en: s.en, zh: s.zh });
+      statements.push({ turn: record.n, suspect: record.turn.suspect, assertion: s.assertion, en: s.en, zh: s.zh, ...(s.source !== undefined ? { source: s.source } : {}) });
     }
   }
   const prop = new Map(c.assertions.map((a) => [a.id, a.prop]));
@@ -285,7 +396,9 @@ export function notebook(c: Case, session: Session): Notebook {
     if (!said) continue;
     for (const e of evidence) {
       if (!e.authoritative) continue;
-      if (e.proves.some((id) => prop.has(id) && contradicts(prop.get(id)!, said))) contradictions.push({ suspect: s.suspect, assertion: s.assertion, evidence: e.id });
+      if (e.proves.some((id) => prop.has(id) && contradicts(prop.get(id)!, said))) {
+        contradictions.push({ suspect: s.suspect, assertion: s.assertion, evidence: e.id, ...(s.source !== undefined ? { source: s.source } : {}) });
+      }
     }
   }
   return { evidence: evidence.map((e) => ({ id: e.id, kind: e.kind, authoritative: e.authoritative, text: e.text })), statements, contradictions };
@@ -351,8 +464,9 @@ export function reveal(c: Case, session: Session): Reveal {
       s.lies.map((assertion) => ({
         suspect: s.id,
         assertion,
-        heard: book.statements.some((x) => x.suspect === s.id && x.assertion === assertion),
-        caught: book.contradictions.some((x) => x.suspect === s.id && x.assertion === assertion),
+        // A lie counts as heard when it reached the player from the liar or through someone the liar told.
+        heard: book.statements.some((x) => (x.source ?? x.suspect) === s.id && x.assertion === assertion),
+        caught: book.contradictions.some((x) => (x.source ?? x.suspect) === s.id && x.assertion === assertion),
       })),
     ),
   };

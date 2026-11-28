@@ -39,3 +39,14 @@ export function renderAssertion(c: Case, speaker: string, assertion: Assertion, 
   }
   return p.value ? `${who}有动机：${why}` : `${who}没有这个动机：${why}`;
 }
+
+/**
+ * A statement at second hand: what `source` says, as someone it was told to repeats it. The
+ * statement inside the quotation marks is `source`'s own sentence, word for word as code
+ * renders it. Nothing is added and nothing is vouched for.
+ */
+export function renderHearsay(c: Case, source: string, assertion: Assertion, lang: Lang): string {
+  const who = nameOf(c, "suspect", source, lang);
+  const said = renderAssertion(c, source, assertion, lang);
+  return lang === "en" ? `${who} told me: “${said}”` : `${who}跟我说：“${said}”`;
+}

@@ -50,7 +50,7 @@ export function loadCase(text: string): { ok: true; c: Case } | { ok: false; ref
   return { ok: true, c: gate.validation.case };
 }
 
-export type PlayArgs = { ok: true; language: "en" | "zh"; live: boolean; casePath: string | null } | { ok: false; why: Why };
+export type PlayArgs = { ok: true; language: "en" | "zh"; live: boolean; gossip: boolean; casePath: string | null } | { ok: false; why: Why };
 
 /**
  * The arguments of the terminal game, read whole. `--live` can spend, so nothing is guessed:
@@ -59,6 +59,7 @@ export type PlayArgs = { ok: true; language: "en" | "zh"; live: boolean; casePat
 export function parsePlayArgs(argv: readonly string[]): PlayArgs {
   let zh = false;
   let live = false;
+  let gossip = false;
   let casePath: string | null = null;
   const refuse = (en: string, zh: string): PlayArgs => ({ ok: false, why: [en, zh] });
   for (let i = 0; i < argv.length; i++) {
@@ -69,6 +70,9 @@ export function parsePlayArgs(argv: readonly string[]): PlayArgs {
     } else if (token === "--live") {
       if (live) return refuse("--live was given twice", "--live 出现了两次");
       live = true;
+    } else if (token === "--gossip") {
+      if (gossip) return refuse("--gossip was given twice", "--gossip 出现了两次");
+      gossip = true;
     } else if (token === "--case" || token.startsWith("--case=")) {
       if (casePath !== null) return refuse("--case was given twice", "--case 出现了两次");
       const value = token === "--case" ? argv[++i] : token.slice("--case=".length);
@@ -76,5 +80,5 @@ export function parsePlayArgs(argv: readonly string[]): PlayArgs {
       casePath = value;
     } else return refuse(`unknown argument "${token}"`, `无法识别的参数 "${token}"`);
   }
-  return { ok: true, language: zh ? "zh" : "en", live, casePath };
+  return { ok: true, language: zh ? "zh" : "en", live, gossip, casePath };
 }

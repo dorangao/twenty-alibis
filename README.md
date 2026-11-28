@@ -143,6 +143,21 @@ A session costs at most `sessionCap` actions. Hearing a topic again, asking a su
 
 玩家点名一名嫌疑人，并从笔记本里引用证据。代码用求解器接受案件时的同一套规则来判定：引用的证据必须证明被指认者有机会、有手段、有动机，并排除其他所有人。任何满足这些条件的证据组合都被接受；嫌疑人说的话不能证明任何事。只说对名字而没有证明，会判为"说对了但未证明"，并指出缺什么。真相只在指认之后公开。重听一个话题、在话题没变的情况下向同一人问一模一样的问题、或再看一份记录，都不耗行动，也不会再调用模型；换一种说法就算新问题。用一种语言听过的话题换另一种语言重听时，显示的是代码生成的句子，因为模型的台词只有一种语言。
 
+### Gossip between questions · 提问之间的私下交谈
+
+In a game with gossip, every four actions the people in the house talk among themselves, up to three times. The truth does not move and nobody's own statement changes. What changes is who can repeat whose statement.
+
+- **Code decides who speaks, what they pass on, and who they could tell.** Up to eight suspects speak in a round, in the case's order. Each passes on one statement of its own, and only one whose topic is open to the player at that moment. Each is offered up to four people who have not heard it from them.
+- **The speaker's agent picks one of them, and that is all it does.** With the model on, each speaker is one Muse Ember request at minimal effort, at most four in flight at once, and the reply must be one letter. It is shown the public case, its own voice, its own claim and the candidates' names: nothing of the hidden truth. A reply that is not one of the letters, or was cut off, tells nobody. With the model off, code tells the first candidate and nothing is sent.
+- **The player is told who spoke with whom, not what was said.** The listener then has one more topic, "What did Ada tell you?". Asking it costs one action, sends nothing, and gives Ada's statement, attributed to her and worded by code.
+- **Hearsay is a statement, so it proves nothing.** It can open what the statement opens, a record can contradict it, and a lie that reached the player this way counts as heard. An accusation still rests on records only.
+
+Gossip only adds ways to reach statements the player could already reach, so any proof the solver found still works; a test plays the solver's proof with rounds running, whoever is told. So far it is in the terminal game (`--gossip`) and has run only against a scripted stand-in for the model: how often a real reply is usable, and what a round costs, are not measured yet. The self-play detective plays without it.
+
+开启"私下交谈"的一局里，每用掉四次行动，在场的人就会私下谈一轮，最多三轮。真相不变，每个人自己的说法也不变；变的只是谁能转述谁的话。谁开口、转述哪一句、可以告诉哪几个人，都由代码决定：每轮最多八人依次开口，各转述自己的一句陈述，而且只能是此刻玩家本来就问得到的那一句；每人有至多四个还没听过这句话的人可选。模型开启时，由开口者的智能体从中选一个人，它只做这一件事：每人一次最低推理强度的 Muse Ember 请求，同时最多四个，回复必须是一个字母；它看到的是公开案情、自己的口吻、自己的说法和候选人的名字，看不到任何隐藏的真相。回复不是候选字母或被截断，就谁也不告诉。模型关闭时，由代码告诉第一个候选人，不发送任何请求。玩家只会被告知谁找谁谈过，不会被告知谈了什么；听的人会多出一个话题"某某跟你说了什么？"，问它要用一次行动，不发送请求，得到的是那个人的陈述，注明出处，由代码写成。转述也只是陈述，不能证明任何事：它能打开那句陈述能打开的东西，记录可以与它矛盾，经由转述传到玩家耳中的谎言也算"听到了"，但指认仍然只凭记录。
+
+私下交谈只会增加拿到陈述的途径，这些陈述玩家原本就拿得到，所以求解器找到的证明依然有效；有一项测试带着交谈轮次把求解器的证明走了一遍，不论话传给了谁。目前它只在终端游戏里（`--gossip`），而且只对着脚本化的模型替身跑过：真实回复有多少可用、一轮要花多少，都还没有测。自我对弈的侦探不带私下交谈。
+
 ### How a new case is written · 新案件怎么写出来
 
 **Muse Ember writes the plot. Code builds the evidence. The solver judges the result.**
@@ -179,9 +194,9 @@ npm run play
 npm run play -- --zh
 ```
 
-The model is off in both: nothing is sent and nothing is spent. You get the briefing, question the suspects from their topic menus, inspect records, read the notebook with its contradictions, accuse, and see the truth. With the model off a suspect's statement is worded by code; a question in your own words needs the model (`npm run play -- --live`, which sends a request only if a person authorized paid requests before the game started). An accusation names the records it rests on: `accuse ada 1 2 4`, or `accuse ada all`.
+The model is off in both: nothing is sent and nothing is spent. You get the briefing, question the suspects from their topic menus, inspect records, read the notebook with its contradictions, accuse, and see the truth. With the model off a suspect's statement is worded by code; a question in your own words needs the model (`npm run play -- --live`, which sends a request only if a person authorized paid requests before the game started). An accusation names the records it rests on: `accuse ada 1 2 4`, or `accuse ada all`. Add `--gossip` for a game with gossip rounds (see above); the handwritten case is too short to reach one, so use it with a longer case from a file.
 
-以上两条命令都不调用模型，不发送任何内容，也不花钱。可以看简报、从话题菜单里审问嫌疑人、查看记录、翻笔记本和其中的矛盾、指认、最后看真相。模型关闭时嫌疑人的陈述由代码转述；用自己的话提问需要模型（`npm run play -- --live`，只有在游戏开始前已有人授权付费请求时才会真的发送）。指认时要写明依据哪些记录：`accuse 艾达 1 2 4`，或 `accuse 艾达 all`。
+以上两条命令都不调用模型，不发送任何内容，也不花钱。可以看简报、从话题菜单里审问嫌疑人、查看记录、翻笔记本和其中的矛盾、指认、最后看真相。模型关闭时嫌疑人的陈述由代码转述；用自己的话提问需要模型（`npm run play -- --live`，只有在游戏开始前已有人授权付费请求时才会真的发送）。指认时要写明依据哪些记录：`accuse 艾达 1 2 4`，或 `accuse 艾达 all`。加上 `--gossip` 就是带私下交谈的一局（见上文）；手写案件太短，到不了第一轮，请配合文件里更长的案件使用。
 
 ### Play it in a browser · 在浏览器里玩
 
