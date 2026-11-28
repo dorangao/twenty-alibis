@@ -165,15 +165,17 @@ export function compilePlot(id: string, skeleton: Skeleton, people: People): Com
     });
     briefing.push("e-papers-none");
   }
-  // A note, not proof: it tells the player whom to hear before the scene's record can be seen.
+  // A note, not proof: it tells the player whose account to hear before the scene's record can
+  // be seen. "Account", because what opens the record is holding that person's statement, and
+  // it can reach the player from them or from someone they told.
   evidence.push({
     id: "e-keeper",
     kind: "record",
     authoritative: false,
     proves: [],
     text: {
-      en: `The record of who was in the ${roomName(scene).en.toLowerCase()} is kept by ${nameOf(witness).en}. Hear them first.`,
-      zh: `${roomName(scene).zh}的出入记录由${nameOf(witness).zh}保管。先听听这个人怎么说。`,
+      en: `The record of who was in the ${roomName(scene).en.toLowerCase()} is kept by ${nameOf(witness).en}. Hear their account first.`,
+      zh: `${roomName(scene).zh}的出入记录由${nameOf(witness).zh}保管。先听听这个人的说法。`,
     },
   });
   briefing.push("e-keeper");

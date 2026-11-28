@@ -152,11 +152,19 @@ In a game with gossip, every four actions the people in the house talk among the
 - **The player is told who spoke with whom, not what was said.** The listener then has one more topic, "What did Ada tell you?". Asking it costs one action, sends nothing, and gives Ada's statement, attributed to her and worded by code.
 - **Hearsay is a statement, so it proves nothing.** It can open what the statement opens, a record can contradict it, and a lie that reached the player this way counts as heard. An accusation still rests on records only.
 
-Gossip only adds ways to reach statements the player could already reach, each for the one action it would have cost to ask the speaker. So any proof the solver found still works, and the shortest proof gets no shorter; what a player gains is a second person to ask. A test plays the solver's proof with rounds running, whoever is told. So far it is in the terminal game (`--gossip`) and has run only against a scripted stand-in for the model: how often a real reply is usable, and what a round costs, are not measured yet. The self-play detective plays without it.
+Gossip only adds ways to reach statements the player could already reach, each for the one action it would have cost to ask the speaker. So any proof the solver found still works, and the shortest proof gets no shorter; what a player gains is a second person to ask. A test plays the solver's proof with rounds running, whoever is told.
+
+Every game started in the browser has gossip, and so has the terminal game with `--gossip`. In the browser a round runs by itself as soon as it is due, and a panel lists who has spoken with whom. On a server, a round is written down as closed and empty before its first request goes out: if the server is lost in the middle, the game stands with that round over, the page says it did not finish, and its requests are never sent again. What such a round cost, if anything, only the spend guard's own count knows; the page counts it as one unfinished thing.
+
+So far gossip has run only against a scripted stand-in for the model: how often a real reply is usable, and what a round costs, are not measured yet. The self-play detective plays without it, and a replay of one of its games is shown without it, as it was played.
 
 开启"私下交谈"的一局里，每用掉四次行动，在场的人就会私下谈一轮，最多三轮（案件自带的话题和可查看项不到八个时，比如手写案件，改为每两次行动一轮）。真相不变，每个人自己的说法也不变；变的只是谁能转述谁的话。谁开口、转述哪一句、可以告诉哪几个人，都由代码决定：每轮最多八人依次开口，各转述自己的一句陈述，而且只能是此刻玩家本来就问得到的那一句；每人有至多四个还没听过这句话的人可选。模型开启时，由开口者的智能体从中选一个人，它只做这一件事：有两个以上的人可选时，每人一次最低推理强度的 Muse Ember 请求，同时最多四个，回复必须指明一个字母；只剩一个人可告诉时不问模型，由代码告诉那个人，不发送请求；它看到的是公开案情、自己的口吻、自己的说法和候选人的名字，看不到任何隐藏的真相。回复不是候选字母、被截断，或者请求被额度守卫拒绝，就谁也不告诉：开局时模型是开着的一局里，代码不会替它免费选人。开局时模型就关着的一局里，由代码告诉第一个候选人，不发送任何请求。玩家只会被告知谁找谁谈过，不会被告知谈了什么；听的人会多出一个话题"某某跟你说了什么？"，问它要用一次行动，不发送请求，得到的是那个人的陈述，注明出处，由代码写成。转述也只是陈述，不能证明任何事：它能打开那句陈述能打开的东西，记录可以与它矛盾，经由转述传到玩家耳中的谎言也算"听到了"，但指认仍然只凭记录。
 
-私下交谈只会增加拿到陈述的途径，这些陈述玩家原本就拿得到，而且同样要用一次行动。所以求解器找到的证明依然有效，最短的证明也不会变得更短；玩家多出来的，是另一个可以问的人。有一项测试带着交谈轮次把求解器的证明走了一遍，不论话传给了谁。目前它只在终端游戏里（`--gossip`），而且只对着脚本化的模型替身跑过：真实回复有多少可用、一轮要花多少，都还没有测。自我对弈的侦探不带私下交谈。
+私下交谈只会增加拿到陈述的途径，这些陈述玩家原本就拿得到，而且同样要用一次行动。所以求解器找到的证明依然有效，最短的证明也不会变得更短；玩家多出来的，是另一个可以问的人。有一项测试带着交谈轮次把求解器的证明走了一遍，不论话传给了谁。
+
+在浏览器里开始的每一局都带私下交谈，终端游戏加上 `--gossip` 也是。浏览器里，一轮到点就自动进行，页面上有一栏列出谁找谁谈过。在服务器上，一轮在发出第一个请求之前，就先被记成"已结束、无人传话"：如果服务器中途丢失，这一局就停在这一轮已经结束的状态，页面会说明它没有完成，它的请求也不会再发一次。这样的一轮如果产生了费用，只有额度守卫自己的计数知道；页面把它算作一项"未完成"。
+
+目前私下交谈只对着脚本化的模型替身跑过：真实回复有多少可用、一轮要花多少，都还没有测。自我对弈的侦探不带私下交谈；它的对局做成回放时也不带，和当时玩的一样。
 
 ### How a new case is written · 新案件怎么写出来
 
@@ -258,7 +266,7 @@ Passing the gate means a case is fair to play. It is not the case writer's quali
 
 The page also lists replays: a solved game played back step by step. A replay is a plain file beside the page, so watching one asks nothing of the server, sends nothing and spends nothing, and it is there when the server is not. Each frame is the view a player would have been sent at that step, made by the same code that makes it for a live game; the answer is in the last frame only. A replay does give its case away.
 
-The repository ships one: the handwritten 20-person lighthouse plot, played along the proof its own solver found (`web/public/replays/`). A test checks that this file is what the maker makes today.
+The repository ships one: the handwritten 20-person lighthouse plot, played along the proof its own solver found (`web/public/replays/`). It is a game with gossip, so the round that falls due after its fourth action is a step of its own, with code choosing who is told. A test checks that this file is what the maker makes today.
 
 ```bash
 npm run replay:make -- --builtin
@@ -270,7 +278,7 @@ The third form replays a game the detective agent played: its saved replies are 
 
 页面还会列出回放：一局已破解的游戏，一步一步重放。回放只是页面旁边的一个普通文件，所以观看时不向服务器要任何东西，不发送请求，也不花钱；服务器不在时它照样能看。每一帧都是玩家在那一步会收到的视图，由生成实时游戏视图的同一段代码生成；答案只在最后一帧。回放会揭示它那个案件的答案。
 
-仓库自带一个回放：手写的 20 人灯塔案，按它自己的求解器找到的证明来走（`web/public/replays/`）。有一项测试检查这个文件与今天生成器的产出一致。
+仓库自带一个回放：手写的 20 人灯塔案，按它自己的求解器找到的证明来走（`web/public/replays/`）。这是带私下交谈的一局，所以第四次行动之后到点的那一轮单独算一步，由代码决定告诉谁。有一项测试检查这个文件与今天生成器的产出一致。
 
 上面第三种用法回放侦探智能体玩过的一局：把它保存下来的回复重新交给侦探自己的代码（不用模型），再把它走过的每一步重放出来。只有判分为"已破解"的一局才会生成回放。想在发布前先看看，就写到 `cases/generated/replays/`：git 忽略这个目录，任何构建都不包含它；`npm run dev` 会列出其中的回放。
 

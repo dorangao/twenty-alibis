@@ -111,7 +111,9 @@ if (from === "solver") {
   player = game.player;
 }
 
-const made = await makeReplay(c, moves, { id, player });
+// The solver's replay is a game with gossip, as a game started on the page is. A detective's
+// game was played without it, and is shown as it was played.
+const made = await makeReplay(c, moves, { id, player, gossip: from === "solver" });
 if (!made.ok) {
   const why: Record<typeof made.why, [string, string]> = {
     "bad-id": ["The name may only have lower-case letters, digits and hyphens.", "名称只能包含小写字母、数字和连字符。"],

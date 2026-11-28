@@ -1,8 +1,9 @@
 import { renderAssertion, type Lang } from "../agents/render";
 import type { LineSource } from "../agents/suspect-turn";
 import type { Case, Text } from "../case/schema";
+import { gossipEvery } from "../game/gossip";
 import { NOTE_MARK, PROOF_RULES } from "../game/rules";
-import { actionsLeft, inspectionMenu, notebook, reveal, topicMenu, type Missing } from "../game/session";
+import { actionsLeft, gossipDue, inspectionMenu, notebook, reveal, topicMenu, type Missing } from "../game/session";
 import type { SessionRecord } from "./sessions";
 
 /**
@@ -57,14 +58,51 @@ export interface View {
   /** Whether a question in the player's own words can be asked: only when the model is on for this session. */
   model: "on" | "off";
   evidence: { handle: string; text: Text; note: boolean }[];
-  statements: { key: string; turn: number; person: string; text: Text; contradictedBy: string[] }[];
-  topics: { handle: string; person: string; label: Text; heard: boolean }[];
+  /** `from` is set when the person was repeating someone else: whose statement it is. */
+  statements: { key: string; turn: number; person: string; text: Text; contradictedBy: string[]; from?: string }[];
+  /** `told` is set on a topic that came from gossip: who told this person, and in which round. */
+  topics: { handle: string; person: string; label: Text; heard: boolean; told?: { by: string; round: number } }[];
   inspections: { handle: string; label: Text; done: boolean }[];
   transcript: Line[];
   /**
-   * This session's confirmed model use: the requests and cost of the turns that were kept.
-   * `unfinished` counts questions that were begun and never finished. What those cost, if
-   * anything, is counted by the server's spend guard and is not in `nano`.
+   * Who has spoken with whom between the player's actions. Not there for a session without
+   * gossip. It says who told whom, never what: that has to be asked for, from the listener.
+   *
+   * A round's `state`: "done"; "running" while its server is at work on it; "interrupted"
+   * when its server was lost in the middle. An interrupted round is closed and empty, and
+   * what it sent, if anything, is not known to the game: only the spend guard's count says.
+   */
+  gossip?: {
+    /** Actions between two rounds. */
+    every: number;
+    /** True when a round must run before the next new question or inspection. */
+    due: boolean;
+    rounds: {
+      n: number;
+      /** Actions used when it ran. */
+      after: number;
+      state: "done" | "running" | "interrupted";
+      /** Who was to pick the listeners. */
+      chosenBy: "code" | "model";
+      talks: { from: string; to: string; by: "code" | "model" }[];
+      /** Speakers who were to ask their agent. Those among them with no talk told nobody. */
+      asked: number;
+      /** Requests that left the server for this round, and their confirmed cost. */
+      requests: number;
+      nano: number;
+      /**
+       * Of those requests, the ones whose cost is not confirmed: they failed on the way or came
+       * back unsettled. Their cost, if any, is with the spend guard and not in `nano`. For an
+       * interrupted round this is 0 and means nothing: what such a round sent is not known.
+       */
+      unconfirmed: number;
+    }[];
+  };
+  /**
+   * This session's confirmed model use: the requests and cost of the turns and the gossip
+   * rounds that were kept. `unfinished` counts questions and gossip rounds that were begun
+   * and never finished. What those cost, if anything, is counted by the server's spend
+   * guard and is not in `nano`.
    */
   cost: { requests: number; nano: number; unfinished: number };
   over: boolean;
@@ -137,7 +175,12 @@ export function lineOf(c: Case, record: SessionRecord, n: number, question: stri
   return { n, person: handlesOf(c, record).person.handle(turn.suspect), question, line: turn.line, language: turn.language, source: turn.source, noted: turn.statements.length };
 }
 
-export function viewOf(c: Case, record: SessionRecord, model: "on" | "off", interrupted = false): View {
+/**
+ * `interrupted`: the question marked as begun is lost, not in progress. `busy`: a request is
+ * at work on the session right now, so a gossip round still marked pending is running, not
+ * lost. Only the caller knows either.
+ */
+export function viewOf(c: Case, record: SessionRecord, model: "on" | "off", interrupted = false, busy = false): View {
   const s = record.session;
   const h = handlesOf(c, record);
   const room = (id: string): Text => {
@@ -145,6 +188,7 @@ export function viewOf(c: Case, record: SessionRecord, model: "on" | "off", inte
     return found ? { ...found.name } : UNKNOWN;
   };
   const book = notebook(c, s);
+  const rounds = (s.gossip?.rounds ?? []).map((r) => ({ ...r, state: r.lost || (r.pending && !busy) ? ("interrupted" as const) : r.pending ? ("running" as const) : ("done" as const) }));
   const open = new Map(c.suspects.flatMap((x) => topicMenu(c, s, x.id).map((m) => [m.id, { ...m, suspect: x.id }] as const)));
   const openInspections = new Map(inspectionMenu(c, s).map((m) => [m.id, m] as const));
   const view: View = {
@@ -172,23 +216,43 @@ export function viewOf(c: Case, record: SessionRecord, model: "on" | "off", inte
       turn: st.turn,
       person: h.person.handle(st.suspect),
       text: { en: st.en, zh: st.zh },
-      contradictedBy: book.contradictions.filter((x) => x.suspect === st.suspect && x.assertion === st.assertion).map((x) => h.evidence.handle(x.evidence)),
+      contradictedBy: book.contradictions.filter((x) => x.suspect === st.suspect && x.assertion === st.assertion && x.source === st.source).map((x) => h.evidence.handle(x.evidence)),
+      ...(st.source !== undefined ? { from: h.person.handle(st.source) } : {}),
     })),
     // In handle order, and only what is open now: a handle is kept for good, a place on the menu is not.
     topics: record.topics.flatMap((id) => {
       const m = open.get(id);
-      return m ? [{ handle: h.topic.handle(id), person: h.person.handle(m.suspect), label: { ...m.label }, heard: m.heard }] : [];
+      if (!m) return [];
+      return [{ handle: h.topic.handle(id), person: h.person.handle(m.suspect), label: { ...m.label }, heard: m.heard, ...(m.gossip !== undefined && m.from !== undefined ? { told: { by: h.person.handle(m.from), round: m.gossip } } : {}) }];
     }),
     inspections: record.inspections.flatMap((id) => {
       const m = openInspections.get(id);
       return m ? [{ handle: h.inspection.handle(id), label: { ...m.label }, done: m.done }] : [];
     }),
     transcript: s.turns.map((r) => lineOf(c, record, r.n, r.question, r.turn)),
+    ...(s.gossip
+      ? {
+          gossip: {
+            every: gossipEvery(c),
+            due: gossipDue(c, s),
+            rounds: rounds.map((r) => ({
+              n: r.n,
+              after: r.at,
+              state: r.state,
+              chosenBy: r.chosenBy,
+              talks: r.events.map((e) => ({ from: h.person.handle(e.from), to: h.person.handle(e.to), by: e.by })),
+              asked: r.calls,
+              requests: r.requests,
+              nano: r.costNano,
+              unconfirmed: r.unconfirmed,
+            })),
+          },
+        }
+      : {}),
     cost: {
-      requests: s.turns.reduce((sum, r) => sum + r.turn.requests, 0),
-      nano: s.turns.reduce((sum, r) => sum + r.turn.costNano, 0),
-      // `interrupted`: the question marked as begun is lost, not in progress. Only the caller knows which.
-      unfinished: (record.lost ?? 0) + (interrupted ? 1 : 0),
+      requests: s.turns.reduce((sum, r) => sum + r.turn.requests, 0) + rounds.reduce((sum, r) => sum + r.requests, 0),
+      nano: s.turns.reduce((sum, r) => sum + r.turn.costNano, 0) + rounds.reduce((sum, r) => sum + r.costNano, 0),
+      unfinished: (record.lost ?? 0) + (interrupted ? 1 : 0) + rounds.filter((r) => r.state === "interrupted").length,
     },
     over: s.verdict !== undefined,
   };

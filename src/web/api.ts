@@ -2,7 +2,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Lang } from "../agents/render";
 import type { LineSource } from "../agents/suspect-turn";
 import type { Case, Text } from "../case/schema";
-import { accuse, ask, inspect, MAX_QUESTION_CHARS, SessionError, startSession, type Session, type SessionErrorCode } from "../game/session";
+import { closePending, hearsayEvent, pendingRound, planRound } from "../game/gossip";
+import { accuse, ask, gossipDue, gossipRound, heldBy, inspect, MAX_QUESTION_CHARS, SessionError, startSession, type Session, type SessionErrorCode } from "../game/session";
 import type { Metered } from "../metered";
 import type { Allowance } from "./allowance";
 import type { SessionRecord, SessionStore } from "./sessions";
@@ -21,6 +22,7 @@ import { caseCard, handlesOf, viewOf, withHandles, type CaseCard, type View } fr
  *                                      { revision, person, question }           the player's own words
  *   POST /api/sessions/:id/inspect     { revision, inspection }
  *   POST /api/sessions/:id/accuse      { revision, person, evidence: [...] }
+ *   POST /api/sessions/:id/gossip      { revision }                             the gossip round that is due
  *
  * Who may touch a session. The id in the path is a locator, not a credential: it is in views
  * and in the ids of the session's model requests. What proves a request is its visitor's is
@@ -288,7 +290,7 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
    */
   const replyOf = (c: Case, record: SessionRecord, busy: boolean, note?: AskNote): ViewReply => {
     const interrupted = record.inFlight !== undefined && !busy;
-    return { view: viewOf(c, record, modelFor(record), interrupted), ...(note ? { ask: note } : {}), ...(interrupted ? { status: { code: "interrupted", text: INTERRUPTED } } : {}) };
+    return { view: viewOf(c, record, modelFor(record), interrupted, busy), ...(note ? { ask: note } : {}), ...(interrupted ? { status: { code: "interrupted", text: INTERRUPTED } } : {}) };
   };
 
   if (parts.length === 2 && parts[1] === "cases") {
@@ -310,7 +312,7 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
     const allowed = deps.allowance ? await deps.allowance.session(hash(secret)) : "ok";
     if (allowed !== "ok") return fail(allowed === "visitor" ? "allowance" : "crowded");
     const record = withHandles(c, {
-      session: startSession(c, (deps.newId ?? randomUUID)()),
+      session: startSession(c, (deps.newId ?? randomUUID)(), { gossip: true }),
       owner: hash(secret),
       revision: 1,
       mode: deps.modelOff ? "off" : "live",
@@ -346,21 +348,26 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
     return json(200, replyOf(caseFor(found.record), found.record, found.busy));
   }
 
-  if (parts.length !== 4 || !["ask", "inspect", "accuse"].includes(parts[3]!)) return fail("not-found");
+  if (parts.length !== 4 || !["ask", "inspect", "accuse", "gossip"].includes(parts[3]!)) return fail("not-found");
   if (request.method !== "POST") return fail("method");
-  const action = parts[3] as "ask" | "inspect" | "accuse";
+  const action = parts[3] as "ask" | "inspect" | "accuse" | "gossip";
   const body = await readBody(request);
   if (typeof body.revision !== "number" || !Number.isSafeInteger(body.revision)) return fail("bad-request");
   const revision = body.revision;
 
-  const done = await deps.sessions.update<ViewReply>(id, owner, async (record, hold) => {
-    const c = caseFor(record);
+  const done = await deps.sessions.update<ViewReply>(id, owner, async (stored, hold) => {
+    const c = caseFor(stored);
     // The page acted on a view the session has since left behind. Nothing is done.
-    if (record.revision !== revision) throw new Refused("stale");
+    if (stored.revision !== revision) throw new Refused("stale");
+    // This request holds the session, so a gossip round still marked pending is one whose
+    // server never came back. It is marked lost here, and that is kept with whatever this
+    // request keeps.
+    const settledGossip = stored.session.gossip ? closePending(stored.session.gossip) : undefined;
+    const record: SessionRecord = settledGossip && settledGossip !== stored.session.gossip ? { ...stored, session: { ...stored.session, gossip: settledGossip } } : stored;
     const h = handlesOf(c, record);
     const model = modelFor(record);
-    /** The record as the store has it now: the one this work was handed, or the one it saved when a question began. */
-    let base = record;
+    /** The record as the store has it now: the one this work was handed, or the one it saved when a question or a round began. */
+    let base = stored;
     /** True once a question has been written down as begun, which happens before its first request. */
     let begun = false;
     /** True once the visitor's allowance has refused a request of this question. */
@@ -440,9 +447,34 @@ async function route(request: Request, deps: ApiDeps): Promise<Response> {
     };
     const metered: Metered = model === "on" ? live : refuse;
 
+    if (action === "gossip") {
+      if (!gossipDue(c, record.session)) throw new Refused("not-available");
+      // Who picks the listeners was settled when the session began. One that began with the
+      // model off has code pick, and sends nothing.
+      if (record.mode === "off") return keep((await gossipRound(refuse, c, record.session, { model: false })).session);
+      // One that began with the model on asks the speakers' agents. If the model cannot be
+      // used now, they are not asked and tell nobody: code does not pick for free.
+      if (model === "off") return keep((await gossipRound(refuse, c, record.session, { model: true })).session);
+      const n = record.session.gossip!.rounds.length + 1;
+      const plans = planRound(c, record.session.gossip!, heldBy(record.session), n);
+      if (plans.some((p) => p.candidates.length > 1)) {
+        // Before the round's first request: write the round down as closed and empty, and move
+        // the revision on. From here the click that asked for it is used up, and if this worker
+        // is lost the game stands with the round over: its requests are never sent again.
+        const { inFlight: _begun, ...rest } = record;
+        const pending: SessionRecord = { ...rest, session: { ...record.session, gossip: { rounds: [...record.session.gossip!.rounds, pendingRound(n, record.session.actions, plans)] } }, revision: record.revision + 1, ...(lost > 0 ? { lost } : {}) };
+        await hold.save(pending);
+        base = pending;
+        begun = true;
+      }
+      // Each request takes one from the visitor's allowance and checks the hold, as a question's do.
+      return keep((await gossipRound(live, c, record.session, { model: true, cacheKey: `gossip:${c.id}` })).session);
+    }
+
     if (body.topic !== undefined) {
       const topic = need(h.topic.id(handle(body, "topic")));
-      const suspect = need(c.actions.topics.find((t) => t.id === topic)?.suspect);
+      // A topic of the case's own belongs to its suspect; one that came from gossip, to whoever was told.
+      const suspect = need(c.actions.topics.find((t) => t.id === topic)?.suspect ?? hearsayEvent(c, record.session.gossip, topic)?.event.to);
       const result = await ask(metered, c, record.session, { suspect, topic, language: body.language === "zh" ? "zh" : "en", cacheKey: `case:${c.id}` });
       return keep(result.session, noteOf(result));
     }

@@ -17,6 +17,7 @@ import { memoryAllowance, redisAllowance, DEFAULT_LIMITS, type Allowance } from 
 import { redisSessions } from "../src/web/redis-sessions";
 import { memorySessions, type SessionRecord, type SessionStore } from "../src/web/sessions";
 import type { View } from "../src/web/view";
+import { roundSummary, unconfirmedSends } from "../web/src/gossip-text";
 import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
 import { redisRun, redisUrl } from "./redis-run";
@@ -28,6 +29,8 @@ const usage = { inputTokens: 1_000, cachedTokens: 0, outputTokens: 60 };
 
 /** A stand-in suspect: it picks the first topic on its menu and repeats the statements it is given. */
 function wellBehaved(request: ProviderRequest): ProviderResponse {
+  // A speaker in a gossip round: it tells the first person it is offered.
+  if (request.responseSchema?.name === "gossip_choice") return { text: JSON.stringify({ to: "a" }), toolCalls: [], usage, finishReason: "stop" };
   if (request.tools?.length) {
     const menu = (request.tools[0]!.parameters as { properties: { topic: { enum: string[] } } }).properties.topic.enum;
     return { text: null, toolCalls: [{ id: "call_1", name: "recall", arguments: JSON.stringify({ topic: menu[0] }) }], usage, finishReason: "tool_calls" };
@@ -69,14 +72,14 @@ function server(options: { cases?: Case[]; metered?: Metered; modelOff?: boolean
     };
     const start = async (caseId: string): Promise<View> => (await call("POST", "/api/sessions", { caseId })).body.view;
     /** Act on the view just shown: its revision goes with the request. */
-    const act = <T = ViewReply>(view: View, action: "ask" | "inspect" | "accuse", body: Record<string, unknown>) => call<T>("POST", `/api/sessions/${view.session}/${action}`, { revision: view.revision, ...body });
+    const act = <T = ViewReply>(view: View, action: "ask" | "inspect" | "accuse" | "gossip", body: Record<string, unknown> = {}) => call<T>("POST", `/api/sessions/${view.session}/${action}`, { revision: view.revision, ...body });
     return { call, start, act, cookie: () => cookie };
   };
   return { deps, ...visitor(), visitor };
 }
-const live = (handler: (request: ProviderRequest) => ProviderResponse = wellBehaved, killSwitch?: () => boolean) => {
+const live = (handler: (request: ProviderRequest) => ProviderResponse = wellBehaved, killSwitch?: () => boolean, limitUsd = 1) => {
   const provider = new FakeProvider(handler);
-  const metered = createMetered({ inputBound: { tokensPerByte: 100 }, provider, store: new MemorySpendStore(), envelope: "e", limitNano: usdToNano(1), ...(killSwitch ? { killSwitch } : {}) });
+  const metered = createMetered({ inputBound: { tokensPerByte: 100 }, provider, store: new MemorySpendStore(), envelope: "e", limitNano: usdToNano(limitUsd), ...(killSwitch ? { killSwitch } : {}) });
   return { provider, metered };
 };
 const stored = async (deps: ApiDeps, view: View): Promise<SessionRecord> => {
@@ -169,8 +172,10 @@ describe("the game over HTTP, with the model off", () => {
     await expectNothingHidden(deps, lighthouse, r.raw, view, "opening");
     // The view is an allow-list. A field that is not named here is not sent: adding one means changing this test.
     expect(Object.keys(view).sort()).toEqual(
-      ["actions", "caseId", "cost", "evidence", "inspections", "model", "noteMark", "over", "people", "revision", "rooms", "rules", "session", "setting", "slots", "statements", "title", "topics", "transcript", "victim"].sort(),
+      ["actions", "caseId", "cost", "evidence", "gossip", "inspections", "model", "noteMark", "over", "people", "revision", "rooms", "rules", "session", "setting", "slots", "statements", "title", "topics", "transcript", "victim"].sort(),
     );
+    // A game started here has gossip rounds. None has run, and none is due.
+    expect(view.gossip).toEqual({ every: 4, due: false, rounds: [] });
     expect(Object.keys(view.evidence[0]!).sort()).toEqual(["handle", "note", "text"]);
     expect(Object.keys(view.topics[0]!).sort()).toEqual(["handle", "heard", "label", "person"]);
     expect(Object.keys(view.inspections[0]!).sort()).toEqual(["done", "handle", "label"]);
@@ -208,6 +213,14 @@ describe("the game over HTTP, with the model off", () => {
       let view = await start(c.id);
       const proof = solve(c).proof!;
       for (const step of proof.actions) {
+        // A gossip round that the last step made due runs first, as the page runs it. It uses no action.
+        if (view.gossip!.due) {
+          const round = await act(view, "gossip");
+          expect(round.status).toBe(200);
+          expect(round.body.view.actions).toEqual(view.actions);
+          view = round.body.view;
+          await expectNothingHidden(deps, c, round.raw, view, `gossip round ${view.gossip!.rounds.length}`);
+        }
         const record = await stored(deps, view);
         const r = step.type === "inspection" ? await act(view, "inspect", { inspection: inspectionOf(record, step.id) }) : await act(view, "ask", { topic: topicOf(record, step.id), language: "zh" });
         expect(r.status, `${step.type} ${step.id}`).toBe(200);
@@ -963,9 +976,13 @@ describe("a question that was begun and never finished", () => {
     expect(inspected.body.view.revision).toBe(view.revision + 1);
     expect(inspected.body.view.actions.used).toBe(2);
     expect(inspected.body.view.cost.unfinished).toBe(1);
+    // Two actions used: the gossip round is due, and runs before the next question.
+    const talked = await act(inspected.body.view, "gossip");
+    expect(talked.status).toBe(200);
+    expect(talked.body.view.cost.unfinished).toBe(1);
     // A second question lost later is counted as well.
     state.dies = true;
-    expect((await act<ApiError>(inspected.body.view, "ask", { person: "P1", question: "Where were you at nine?" })).status).toBe(500);
+    expect((await act<ApiError>(talked.body.view, "ask", { person: "P1", question: "Where were you at nine?" })).status).toBe(500);
     state.dies = false;
     const twice = await call("GET", `/api/sessions/${view.session}`);
     expect(twice.body.view.cost.unfinished).toBe(2);
@@ -1230,6 +1247,13 @@ describe("what one visitor may ask for", () => {
     expect(provider.dispatched).toBe(3);
     expect(r.body.ask).toMatchObject({ recorded: true, notice: { code: "worded-by-code" } });
     view = r.body.view;
+    // The gossip round that is due finds none left either: its two speakers are not asked, and
+    // tell nobody. The round is closed all the same.
+    r = await act(view, "gossip");
+    expect(r.status).toBe(200);
+    expect(provider.dispatched).toBe(3);
+    expect(r.body.view.gossip).toMatchObject({ due: false, rounds: [{ n: 1, state: "done", chosenBy: "model", talks: [], requests: 0 }] });
+    view = r.body.view;
     // None left: the question is not asked, nothing is sent, no action is used.
     r = await act(view, "ask", { person: "P3", question: "What did you see?" });
     expect(r.status).toBe(200);
@@ -1303,7 +1327,16 @@ describe.skipIf(!redisUrl)("the game over HTTP, kept in Redis", () => {
     const sessions = workers(connections.map((c) => redisSessions(c.runner, { prefix: p })));
     const { act, call, start, deps } = server({ sessions, allowance: redisAllowance(connections[0]!.runner, { prefix: p }) });
     let view = await start(lighthouse.id);
+    let rounds = 0;
     for (const step of solve(lighthouse).proof!.actions) {
+      // The gossip round that the last step made due is run by one worker and read by the other.
+      if (view.gossip!.due) {
+        const round = await act(view, "gossip");
+        expect(round.status).toBe(200);
+        view = round.body.view;
+        rounds++;
+        expect((await call("GET", `/api/sessions/${view.session}`)).body.view).toEqual(view);
+      }
       const record = await stored(deps, view);
       const r = step.type === "inspection" ? await act(view, "inspect", { inspection: inspectionOf(record, step.id) }) : await act(view, "ask", { topic: topicOf(record, step.id), language: "zh" });
       expect(r.status, `${step.type} ${step.id}`).toBe(200);
@@ -1313,6 +1346,9 @@ describe.skipIf(!redisUrl)("the game over HTTP, kept in Redis", () => {
       // What one worker kept, the other reads.
       expect((await call("GET", `/api/sessions/${view.session}`)).body.view).toEqual(view);
     }
+    expect(rounds).toBe(1);
+    expect(view.gossip!.rounds).toMatchObject([{ n: 1, state: "done", chosenBy: "code" }]);
+    expect(view.gossip!.rounds[0]!.talks).toHaveLength(8);
     // A click made on a view the game has left is stale here too, and a stranger finds nothing.
     expect((await act<ApiError>({ ...view, revision: view.revision - 1 }, "inspect", { inspection: "I1" })).body.error.code).toBe("stale");
     const end = (await act(view, "accuse", { person: personOf(lighthouse, lighthouse.culprit.suspect), evidence: view.evidence.map((e) => e.handle) })).body.view;
@@ -1382,6 +1418,116 @@ describe.skipIf(!redisUrl)("the game over HTTP, kept in Redis", () => {
     expect((await call("GET", at)).body.status).toBeUndefined();
   });
 
+  /** The lighthouse up to its first gossip round: four records read, nothing asked of the model. */
+  const lighthouseDue = async (s: ReturnType<typeof server>): Promise<View> => {
+    let view = await s.start(lighthouse.id);
+    for (let i = 0; i < 4; i++) view = (await s.act(view, "inspect", { inspection: view.inspections.find((x) => !x.done)!.handle })).body.view;
+    expect(view.gossip!.due).toBe(true);
+    return view;
+  };
+
+  it("a worker that is lost in the middle of a gossip round: running for one lease term, then the round is closed and empty, counted once as unfinished, and never sent again", async () => {
+    const { sessions, state } = withDoomedWorker(own());
+    // Four requests in flight each hold a full worst case: the envelope here is large enough for that.
+    const { provider, metered: inner } = live(wellBehaved, undefined, 100);
+    const ids: string[] = [];
+    const never = new Promise<void>(() => undefined);
+    let reached!: () => void;
+    const arrived = new Promise<void>((resolve) => (reached = resolve));
+    let back = 0;
+    const metered: Metered = async (request) => {
+      ids.push(request.attemptId);
+      const result = await inner(request);
+      if (!state.lost) {
+        // The requests went out and were charged. The worker stops here, once all four are back, and never returns.
+        if (++back === 4) reached();
+        await never;
+      }
+      return result;
+    };
+    const s = server({ sessions, metered, modelOff: false });
+    const view = await lighthouseDue(s);
+    const at = `/api/sessions/${view.session}`;
+    void s.act(view, "gossip");
+    await arrived;
+    state.lost = true;
+    // The first wave of four is out, under the round's own ids. The second never goes.
+    expect(provider.dispatched).toBe(4);
+    expect([...ids].sort()).toEqual([0, 1, 2, 3].map((i) => `${view.session}:g1:${i}`));
+
+    // Until the lost worker's lease runs out, the round looks like one that is still running.
+    const during = await s.call("GET", at);
+    expect(during.body.view.revision).toBe(view.revision + 1);
+    expect(during.body.view.gossip).toMatchObject({ due: false, rounds: [{ n: 1, state: "running", talks: [] }] });
+    expect(during.body.view.cost.unfinished).toBe(0);
+    expect((await s.act<ApiError>(during.body.view, "gossip")).body.error.code).toBe("busy");
+
+    await pause(380);
+    // The click that asked for the round, delivered again: stale. And no round is due any more.
+    const redelivered = await s.act<ApiError>(view, "gossip");
+    expect([redelivered.status, redelivered.body.error.code]).toEqual([409, "stale"]);
+    const after = await s.call("GET", at);
+    expect(after.body.view.gossip).toMatchObject({ due: false, rounds: [{ n: 1, state: "interrupted", talks: [], requests: 0, nano: 0 }] });
+    expect(after.body.view.cost).toEqual({ ...view.cost, unfinished: 1 });
+    const none = await s.act<ApiError>(after.body.view, "gossip");
+    expect([none.status, none.body.error.code]).toEqual([404, "not-available"]);
+    expect(provider.dispatched).toBe(4);
+
+    // The game goes on from there, and the round stays as it is. The topic's answer is the one new request.
+    const next = await s.act(after.body.view, "ask", { topic: "T1", language: "en" });
+    expect(next.status).toBe(200);
+    expect(next.body.view.actions.used).toBe(5);
+    expect(next.body.view.gossip!.rounds).toMatchObject([{ n: 1, state: "interrupted" }]);
+    expect(next.body.view.cost.unfinished).toBe(1);
+    expect(provider.dispatched).toBe(5);
+    expect(ids.filter((id) => id.includes(":g"))).toHaveLength(4);
+  });
+
+  it("a worker that stalls in a gossip round, loses the session to another and comes back sends no second wave and keeps nothing", async () => {
+    const { sessions, state } = withDoomedWorker(own());
+    // Four requests in flight each hold a full worst case: the envelope here is large enough for that.
+    const { provider, metered: inner } = live(wellBehaved, undefined, 100);
+    let reached!: () => void;
+    const arrived = new Promise<void>((resolve) => (reached = resolve));
+    let resume!: () => void;
+    const resumed = new Promise<void>((resolve) => (resume = resolve));
+    let n = 0;
+    let back = 0;
+    const metered: Metered = async (request) => {
+      const mine = ++n;
+      const result = await inner(request);
+      if (mine <= 4) {
+        // Worker A: its first wave came back. It stalls here, long enough to lose its lease.
+        if (++back === 4) reached();
+        await resumed;
+      }
+      return result;
+    };
+    const s = server({ sessions, metered, modelOff: false });
+    const view = await lighthouseDue(s);
+    const at = `/api/sessions/${view.session}`;
+    const stalled = s.act<ApiError>(view, "gossip");
+    await arrived;
+    state.lost = true;
+    await pause(380);
+
+    // Worker B takes the session: the player asks someone a topic (one request). The round is marked lost with it.
+    const look = await s.call("GET", at);
+    const moved = await s.act(look.body.view, "ask", { topic: "T1", language: "en" });
+    expect(moved.status).toBe(200);
+    expect(moved.body.view.gossip!.rounds).toMatchObject([{ n: 1, state: "interrupted", talks: [] }]);
+    expect(provider.dispatched).toBe(5);
+
+    // Worker A comes back. Its second wave is not sent, and what it had is not kept.
+    resume();
+    const late = await stalled;
+    expect(late.status).toBe(500);
+    expect(provider.dispatched).toBe(5);
+    const end = await s.call("GET", at);
+    expect(end.body.view).toEqual(moved.body.view);
+    expect(end.body.view.gossip!.rounds).toHaveLength(1);
+  });
+
   it("a worker that stalls, loses the session to another and comes back sends nothing more", async () => {
     const { sessions, state } = withDoomedWorker(own());
     const { provider, metered: inner } = live();
@@ -1446,5 +1592,305 @@ describe.skipIf(!redisUrl)("the game over HTTP, kept in Redis", () => {
     expect(provider.dispatched).toBe(2);
     const after = await call<ApiError>("GET", `/api/sessions/${view.session}`);
     expect([after.status, after.body.error.code]).toEqual([404, "not-found"]);
+  });
+});
+
+describe("gossip over HTTP", () => {
+  const PRICE_EACH = usage.inputTokens * 100 + usage.outputTokens * 500;
+  /** A live model that also notes each request's id, and can be made to die or to wait. */
+  const watched = () => {
+    const { provider, metered: inner } = live();
+    const state = { ids: [] as string[], dies: false, gate: null as Promise<void> | null };
+    const metered: Metered = async (request) => {
+      state.ids.push(request.attemptId);
+      if (state.gate) await state.gate;
+      const result = await inner(request);
+      if (state.dies) throw new Error("the worker died");
+      return result;
+    };
+    return { provider, metered, state };
+  };
+  /** The short case up to its first round: Ben is heard and the log is read. Ada is not asked. */
+  const toFirstRound = async (s: ReturnType<typeof server>): Promise<View> => {
+    let view = await s.start(archivePass.id);
+    expect(view.gossip).toEqual({ every: 2, due: false, rounds: [] });
+    view = (await s.act(view, "inspect", { inspection: "I1" })).body.view;
+    expect(view.gossip!.due).toBe(false);
+    view = (await s.act(view, "ask", { topic: "T2", language: "en" })).body.view;
+    expect(view.gossip!.due).toBe(true);
+    return view;
+  };
+
+  it("with the model off: the round holds new actions until it has run, costs nothing, and says who spoke with whom but not what was said", async () => {
+    const s = server();
+    const view = await toFirstRound(s);
+
+    // A new question waits; a saved answer and a look do not.
+    const held = await s.act<ApiError>(view, "ask", { topic: "T1", language: "en" });
+    expect([held.status, held.body.error.code]).toEqual([409, "gossip-due"]);
+    expect((await s.act(view, "ask", { topic: "T2", language: "zh" })).body.ask).toMatchObject({ replayed: true });
+    expect((await s.call("GET", `/api/sessions/${view.session}`)).body.view).toEqual(view);
+
+    const round = await s.act(view, "gossip");
+    expect(round.status).toBe(200);
+    const after = round.body.view;
+    expect(after.revision).toBe(view.revision + 1);
+    expect(after.actions).toEqual(view.actions);
+    // Only Ada and Ben have anything to pass on. Code tells the first person each could tell.
+    expect(after.gossip).toEqual({
+      every: 2,
+      due: false,
+      rounds: [{ n: 1, after: 2, state: "done", chosenBy: "code", talks: [{ from: "P1", to: "P3", by: "code" }, { from: "P2", to: "P4", by: "code" }], asked: 0, requests: 0, nano: 0, unconfirmed: 0 }],
+    });
+    expect(after.cost).toEqual({ requests: 0, nano: 0, unfinished: 0 });
+    // Each listener has one more topic, marked with who told them. What was said is not in the reply.
+    const told = after.topics.filter((t) => t.told);
+    expect(told).toEqual([
+      { handle: "T3", person: "P3", label: { en: "What did Ada Marlow tell you?", zh: "马艾达跟你说了什么？" }, heard: false, told: { by: "P1", round: 1 } },
+      { handle: "T4", person: "P4", label: { en: "What did Ben Okafor tell you?", zh: "欧本跟你说了什么？" }, heard: false, told: { by: "P2", round: 1 } },
+    ]);
+    expect(round.raw).not.toContain("told me");
+    expect(round.raw).not.toContain("跟我说");
+    // Ada has not been asked: her claim is nowhere in the reply.
+    expect(after.statements.map((x) => x.person)).toEqual(["P2"]);
+    await expectNothingHidden(s.deps, archivePass, round.raw, after, "the gossip round");
+
+    // The same click again does nothing; and there is no second round to ask for.
+    const again = await s.act<ApiError>(view, "gossip");
+    expect([again.status, again.body.error.code]).toEqual([409, "stale"]);
+    const none = await s.act<ApiError>(after, "gossip");
+    expect([none.status, none.body.error.code]).toEqual([404, "not-available"]);
+  });
+
+  it("gives the listener's topic like any other: one action, nothing sent, the speaker's statement with its source, and a lie caught through it", async () => {
+    const s = server();
+    const after = (await s.act(await toFirstRound(s), "gossip")).body.view;
+    const said = await s.act(after, "ask", { topic: "T3", language: "zh" });
+    expect(said.status).toBe(200);
+    expect(said.body.ask).toEqual({ replayed: false, recorded: true, shown: { person: "P3", line: "马艾达跟我说：“21:00 我在门厅。”", language: "zh", source: "rendered" } });
+    const view = said.body.view;
+    expect(view.actions.used).toBe(3);
+    // The statement is Clara's to the player, and Ada's by origin. The door log contradicts it.
+    expect(view.statements.at(-1)).toEqual({ key: expect.any(String), turn: expect.any(Number), person: "P3", from: "P1", text: { en: "Ada Marlow told me: “I was in the foyer at 21:00.”", zh: "马艾达跟我说：“21:00 我在门厅。”" }, contradictedBy: ["E4"] });
+    expect(view.statements[0]!.from).toBeUndefined();
+    expect(view.topics.find((t) => t.handle === "T3")).toMatchObject({ heard: true, told: { by: "P1", round: 1 } });
+    // A topic that came from gossip is the listener's alone.
+    const wrong = await s.act<ApiError>(view, "ask", { topic: "T9", language: "en" });
+    expect([wrong.status, wrong.body.error.code]).toEqual([404, "not-available"]);
+    await expectNothingHidden(s.deps, archivePass, said.raw, view, "the hearsay answer");
+
+    // Ada was never spoken to. The case is solved, and her lie counts as heard and caught.
+    const end = await s.act(view, "accuse", { person: "P1", evidence: view.evidence.map((e) => e.handle) });
+    expect(end.body.view.verdict).toMatchObject({ outcome: "solved", actions: 3 });
+    expect(end.body.view.reveal!.lies).toEqual([expect.objectContaining({ person: "P1", heard: true, caught: true })]);
+    // No round after the accusation.
+    expect(end.body.view.gossip!.due).toBe(false);
+  });
+
+  it("lets the game be ended while a round is due", async () => {
+    const s = server();
+    const view = await toFirstRound(s);
+    const end = await s.act(view, "accuse", { person: "P1", evidence: view.evidence.map((e) => e.handle) });
+    expect(end.status).toBe(200);
+    expect(end.body.view.gossip).toMatchObject({ due: false, rounds: [] });
+    const late = await s.act<ApiError>(end.body.view, "gossip");
+    expect([late.status, late.body.error.code]).toEqual([404, "not-available"]);
+  });
+
+  it("with the model on: each speaker's agent is asked once under the round's own ids, and the answers and their cost are kept", async () => {
+    const { provider, metered, state } = watched();
+    const s = server({ metered, modelOff: false });
+    const view = await toFirstRound(s);
+    const before = { sent: provider.dispatched, ids: state.ids.length, cost: view.cost };
+    const round = await s.act(view, "gossip");
+    expect(round.status).toBe(200);
+    expect(provider.dispatched - before.sent).toBe(2);
+    expect(state.ids.slice(before.ids).sort()).toEqual([`${view.session}:g1:0`, `${view.session}:g1:1`]);
+    const after = round.body.view;
+    // Written down as begun, then kept: two revisions.
+    expect(after.revision).toBe(view.revision + 2);
+    expect(after.gossip!.rounds).toEqual([{ n: 1, after: 2, state: "done", chosenBy: "model", talks: [{ from: "P1", to: "P3", by: "model" }, { from: "P2", to: "P4", by: "model" }], asked: 2, requests: 2, nano: 2 * PRICE_EACH, unconfirmed: 0 }]);
+    expect(after.cost).toEqual({ requests: before.cost.requests + 2, nano: before.cost.nano + 2 * PRICE_EACH, unfinished: 0 });
+    // The requests carried the public case and the speaker's own claim, and no id of the case's.
+    for (const request of provider.requests.slice(before.sent)) {
+      expect(request.responseSchema?.name).toBe("gossip_choice");
+      expect(request.reasoningEffort).toBe("minimal");
+      const text = request.messages.map((m) => m.content).join("\n");
+      for (const id of authorIds(archivePass)) expect(text, id).not.toContain(id);
+    }
+  });
+
+  it("goes by how the session began: one that began with the model on tells nobody when the model cannot be used; one that began off has code pick even if the model is on by then", async () => {
+    // Began on, off at the round: the speakers' agents are not asked, and code does not pick for them.
+    const on = watched();
+    const a = server({ metered: on.metered, modelOff: false });
+    const viewA = await toFirstRound(a);
+    const sent = on.provider.dispatched;
+    a.deps.modelOff = true;
+    const roundA = await a.act(viewA, "gossip");
+    expect(roundA.status).toBe(200);
+    expect(on.provider.dispatched).toBe(sent);
+    // Two speakers were to ask their agents; neither could, nothing was sent, and nothing is unconfirmed.
+    expect(roundA.body.view.gossip).toMatchObject({ due: false, rounds: [{ n: 1, state: "done", chosenBy: "model", talks: [], asked: 2, requests: 0, nano: 0, unconfirmed: 0 }] });
+    expect(roundSummary("en", roundA.body.view.gossip!.rounds[0]!)).toEqual(["2 were to ask their agent and told nobody: the model could not be used, or its answer could not be. Code does not pick for them."]);
+    expect(roundA.body.view.revision).toBe(viewA.revision + 1);
+    expect(roundA.body.view.topics.some((t) => t.told)).toBe(false);
+
+    // Began off, on at the round: code picks, and nothing is sent.
+    const later = watched();
+    const b = server();
+    const viewB = await toFirstRound(b);
+    b.deps.modelOff = false;
+    b.deps.metered = later.metered;
+    const roundB = await b.act(viewB, "gossip");
+    expect(later.provider.dispatched).toBe(0);
+    expect(roundB.body.view.gossip!.rounds[0]).toMatchObject({ chosenBy: "code", talks: [{ by: "code" }, { by: "code" }], requests: 0 });
+  });
+
+  it("takes each request from the visitor's allowance, and a speaker who gets none tells nobody", async () => {
+    const { provider, metered } = watched();
+    // The topic's answer takes one; one is left for the round's two speakers.
+    const s = server({ metered, modelOff: false, allowance: memoryAllowance({ ...DEFAULT_LIMITS, requestsPerVisitor: 2 }) });
+    const view = await toFirstRound(s);
+    const sent = provider.dispatched;
+    expect(sent).toBe(1);
+    const round = await s.act(view, "gossip");
+    expect(provider.dispatched - sent).toBe(1);
+    expect(round.body.view.gossip!.rounds[0]).toMatchObject({ state: "done", chosenBy: "model", requests: 1, nano: PRICE_EACH });
+    expect(round.body.view.gossip!.rounds[0]!.talks).toEqual([{ from: "P1", to: "P3", by: "model" }]);
+    // One agent chose; the other speaker was to ask and could not. The page says exactly that.
+    expect(round.body.view.gossip!.rounds[0]).toMatchObject({ asked: 2, unconfirmed: 0 });
+    expect(roundSummary("en", round.body.view.gossip!.rounds[0]!)).toEqual([
+      "1 speaker's agent chose whom to tell.",
+      "1 was to ask its agent and told nobody: the model could not be used, or its answer could not be. Code does not pick for them.",
+    ]);
+  });
+
+  it("says so when a round's requests went out and their cost is not confirmed: they are counted apart, and no agent is credited with a choice", async () => {
+    const { provider, metered: inner } = live();
+    // The model answers, but the answer never arrives: the request may have been billed.
+    const metered: Metered = async (request) => {
+      if (!request.attemptId.includes(":g")) return inner(request);
+      await inner(request);
+      return { ok: false, attemptId: request.attemptId, sent: true, reason: "outcome-unknown" };
+    };
+    const s = server({ metered, modelOff: false });
+    const view = await toFirstRound(s);
+    const sent = provider.dispatched;
+    const round = await s.act(view, "gossip");
+    expect(round.status).toBe(200);
+    expect(provider.dispatched - sent).toBe(2);
+    const shown = round.body.view.gossip!.rounds[0]!;
+    // Done, nobody told, two requests out, none confirmed. Not an interrupted round: the count is known.
+    expect(shown).toEqual({ n: 1, after: 2, state: "done", chosenBy: "model", talks: [], asked: 2, requests: 2, nano: 0, unconfirmed: 2 });
+    expect(round.body.view.cost).toEqual({ ...view.cost, requests: view.cost.requests + 2, unfinished: 0 });
+    expect(unconfirmedSends(round.body.view)).toBe(2);
+    for (const lang of ["en", "zh"] as const) {
+      const said = roundSummary(lang, shown).join(" ");
+      expect(said).not.toMatch(/chose whom to tell|自己决定了告诉谁/);
+      expect(said).toMatch(lang === "en" ? /2 were to ask their agent and told nobody/ : /2 位本该由智能体来选，但没能选成/);
+      expect(said).toMatch(lang === "en" ? /2 requests went out with their cost unconfirmed/ : /有 2 次请求已经发出，但费用未确认/);
+    }
+  });
+
+  it("writes the round down before its first request: a server lost in the middle leaves it closed, empty and counted as unfinished, and it is never sent again", async () => {
+    const { provider, metered, state } = watched();
+    const s = server({ metered, modelOff: false });
+    const view = await toFirstRound(s);
+    const sent = provider.dispatched;
+    state.dies = true;
+    const lost = await s.act<ApiError>(view, "gossip");
+    expect([lost.status, lost.body.error.code]).toEqual([500, "server"]);
+    state.dies = false;
+    // The whole first wave had gone out. Nothing of it was kept.
+    expect(provider.dispatched - sent).toBe(2);
+
+    const look = await s.call("GET", `/api/sessions/${view.session}`);
+    const after = look.body.view;
+    expect(after.revision).toBe(view.revision + 1);
+    expect(after.gossip).toEqual({ every: 2, due: false, rounds: [{ n: 1, after: 2, state: "interrupted", chosenBy: "model", talks: [], asked: 2, requests: 0, nano: 0, unconfirmed: 0 }] });
+    // What it cost, if anything, is not known here: it is one unfinished thing, not a number of requests.
+    expect(after.cost).toEqual({ ...view.cost, unfinished: 1 });
+    expect((await stored(s.deps, view)).session.gossip!.rounds[0]).toMatchObject({ pending: true, events: [] });
+
+    // The click that asked for it is used up, and the round is not due again.
+    const again = await s.act<ApiError>(view, "gossip");
+    expect([again.status, again.body.error.code]).toEqual([409, "stale"]);
+    const none = await s.act<ApiError>(after, "gossip");
+    expect([none.status, none.body.error.code]).toEqual([404, "not-available"]);
+    expect(provider.dispatched - sent).toBe(2);
+
+    // The game goes on. The next thing kept marks the round lost for good.
+    const next = await s.act(after, "ask", { topic: "T1", language: "en" });
+    expect(next.status).toBe(200);
+    expect(next.body.view.gossip!.rounds[0]).toMatchObject({ state: "interrupted", talks: [] });
+    expect(next.body.view.cost.unfinished).toBe(1);
+    const kept = (await stored(s.deps, view)).session.gossip!.rounds[0]!;
+    expect(kept.pending).toBeUndefined();
+    expect(kept.lost).toBe(true);
+
+    // The second round, when it comes, is asked for under its own ids.
+    const idsBefore = state.ids.length;
+    let v = next.body.view;
+    v = (await s.act(v, "ask", { person: "P3", question: "What did you see?" })).body.view;
+    expect(v.actions.used).toBe(4);
+    expect(v.gossip!.due).toBe(true);
+    const second = await s.act(v, "gossip");
+    expect(second.status).toBe(200);
+    const roundIds = state.ids.slice(idsBefore).filter((id) => id.includes(":g"));
+    expect(roundIds.length).toBeGreaterThan(0);
+    expect(roundIds.every((id) => id.startsWith(`${view.session}:g2:`))).toBe(true);
+    expect(second.body.view.gossip!.rounds.map((r) => [r.n, r.state])).toEqual([
+      [1, "interrupted"],
+      [2, "done"],
+    ]);
+  });
+
+  it("says the round is running while its server is at work on it, and lets no second request in", async () => {
+    const { provider, metered, state } = watched();
+    const s = server({ metered, modelOff: false });
+    const view = await toFirstRound(s);
+    const sent = provider.dispatched;
+    let open!: () => void;
+    state.gate = new Promise<void>((resolve) => (open = resolve));
+    const working = s.act(view, "gossip");
+    // Wait until the round's requests are at the gate.
+    for (let i = 0; i < 200 && state.ids.filter((id) => id.includes(":g1:")).length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(state.ids.filter((id) => id.includes(":g1:"))).toHaveLength(2);
+
+    const look = await s.call("GET", `/api/sessions/${view.session}`);
+    expect(look.body.view.gossip).toMatchObject({ due: false, rounds: [{ n: 1, state: "running", talks: [] }] });
+    expect(look.body.view.cost.unfinished).toBe(0);
+    // A second tab on the same view, and one on the view just read: neither starts anything.
+    const tab = await s.act<ApiError>(view, "gossip");
+    expect([tab.status, tab.body.error.code]).toEqual([409, "busy"]);
+    const other = await s.act<ApiError>(look.body.view, "ask", { topic: "T1", language: "en" });
+    expect([other.status, other.body.error.code]).toEqual([409, "busy"]);
+
+    open();
+    state.gate = null;
+    const done = await working;
+    expect(done.status).toBe(200);
+    expect(done.body.view.gossip!.rounds[0]).toMatchObject({ state: "done", requests: 2 });
+    expect(provider.dispatched - sent).toBe(2);
+    expect((await s.call("GET", `/api/sessions/${view.session}`)).body.view).toEqual(done.body.view);
+  });
+
+  it("leaves a session that was stored before there was gossip without it", async () => {
+    const s = server();
+    const view = await s.start(archivePass.id);
+    // As a session kept by the server before this change: no gossip in it at all.
+    const record = await stored(s.deps, view);
+    const { gossip: _gossip, ...old } = record.session;
+    await s.deps.sessions.update(view.session, record.owner, async (r) => ({ record: { ...r, session: old }, value: null }));
+    let v = (await s.call("GET", `/api/sessions/${view.session}`)).body.view;
+    expect(v.gossip).toBeUndefined();
+    v = (await s.act(v, "inspect", { inspection: "I1" })).body.view;
+    v = (await s.act(v, "ask", { topic: "T2", language: "en" })).body.view;
+    v = (await s.act(v, "ask", { topic: "T1", language: "en" })).body.view;
+    expect(v.actions.used).toBe(3);
+    expect(v.gossip).toBeUndefined();
+    const none = await s.act<ApiError>(v, "gossip");
+    expect([none.status, none.body.error.code]).toEqual([404, "not-available"]);
   });
 });

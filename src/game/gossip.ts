@@ -80,6 +80,8 @@ export interface GossipRound {
    * anything, is not known here: only the spend guard's own count says.
    */
   pending?: true;
+  /** True for a round that was pending when its server was lost. It stays closed and empty, and what it sent is unknown. */
+  lost?: true;
 }
 
 export interface GossipState {
@@ -196,6 +198,22 @@ export function planRound(c: Case, state: GossipState, held: Held, n: number): G
     plans.push({ speaker: speaker.id, index, topic: best.topic, candidates });
   }
   return plans;
+}
+
+/**
+ * The same rounds, with one that is still marked pending marked lost instead. Whoever holds
+ * the session calls this before doing anything else: nobody else is at work on it, so a
+ * round that is still pending is one whose server never came back.
+ */
+export function closePending(state: GossipState): GossipState {
+  if (!state.rounds.some((r) => r.pending)) return state;
+  return {
+    rounds: state.rounds.map((r) => {
+      if (!r.pending) return r;
+      const { pending: _pending, ...rest } = r;
+      return { ...rest, lost: true as const };
+    }),
+  };
 }
 
 /** The round as it is written down before any request is sent: closed, empty, and marked pending. */

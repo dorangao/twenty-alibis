@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, GameError, type CasesReply, type View, type ViewReply } from "./api";
+import { GOSSIP_LOOK_MS, GOSSIP_LOOKS, roundSummary, unconfirmedSends } from "./gossip-text";
 import { supersedes, type Stamp } from "./latest";
 import { listReplays, loadReplay, PREVIEW, REPLAYS, stepBy, type Listed, type Replay, type ReplayMove } from "./replay";
 import { dollars, pick, S, victimLine, type Lang, type Text } from "./strings";
@@ -161,16 +162,22 @@ export function App() {
   /** What the meters at the top are about: the replay's frame while one is watched, else the game. */
   const onScreen = playing ? playing.replay.frames[playing.step]!.view : view;
 
-  /** Do one thing on the server and show where the game stands afterwards. It is never repeated on its own. */
+  /**
+   * Do one thing on the server and show where the game stands afterwards. It is never repeated
+   * on its own. `quiet`: this is not something the player did (a gossip round), so what the
+   * page was saying about their last action stays up.
+   */
   const run = useCallback(
-    async (work: () => Promise<ViewReply>, current: View | null) => {
+    async (work: () => Promise<ViewReply>, current: View | null, quiet = false) => {
       if (busy) return;
       // Opening a case is a new game: whatever was still on its way for an earlier one is dropped.
       const mine = current ? generation.current : ++generation.current;
       setBusy(true);
       setError(null);
-      setNotice(null);
-      setShown(null);
+      if (!quiet) {
+        setNotice(null);
+        setShown(null);
+      }
       try {
         const reply = await work();
         if (generation.current !== mine) return;
@@ -208,6 +215,40 @@ export function App() {
     [busy, leave, read, show],
   );
 
+  /**
+   * The gossip rounds this page has asked for, by game and round number. A round that is due
+   * is asked for once, by itself. If that fails, the page looks at where the game stands and
+   * leaves the rest to the player: a button, never a loop.
+   */
+  const askedRounds = useRef(new Set<string>());
+  const dueRound = view && !playing && !view.over && view.gossip?.due ? `${view.session}:${view.gossip.rounds.length + 1}` : null;
+  useEffect(() => {
+    if (!dueRound || busy || !view || askedRounds.current.has(dueRound)) return;
+    askedRounds.current.add(dueRound);
+    void run(() => api.gossip(view), view, true);
+  }, [busy, dueRound, run, view]);
+
+  /**
+   * A round that someone else's request is running: another tab, or a server that may never
+   * come back. This page did not start it and must not: it only looks, with a read that
+   * changes nothing, a bounded number of times. When the round is done or is given up as
+   * interrupted, the view says so and the looking stops.
+   */
+  const runningRound = view && !playing && view.gossip?.rounds.some((r) => r.state === "running") ? `${view.session}:${view.revision}` : null;
+  const looks = useRef({ key: "", count: 0 });
+  const [, setLooked] = useState(0);
+  useEffect(() => {
+    if (!runningRound || busy || !view) return;
+    if (looks.current.key !== runningRound) looks.current = { key: runningRound, count: 0 };
+    if (looks.current.count >= GOSSIP_LOOKS) return;
+    const session = view.session;
+    const timer = window.setTimeout(() => {
+      looks.current.count++;
+      void read(session, S.notRefreshed, S.refresh).finally(() => setLooked((n) => n + 1));
+    }, GOSSIP_LOOK_MS);
+    return () => window.clearTimeout(timer);
+  }, [busy, read, runningRound, view]);
+
   return (
     <div className="app">
       <header className="top">
@@ -226,6 +267,11 @@ export function App() {
               <span className="meter" title={t(onScreen.model === "on" ? S.modelOn : S.modelOff)}>
                 <strong>{onScreen.cost.requests}</strong> {t(S.requests)} · <strong>{dollars(onScreen.cost.nano)}</strong> {t(S.confirmed)}
               </span>
+              {unconfirmedSends(onScreen) > 0 && (
+                <span className="meter" title={t(S.unconfirmedHint)}>
+                  <strong>{unconfirmedSends(onScreen)}</strong> {t(S.unconfirmed)}
+                </span>
+              )}
               {onScreen.cost.unfinished > 0 && (
                 <span className="meter" title={t(S.unfinishedHint)}>
                   <strong>{onScreen.cost.unfinished}</strong> {t(S.unfinished)}
@@ -271,6 +317,8 @@ export function App() {
           onOwn={(person, question) => run(() => api.askOwn(view, person, question), view)}
           onInspect={(inspection) => run(() => api.inspect(view, inspection), view)}
           onAccuse={(person, evidence) => run(() => api.accuse(view, person, evidence), view)}
+          onGossip={() => run(() => api.gossip(view), view, true)}
+          onLook={() => void read(view.session, S.notRefreshed, S.refresh)}
           onLeave={leave}
         />
       ) : (
@@ -390,10 +438,12 @@ function Watching({ replay, step, lang, onStep, onLeave }: { replay: Replay; ste
     if (lang === "zh") {
       if (move.kind === "ask") return `询问${nameOf(move.person)}：${move.label.zh}`;
       if (move.kind === "inspect") return `查看记录：${move.label.zh}`;
+      if (move.kind === "gossip") return `第 ${move.round} 轮私下交谈：在场的人谈了谈。谁找谁谈过，见下方。`;
       return `指认${nameOf(move.person)}，引用 ${move.evidence.length} 项证据`;
     }
     if (move.kind === "ask") return `Asked ${nameOf(move.person)}: ${move.label.en}`;
     if (move.kind === "inspect") return `Inspected: ${move.label.en}`;
+    if (move.kind === "gossip") return `Gossip round ${move.round}: the people here talked among themselves. Who spoke with whom is listed below.`;
     return `Accused ${nameOf(move.person)}, citing ${move.evidence.length} items of evidence`;
   };
 
@@ -431,7 +481,9 @@ function Watching({ replay, step, lang, onStep, onLeave }: { replay: Replay; ste
         lang={lang}
         busy={false}
         shown={null}
-        watching={{ focus: frame.move && frame.move.kind !== "inspect" && frame.move.kind !== "accuse" ? frame.move.person : null }}
+        watching={{ focus: frame.move && frame.move.kind === "ask" ? frame.move.person : null }}
+        onGossip={() => undefined}
+        onLook={() => undefined}
         onTopic={() => undefined}
         onOwn={() => undefined}
         onInspect={() => undefined}
@@ -451,6 +503,10 @@ interface GameProps {
   onOwn: (person: string, question: string) => void;
   onInspect: (inspection: string) => void;
   onAccuse: (person: string, evidence: string[]) => void;
+  /** Run the gossip round that is due. The page asks once by itself; this is for the player to ask again. */
+  onGossip: () => void;
+  /** Look at where the game stands. It changes nothing on the server. */
+  onLook: () => void;
   onLeave: () => void;
   /**
    * Set when this is a replay's frame and not a game: nothing on it can be acted on. `focus`
@@ -459,7 +515,7 @@ interface GameProps {
   watching?: { focus: string | null };
 }
 
-function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, onLeave, watching }: GameProps) {
+function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, onGossip, onLook, onLeave, watching }: GameProps) {
   const t = (text: Text) => pick(lang, text);
   const [selected, setSelected] = useState<string | null>(null);
   const [accusing, setAccusing] = useState(false);
@@ -470,7 +526,9 @@ function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, on
     return person ? t(person.name) : handle;
   };
   const person = selected ? names.get(selected) : undefined;
-  const locked = busy || view.over || watching !== undefined;
+  // While a gossip round is due, a new question or inspection would be refused: it comes first.
+  const due = view.gossip?.due === true;
+  const locked = busy || view.over || watching !== undefined || due;
   // In a replay, open the conversation of the person each step was about.
   const focus = watching?.focus ?? null;
   useEffect(() => {
@@ -501,17 +559,89 @@ function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, on
         </details>
       </section>
 
+      {view.gossip && (
+        <section className="panel gossip" aria-label={t(S.gossipTitle)}>
+          <h2>{t(S.gossipTitle)}</h2>
+          <p className="hint">{t(S.gossipHint)}</p>
+          {due &&
+            !watching &&
+            (busy ? (
+              <p className="gossip-now" role="status">
+                {t(S.gossipRunning)}
+              </p>
+            ) : (
+              <p className="gossip-now">
+                {t(S.gossipDue)}{" "}
+                <button className="primary" onClick={onGossip}>
+                  {t(S.gossipRun)}
+                </button>
+              </p>
+            ))}
+          {view.gossip.rounds.length === 0 && !due && <p className="hint">{t(S.gossipNone)}</p>}
+          <ol className="rounds">
+            {[...view.gossip.rounds].reverse().map((r) => (
+              <li key={r.n}>
+                <h3>{lang === "zh" ? `第 ${r.n} 轮 · 第 ${r.after} 次行动之后` : `Round ${r.n} · after ${r.after} actions`}</h3>
+                {r.state === "interrupted" ? (
+                  <p className="hint warn">{t(S.gossipInterrupted)}</p>
+                ) : r.state === "running" ? (
+                  <p className="hint">
+                    {t(S.gossipInProgress)}{" "}
+                    {!watching && (
+                      <button className="link" onClick={onLook}>
+                        {t(S.gossipLook)}
+                      </button>
+                    )}
+                  </p>
+                ) : (
+                  <>
+                    {r.talks.length === 0 && <p className="hint">{t(S.gossipNobody)}</p>}
+                    <ul className="talks">
+                      {r.talks.map((x, i) => (
+                        <li key={i}>
+                          {/* Each language orders the sentence its own way: "A spoke with B", "A找B谈过". */}
+                          <button className="link" onClick={() => setSelected(x.from)}>
+                            {nameOf(x.from)}
+                          </button>
+                          {lang === "zh" ? "找" : " spoke with "}
+                          <button className="link" onClick={() => setSelected(x.to)}>
+                            {nameOf(x.to)}
+                          </button>
+                          {lang === "zh" ? "谈过" : ""}
+                        </li>
+                      ))}
+                    </ul>
+                    {roundSummary(lang, r).map((line, i) => (
+                      <p className="hint" key={i}>
+                        {line}
+                      </p>
+                    ))}
+                  </>
+                )}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
       <div className="columns">
         <section className="panel people" aria-label={t(S.peopleTitle)}>
           <h2>{t(S.peopleTitle)}</h2>
           <ul>
             {view.people.map((p) => {
               const heard = view.topics.filter((x) => x.person === p.handle && x.heard).length;
+              // Something this person was told in gossip that the player has not asked about yet.
+              const fresh = view.topics.some((x) => x.person === p.handle && x.told && !x.heard);
               return (
                 <li key={p.handle}>
                   <button className={p.handle === selected ? "person on" : "person"} onClick={() => setSelected(p.handle)} aria-pressed={p.handle === selected}>
                     <span className="person-name">{t(p.name)}</span>
                     <span className="person-role">{t(p.role)}</span>
+                    {fresh && (
+                      <span className="badge fresh" title={t(S.gossipNewHint)}>
+                        {t(S.gossipNew)}
+                      </span>
+                    )}
                     {heard > 0 && <span className="badge">{heard}</span>}
                   </button>
                 </li>
@@ -532,6 +662,7 @@ function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, on
                 {topics.map((x) => (
                   <button key={x.handle} className={x.heard ? "topic heard" : "topic"} disabled={locked} onClick={() => onTopic(x.handle)}>
                     {t(x.label)}
+                    {x.told && !x.heard && <span className="tick fresh"> · {t(S.gossipNew)}</span>}
                     {x.heard && <span className="tick"> ✓ {t(S.heard)}</span>}
                   </button>
                 ))}
@@ -624,6 +755,7 @@ function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, on
             {view.statements.map((st) => (
               <li key={st.key} className={st.contradictedBy.length > 0 ? "against" : ""}>
                 <strong>{nameOf(st.person)}</strong>: {t(st.text)}
+                {st.from !== undefined && <span className="tag hearsay"> {t(S.hearsay)}</span>}
                 {st.contradictedBy.length > 0 && (
                   <span className="contra">
                     {" "}
