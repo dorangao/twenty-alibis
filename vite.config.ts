@@ -11,7 +11,8 @@ import { memorySessions } from "./src/web/sessions";
  *
  * The model is off here, always: `npm run dev` sends nothing and spends nothing. A topic from
  * the menu gives the statement worded by code; a question in the player's own words says it
- * needs the model. The library is the handwritten case plus any case files in
+ * needs the model. The library is the handwritten case, the released cases in
+ * cases/released/ (the ones the deployed game offers), and any case files in
  * cases/generated/ on this machine (they are not in the repository).
  *
  * Replays that are waiting to be looked at are in cases/generated/replays/, also on this
@@ -22,7 +23,7 @@ function gameApi(): Plugin {
   return {
     name: "twenty-alibis-api",
     configureServer(server) {
-      const { cases, skipped } = loadLibrary("cases/generated");
+      const { cases, skipped } = loadLibrary("cases/released", "cases/generated");
       if (skipped.length > 0) console.log(`cases left out (they did not pass the gate): ${skipped.join(", ")}`);
       const listener = nodeListener({ cases, sessions: memorySessions(), metered: noModel, modelOff: true });
       server.middlewares.use((req, res, next) => {

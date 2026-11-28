@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prepareOutputDir } from "../scripts/build-output-dir";
 import { archivePass } from "../src/case/fixtures/archive";
+import { RELEASED_LIGHTHOUSE } from "../src/web/released";
 import { createMetered, type TraceEvent } from "../src/metered";
 import { FakeProvider } from "../src/provider/fake";
 import type { ProviderRequest, ProviderResponse } from "../src/provider/types";
@@ -528,6 +529,9 @@ server.listen(0, "127.0.0.1", () => console.log("PORT " + server.address().port)
     expect(JSON.parse(readFileSync(join(out, "config.json"), "utf8"))).toEqual({ version: 3, routes: [{ src: "^/api(?:/.*)?$", dest: "/api" }, { handle: "filesystem" }] });
     expect(JSON.parse(readFileSync(join(out, "functions/api.func/.vc-config.json"), "utf8"))).toEqual({ runtime: "nodejs22.x", handler: "index.mjs", launcherType: "Nodejs", shouldAddHelpers: false, shouldAddSourcemapSupport: false, maxDuration: 200 });
     expect(readdirSync(join(out, "functions/api.func")).sort()).toEqual([".vc-config.json", "cases", "index.mjs"]);
+    // The released cases are beside the function, as files: the lighthouse, byte for byte as the repository has it.
+    expect(readdirSync(join(out, "functions/api.func/cases/released"))).toEqual(["lighthouse.json"]);
+    expect(readFileSync(join(out, "functions/api.func/cases/released/lighthouse.json"), "utf8")).toBe(readFileSync(join(repo, RELEASED_LIGHTHOUSE), "utf8"));
     expect(existsSync(join(out, "static/index.html"))).toBe(true);
     // The published replays are among the page's files: they play with the function gone.
     expect(readdirSync(join(out, "static/replays")).sort()).toEqual(["index.json", "lighthouse.json"]);
@@ -555,12 +559,25 @@ server.listen(0, "127.0.0.1", () => console.log("PORT " + server.address().port)
     expect(errors()).toContain("twenty-alibis: the server is not ready: PUBLIC_ORIGIN is not set");
   });
 
+  it("lists the released lighthouse beside the handwritten case, read from the file beside the function", async () => {
+    // The library needs no Redis: the address here answers nothing.
+    const { base } = await run({ PUBLIC_ORIGIN: "https://game.test", REDIS_URL: "redis://127.0.0.1:1", SPEND_ENVELOPE: "none", SPEND_LIMIT_USD: "1" });
+    const r = await fetch(`${base}/api/cases`);
+    expect(r.status).toBe(200);
+    const listed = (await r.json()) as CasesReply;
+    expect(listed.model).toBe("off");
+    expect(listed.cases.map((c) => [c.id, c.suspects, c.actions])).toEqual([
+      [archivePass.id, 8, 40],
+      ["lighthouse", 20, 25],
+    ]);
+  });
+
   it.skipIf(!redisUrl)("with its configuration and no key it plays a game with the model off, keeping everything in Redis under its prefix", async () => {
     const mine = `${prefix}:web`;
     const { base, errors } = await run({ PUBLIC_ORIGIN: "https://game.test", REDIS_URL: redisUrl!, SPEND_ENVELOPE: `test-${randomUUID()}`, SPEND_LIMIT_USD: "1", WEB_KEY_PREFIX: mine });
     const cases = (await (await fetch(`${base}/api/cases`)).json()) as CasesReply;
     expect(cases.model).toBe("off");
-    expect(cases.cases.map((c) => c.id)).toEqual([archivePass.id]);
+    expect(cases.cases.map((c) => c.id)).toEqual([archivePass.id, "lighthouse"]);
 
     const post = (path: string, body: unknown, cookie?: string, origin = "https://game.test") => fetch(`${base}${path}`, { method: "POST", headers: { origin, "content-type": "application/json", ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body) });
     // Not from the game's page: refused.
