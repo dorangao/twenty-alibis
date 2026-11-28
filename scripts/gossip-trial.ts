@@ -12,21 +12,26 @@
  * runs once. The report (who was offered whom, who was picked, tokens, time and cost; no
  * prompt text) is written to traces/, which git ignores.
  *
+ * A run needs two limits from the person running it, in dollars, and has no default for either:
+ *   GOSSIP_TRIAL_STOP_USD    the stop, set against the trial's own estimate of each request
+ *   GOSSIP_TRIAL_BOUND_USD   the bound, set against the spend guard's full hold for each request
+ * Only the second bounds the bill. See src/trial/gossip-trial.ts for what each one counts.
+ *
  * It uses the "local" envelope only. Whether it may run at all is a person's decision, made
  * by authorizing paid requests; nothing in this file grants that.
  */
 import { createRuntime } from "../src/runtime";
-import { usdToNano } from "../src/spend/pricing";
 import { gossipTrialCli, type GossipTrialConfig } from "../src/trial/gossip-trial";
 import { lighthouseCase } from "../src/web/released";
 import { writeWhole } from "../src/writer/trial";
 
-const config: GossipTrialConfig = { id: "gossip-t1", rounds: 3, capNano: usdToNano(0.02) };
+const config: GossipTrialConfig = { id: "gossip-t1", rounds: 3 };
 
 process.exit(
   await gossipTrialCli(process.argv.slice(2), {
     c: lighthouseCase(),
     config,
+    env: process.env,
     envelope: "local",
     runtime: () => createRuntime(process.env),
     print: (line) => console.log(line),
