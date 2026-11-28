@@ -9,7 +9,7 @@ import { suspectIdentity } from "./suspect-prompt";
  * One suspect's part in a gossip round: of a few people, pick the one to tell.
  *
  * Code has already decided who speaks, which of its own statements it passes on, and who the
- * candidates are. The model is asked for one letter. It is shown the public case, the
+ * candidates are. The model is asked for one letter, as the one field of a JSON object. It is shown the public case, the
  * speaker's own voice, the statement as code words it, and the candidates' names and roles:
  * nothing about where anyone really was, who did it, or what the player has found. The
  * statement is the speaker's public claim, which may be false; the model is not told whether
@@ -33,7 +33,7 @@ export function gossipBriefing(c: Case): string {
     "YOUR TASK",
     "You will be given one thing you say when the detective asks you, and a short list of people, each with a letter.",
     "Choose the one person you would repeat it to, as your character would: someone you trust, someone you want on your side, or someone you would rather hear it from you.",
-    "Answer with that person's letter and nothing else. Do not explain.",
+    'Answer with a JSON object of this form and nothing else: {"to": "<letter>"}, where <letter> is that person\'s letter. Do not explain.',
     "",
     "THE CASE, AS EVERYONE KNOWS IT",
     `${c.title.en} / ${c.title.zh}`,
@@ -60,7 +60,7 @@ export function gossipMessages(c: Case, plan: GossipPlan): { messages: ChatMessa
     letters.set(LETTERS[i]!, id);
     return `${LETTERS[i]}. ${person.name.en} / ${person.name.zh}: ${person.role.en} / ${person.role.zh}`;
   });
-  const user = [`When the detective asks you "${topic.label.en} / ${topic.label.zh}", you say:`, ...statements, "", "Who you could tell:", ...lines, "", "Answer with one letter."].join("\n");
+  const user = [`When the detective asks you "${topic.label.en} / ${topic.label.zh}", you say:`, ...statements, "", "Who you could tell:", ...lines, "", 'Answer with {"to": "<letter>"}.'].join("\n");
   return {
     messages: [
       { role: "system", content: gossipBriefing(c) },
@@ -80,6 +80,8 @@ export interface RecipientChoice {
   costNano: number;
   /** Set when the request was refused, failed, came back unconfirmed, or suspended the envelope. */
   problem?: string;
+  /** True when the request left this machine and its cost is not confirmed: it failed on the way, or came back unsettled. A reply can be both this and a breach. */
+  unconfirmed: boolean;
   /** Set when a reply came back and picked nobody: it was cut off, or was not one of the letters. */
   unusable?: "cut-off" | "not-a-letter";
 }
@@ -100,14 +102,18 @@ export async function chooseRecipient(args: { metered: Metered; c: Case; plan: G
     reasoningEffort: "minimal",
     ...(args.cacheKey ? { cacheKey: args.cacheKey } : {}),
   });
-  if (!result.ok) return result.sent ? { to: null, requests: 1, costNano: 0, problem: "failed:outcome-unknown" } : { to: null, requests: 0, costNano: 0, problem: `refused:${result.reason}` };
+  if (!result.ok) {
+    return result.sent ? { to: null, requests: 1, costNano: 0, problem: "failed:outcome-unknown", unconfirmed: true } : { to: null, requests: 0, costNano: 0, problem: `refused:${result.reason}`, unconfirmed: false };
+  }
   const costNano = result.settled ? result.costNano : 0;
-  // A reply whose cost is unconfirmed, or that suspended the envelope, is not acted on.
-  if (result.breached) return { to: null, requests: 1, costNano, problem: "envelope-suspended" };
-  if (!result.settled) return { to: null, requests: 1, costNano, problem: "unconfirmed:not-settled" };
-  if (result.response.finishReason !== "stop") return { to: null, requests: 1, costNano, unusable: "cut-off" };
+  const unconfirmed = !result.settled;
+  // A reply whose cost is unconfirmed, or that suspended the envelope, is not acted on. It
+  // can be both: the two are reported apart, so neither hides the other.
+  if (result.breached) return { to: null, requests: 1, costNano, problem: "envelope-suspended", unconfirmed };
+  if (!result.settled) return { to: null, requests: 1, costNano, problem: "unconfirmed:not-settled", unconfirmed };
+  if (result.response.finishReason !== "stop") return { to: null, requests: 1, costNano, unusable: "cut-off", unconfirmed };
   const to = letterOf(result.response.text, letters);
-  return { to, requests: 1, costNano, ...(to === null ? { unusable: "not-a-letter" as const } : {}) };
+  return { to, requests: 1, costNano, unconfirmed, ...(to === null ? { unusable: "not-a-letter" as const } : {}) };
 }
 
 /** The candidate a reply names: the text must be an object with one field, `to`, holding one of the letters. */

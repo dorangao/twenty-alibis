@@ -304,6 +304,63 @@ describe("what a listener can then be asked", () => {
   });
 });
 
+describe("when the messenger makes the same false claim themselves", () => {
+  // Clara independently says Ada was in the foyer. It is false, and declared as a lie of Clara's too.
+  const a = archivePass;
+  const [ada, clara] = [a.suspects[0]!.id, a.suspects[2]!.id];
+  const adaTopic = a.actions.topics.find((t) => t.suspect === ada)!;
+  const twice: Case = {
+    ...a,
+    suspects: a.suspects.map((p) => (p.id === clara ? { ...p, lies: [...p.lies, ...adaTopic.yields] } : p)),
+    actions: { ...a.actions, topics: [...a.actions.topics, { id: "t-clara-on-ada", suspect: clara, label: { en: "Where was Ada at 21:00?", zh: "21:00 马艾达在哪里？" }, yields: [...adaTopic.yields] }] },
+  };
+  const log = a.actions.inspections[0]!.id;
+  const withTalk = (s: Session): Session => ({ ...s, gossip: { rounds: [round([{ from: ada, to: clara, topic: adaTopic.id }])] } });
+  const direct = (s: Session) => ask(noModel, twice, s, { suspect: clara, topic: "t-clara-on-ada" });
+  const relayed = (s: Session) => ask(noModel, twice, s, { suspect: clara, topic: hearsayId(twice, 1, 0) });
+
+  it("is a case the gate accepts", () => {
+    expect(validateCase(twice).ok).toBe(true);
+    expect(solve(twice).proof).toBeDefined();
+  });
+
+  for (const order of ["direct first", "hearsay first"] as const) {
+    it(`keeps both in the notebook, each with its own speaker, and both lies count as heard and caught (${order})`, async () => {
+      let s = withTalk(inspect(twice, startSession(twice, "two", { gossip: true }), log).session);
+      for (const step of order === "direct first" ? [direct, relayed] : [relayed, direct]) s = (await step(s)).session;
+      const book = notebook(twice, s);
+      expect(book.statements.map((x) => [x.suspect, x.source ?? null, x.assertion]).sort()).toEqual(
+        [
+          [clara, null, adaTopic.yields[0]],
+          [clara, ada, adaTopic.yields[0]],
+        ].sort(),
+      );
+      expect(book.contradictions.map((x) => [x.suspect, x.source ?? null]).sort()).toEqual(
+        [
+          [clara, null],
+          [clara, ada],
+        ].sort(),
+      );
+      const lies = reveal(twice, accuse(twice, s, { suspect: ada, evidence: s.evidence }).session).lies;
+      expect(lies.find((l) => l.suspect === ada)).toMatchObject({ heard: true, caught: true });
+      expect(lies.find((l) => l.suspect === clara)).toMatchObject({ heard: true, caught: true });
+    });
+  }
+
+  it("shows each contradiction in the terminal with the words that were said", async () => {
+    const game = createGame(twice, noModel, "t", { modelOff: true, gossip: true });
+    // The log, then Clara's own claim about Ada: the round then runs, and code has Ada tell Clara.
+    await game.handle("inspect 1");
+    await game.handle("ask 3 1");
+    const told = game.session().gossip!.rounds[0]!.events.find((e) => e.from === ada)!;
+    expect(told.to).toBe(clara);
+    await game.handle("ask 3 2");
+    const text = (await game.handle("notebook")).join("\n");
+    expect(text).toContain(`${a.suspects[2]!.name.en} said “${a.suspects[0]!.name.en} was in the foyer at 21:00.” Record 4 says otherwise.`);
+    expect(text).toContain(`${a.suspects[2]!.name.en} said “${a.suspects[0]!.name.en} told me: “I was in the foyer at 21:00.”” Record 4 says otherwise.`);
+  });
+});
+
 describe("gossip never takes a proof away", () => {
   it("the solver's own proof still solves the case with rounds running, whoever is told", async () => {
     for (const pick of [0, 1, 2, 3]) {
@@ -427,6 +484,32 @@ describe("a round with the model on", () => {
     expect(n).toBe(GOSSIP_WAVE);
     expect(done.round).toMatchObject({ requests: GOSSIP_WAVE, unconfirmed: 1, refused: 0, costNano: (GOSSIP_WAVE - 1) * PRICE, problem: "unconfirmed:not-settled" });
     expect(done.round.events).toHaveLength(GOSSIP_WAVE - 1);
+  });
+
+  it("counts a reply that both suspended the envelope and came back unsettled as unconfirmed", async () => {
+    const s = await due();
+    const { metered } = fake((request) => letter(lettersOf(request)[0]!));
+    let n = 0;
+    const both: Metered = async (request) => {
+      const mine = ++n;
+      const result = await metered(request);
+      return mine <= 3 && result.ok ? { ...result, breached: true, settled: false } : result;
+    };
+    const done = await gossipRound(both, c, s, { model: true });
+    expect(done.round).toMatchObject({ requests: GOSSIP_WAVE, unconfirmed: 3, refused: 0, costNano: PRICE, problem: "envelope-suspended" });
+    expect(done.round.events).toHaveLength(1);
+    expect(n).toBe(GOSSIP_WAVE);
+  });
+
+  it("asks for the reply in the form it accepts", async () => {
+    const s = await due();
+    const plan = planRound(c, s.gossip!, heldBy(s), 1)[0]!;
+    const text = gossipMessages(c, plan)
+      .messages.map((m) => m.content)
+      .join("\n");
+    // The reply must be an object with one field; a bare letter is not read. The prompt says so.
+    expect(text).toContain('{"to": "<letter>"}');
+    expect(text).not.toMatch(/letter and nothing else|Answer with one letter\./);
   });
 
   it("does not act on a reply that suspended the envelope", async () => {

@@ -188,8 +188,8 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
         say("While you were busy, the people in the house talked among themselves.", "你忙着查案的时候，在场的人私下谈了谈。"),
         ...talkOf(done.round).slice(1),
         say(
-          `  ${done.round.chosenBy === "model" ? "Each speaker chose whom to tell." : "Code chose who was told; nothing was sent."} Ask a listener what they were told with \`topics\`.`,
-          `  ${done.round.chosenBy === "model" ? "由说话的人自己决定告诉谁。" : "由代码决定告诉谁，没有发送请求。"}用 topics 可以问听的人听到了什么。`,
+          `  ${done.round.chosenBy === "model" ? "Where there was a choice, the speaker's agent chose whom to tell." : "Code chose who was told; nothing was sent."} Ask a listener what they were told with \`topics\`.`,
+          `  ${done.round.chosenBy === "model" ? "有不止一个人可选时，由说话者的智能体决定告诉谁。" : "由代码决定告诉谁，没有发送请求。"}用 topics 可以问听的人听到了什么。`,
         ),
       );
       if (done.round.problem && options.modelOff !== true) lines.push(say(`  (the model could not be used for some of them: ${done.round.problem})`, `  （其中一些无法使用模型：${done.round.problem}）`));
@@ -210,7 +210,7 @@ export function createGame(c: Case, metered: Metered, sessionId: string, options
     if (b.contradictions.length > 0) {
       lines.push(say("Contradictions:", "矛盾："));
       for (const x of b.contradictions) {
-        const st = b.statements.find((y) => y.suspect === x.suspect && y.assertion === x.assertion)!;
+        const st = b.statements.find((y) => y.suspect === x.suspect && y.assertion === x.assertion && y.source === x.source)!;
         const n = b.evidence.findIndex((e) => e.id === x.evidence) + 1;
         lines.push(say(`  ${nameOf(x.suspect)} said “${st.en}” Record ${n} says otherwise.`, `  ${nameOf(x.suspect)}说“${st.zh}”，与第 ${n} 项记录不符。`));
       }

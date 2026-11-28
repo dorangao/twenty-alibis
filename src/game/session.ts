@@ -360,7 +360,7 @@ export async function gossipRound(metered: Metered, c: Case, session: Session, a
       requests += choice.requests;
       costNano += choice.costNano;
       if (choice.requests === 0) refused++;
-      else if (choice.problem === "failed:outcome-unknown" || choice.problem === "unconfirmed:not-settled") unconfirmed++;
+      else if (choice.unconfirmed) unconfirmed++;
       problem ??= choice.problem;
       if (choice.to !== null) picked.set(wave[j]!.speaker, { to: choice.to, by: "model" });
     }
@@ -405,7 +405,9 @@ export function notebook(c: Case, session: Session): Notebook {
   const statements: Notebook["statements"] = [];
   for (const record of session.turns) {
     for (const s of record.turn.statements) {
-      if (statements.some((x) => x.suspect === record.turn.suspect && x.assertion === s.assertion)) continue;
+      // Once for each speaker and each source: the same words said by someone themselves and
+      // repeated by them from someone else are two statements, by two people.
+      if (statements.some((x) => x.suspect === record.turn.suspect && x.assertion === s.assertion && x.source === s.source)) continue;
       statements.push({ turn: record.n, suspect: record.turn.suspect, assertion: s.assertion, en: s.en, zh: s.zh, ...(s.source !== undefined ? { source: s.source } : {}) });
     }
   }
