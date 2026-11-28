@@ -156,8 +156,17 @@ export interface GossipTrialPlan {
   ceilingNano: number;
   /** The most the spend guard holds for this trial at one moment: a full hold for each request of the largest wave. */
   heldAtOnceNano: number;
-  /** With limits given: the first round they would not let start, and which of the two refuses it. Counted as if every request cost its whole estimate. */
+  /**
+   * With limits given: the first round they would not let start if every request before it
+   * cost its whole estimate, and which of the two refuses it. For round 1 this is exact,
+   * since nothing has been spent yet. For a later round it is a forecast only: a run counts
+   * what the earlier rounds really cost, which is usually less, and may go further.
+   */
   refused: { round: number; by: "stop" | "bound" } | null;
+  /** The most requests a run can send: every id, or none when the limits do not let round 1 start. This one is binding. */
+  most: number;
+  /** How many requests go out if every one costs its whole estimate. A forecast, never more than `most`. */
+  forecast: number;
 }
 
 /** What the two limits count while a trial runs. */
@@ -224,7 +233,10 @@ export async function planGossipTrial(c: Case, config: GossipTrialConfig, limits
     total += round.ceilingNano;
   }
   const widest = Math.min(GOSSIP_WAVE, Math.max(0, ...rounds.map((r) => r.ids.length)));
-  return { rounds, ids: rounds.flatMap((r) => r.ids), ceilingNano: total, heldAtOnceNano: widest * CHOICE_HOLD_NANO, refused };
+  const ids = rounds.flatMap((r) => r.ids);
+  const stoppedAt = refused?.round;
+  const forecast = rounds.filter((r) => stoppedAt === undefined || r.n < stoppedAt).reduce((sum, r) => sum + r.ids.length, 0);
+  return { rounds, ids, ceilingNano: total, heldAtOnceNano: widest * CHOICE_HOLD_NANO, refused, most: stoppedAt === 1 ? 0 : ids.length, forecast };
 }
 
 /**
@@ -543,16 +555,19 @@ export async function gossipTrialCli(argv: readonly string[], deps: GossipTrialC
   );
   if (limits) {
     say(
-      `Limits set for this run: stop ${usd(limits.stopNano)} (confirmed spend plus the estimate of each request in flight; after a request that costs more than its estimate, nothing more is sent), bound ${usd(limits.boundNano)} (confirmed spend plus a full hold for each request in flight or unresolved).`,
-      `本次运行设定的限额：停止线 ${usd(limits.stopNano)}（已确认花费加上每个在途请求的估计；一旦有请求的费用超过估计，就不再发送），硬上限 ${usd(limits.boundNano)}（已确认花费加上每个在途或结果不明的请求的全额保留）。`,
+      `Limits set for this run: stop ${usd(limits.stopNano)} (confirmed spend plus the estimate of each request in flight; after a request that costs more than its estimate, nothing more is sent), bound ${usd(limits.boundNano)} (confirmed spend plus a full hold for each request in flight or unresolved). Of the bound, ${usd(plan.heldAtOnceNano)} is what four requests hold while they are out together; only what is left over is room for the running total of confirmed costs.`,
+      `本次运行设定的限额：停止线 ${usd(limits.stopNano)}（已确认花费加上每个在途请求的估计；一旦有请求的费用超过估计，就不再发送），硬上限 ${usd(limits.boundNano)}（已确认花费加上每个在途或结果不明的请求的全额保留）。硬上限里有 ${usd(plan.heldAtOnceNano)} 是四个请求同时在途时的保留额；剩下的部分才是留给已确认费用累计的空间。`,
     );
-    if (plan.refused)
-      say(
-        plan.refused.by === "bound"
-          ? `With these limits round ${plan.refused.round} would not start: a wave of full holds, on top of the estimate up to there, passes the bound.`
-          : `With these limits round ${plan.refused.round} would not start: by estimate it passes the stop.`,
-        plan.refused.by === "bound" ? `按这些限额，第 ${plan.refused.round} 轮不会开始：一批请求的全额保留，加上到那时为止的估计，超过硬上限。` : `按这些限额，第 ${plan.refused.round} 轮不会开始：按估计它超过停止线。`,
-      );
+    if (plan.refused) {
+      const which: [string, string] = plan.refused.by === "bound" ? ["a wave of full holds passes the bound", "一批请求的全额保留超过硬上限"] : ["its estimate passes the stop", "它的估计超过停止线"];
+      if (plan.refused.round === 1)
+        say(`With these limits round 1 would not start: ${which[0]}. Nothing would be sent.`, `按这些限额，第 1 轮不会开始：${which[1]}。不会发送任何内容。`);
+      else
+        say(
+          `A forecast, not a limit: if every request cost its whole estimate, round ${plan.refused.round} would not start (${which[0]}) and ${plan.forecast} request(s) would go out. A run counts what the earlier rounds really cost, which is usually less, so it may go further: up to all ${plan.most}.`,
+          `这是预测，不是限额：如果每个请求都花掉它的全部估计，第 ${plan.refused.round} 轮不会开始（${which[1]}），会发出 ${plan.forecast} 个请求。运行时按前面几轮的实际费用计算，通常更少，所以可能走得更远：最多全部 ${plan.most} 个。`,
+        );
+    }
   } else {
     say(`No limits are set (${STOP_ENV}, ${BOUND_ENV}), so a run would refuse to start.`, `没有设定限额（${STOP_ENV}、${BOUND_ENV}），运行会拒绝开始。`);
   }
@@ -564,9 +579,8 @@ export async function gossipTrialCli(argv: readonly string[], deps: GossipTrialC
     await runtime.close();
     return 1;
   }
-  // With limits given, only the rounds they would let start count towards what a run could send.
-  const refusedRound = plan.refused?.round;
-  const most = plan.rounds.filter((r) => refusedRound === undefined || r.n < refusedRound).reduce((sum, r) => sum + r.ids.length, 0);
+  // The binding figure: every id, or none when round 1 cannot start. A forecast is said apart from it, above.
+  const most = plan.most;
   const held = heldByTrial(config, await runtime.store.attempts(envelope));
   const paidOpen = Boolean((await runtime.store.totals(envelope)).paidAllowed);
   if (held.length > 0) {

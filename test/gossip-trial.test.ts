@@ -98,8 +98,8 @@ describe("the plan of a gossip trial", () => {
     // What the guard holds for one request is a full context window at the higher price, and the output limit.
     expect(CHOICE_HOLD_NANO).toBe(1_048_576 * 300 + GOSSIP_OUTPUT_TOKENS * 1_500);
     expect(plan.heldAtOnceNano).toBe(4 * CHOICE_HOLD_NANO);
-    expect(plan.refused).toBeNull();
-    expect((await planGossipTrial(c, config, limits)).refused).toBeNull();
+    expect(plan).toMatchObject({ refused: null, most: 24, forecast: 24 });
+    expect(await planGossipTrial(c, config, limits)).toMatchObject({ refused: null, most: 24, forecast: 24 });
   });
 
   it("counts a choice as a token for every byte of its messages, a thousand more, and the whole output limit", async () => {
@@ -134,6 +134,17 @@ describe("the plan of a gossip trial", () => {
     expect(await withLimits({ boundNano: FOUR + plan.ceilingNano })).toBeNull();
     // A bound the size of an ordinary estimate admits nothing: no single request's hold fits under it.
     expect(await withLimits({ boundNano: 30_000_000, stopNano: 30_000_000 })).toEqual({ round: 1, by: "bound" });
+  });
+
+  it("keeps the most a run can send apart from a forecast made of estimates", async () => {
+    const plan = await planGossipTrial(c, config);
+    const two = plan.rounds[0]!.ceilingNano + plan.rounds[1]!.ceilingNano;
+    // Refused at round 1 is exact: nothing is sent. Refused later is a forecast: every id may still go out.
+    expect(await planGossipTrial(c, config, { ...limits, stopNano: 1 })).toMatchObject({ most: 0, forecast: 0 });
+    expect(await planGossipTrial(c, config, { ...limits, boundNano: FOUR })).toMatchObject({ most: 0, forecast: 0 });
+    expect(await planGossipTrial(c, config, { ...limits, stopNano: two - 1 })).toMatchObject({ most: 24, forecast: 8 });
+    expect(await planGossipTrial(c, config, { ...limits, stopNano: plan.ceilingNano - 1 })).toMatchObject({ most: 24, forecast: 16 });
+    expect(await planGossipTrial(c, config, { ...limits, boundNano: FOUR + two })).toMatchObject({ most: 24, forecast: 16 });
   });
 
   it("refuses a config or limits it cannot run", () => {
@@ -392,6 +403,7 @@ describe("the command line of the gossip trial", () => {
     expect(out).toContain("Limits set for this run: stop $0.070000");
     expect(out).toContain("bound $1.360691");
     expect(out).toContain("$0.315173 for each request in flight, $1.260691 at the most at one moment");
+    expect(out).toContain("Of the bound, $1.260691 is what four requests hold while they are out together; only what is left over is room for the running total of confirmed costs.");
     expect(out).not.toContain("would not start");
     expect(t.provider.dispatched).toBe(0);
     expect(t.calls).toEqual({ opened: 1, closed: 1 });
@@ -429,12 +441,8 @@ describe("the command line of the gossip trial", () => {
     const small = { [STOP_ENV]: "0.03", [BOUND_ENV]: "0.03" };
     const plan = await t.cliWith(small, "--plan");
     expect(plan.code).toBe(0);
-    expect(plan.out).toContain("With these limits round 1 would not start: a wave of full holds, on top of the estimate up to there, passes the bound.");
+    expect(plan.out).toContain("With these limits round 1 would not start: a wave of full holds passes the bound. Nothing would be sent.");
     expect(plan.out).toContain("A run now would send at most 0 request(s).");
-    // A stop that fits two rounds by estimate: sixteen requests, and the plan says so.
-    const two = await t.cliWith({ [STOP_ENV]: "0.009", [BOUND_ENV]: "2" }, "--plan");
-    expect(two.out).toContain("With these limits round 3 would not start: by estimate it passes the stop.");
-    expect(two.out).toContain("A run now would send at most 16 request(s).");
     const run = await t.cliWith(small);
     expect(run.code).toBe(1);
     expect(run.out).toContain("STOPPED: round 1 was not started");
@@ -458,6 +466,26 @@ describe("the command line of the gossip trial", () => {
     expect(t.provider.dispatched).toBe(0);
     expect((await t.cli("--plan")).code).toBe(0);
     expect(t.calls).toEqual({ opened: 2, closed: 2 });
+  });
+
+  it("never promises fewer requests than a run can send: a forecast from estimates is said as a forecast", async () => {
+    // By estimate these limits stop before round 2; replies that cost far less than their estimate let all three rounds run.
+    for (const [given, forecast] of [[{ [STOP_ENV]: "0.007", [BOUND_ENV]: "1.5" }, 8], [{ [STOP_ENV]: "0.07", [BOUND_ENV]: "1.27" }, 16]] as const) {
+      const t = setup(picks(0));
+      const plan = await t.cliWith(given, "--plan");
+      expect(plan.code).toBe(0);
+      expect(plan.out).toContain(`A forecast, not a limit: if every request cost its whole estimate, round ${forecast / 8 + 1} would not start`);
+      expect(plan.out).toContain(`and ${forecast} request(s) would go out`);
+      expect(plan.out).toContain("up to all 24.");
+      expect(plan.out).toContain("A run now would send at most 24 request(s).");
+      expect(plan.out).not.toMatch(/at most (8|16) request/);
+      const run = await t.cliWith(given);
+      expect(run.out).toContain("A run now would send at most 24 request(s).");
+      const said = Number(/A run now would send at most (\d+) request\(s\)\./.exec(run.out)![1]);
+      expect(t.provider.dispatched).toBe(24);
+      expect(t.provider.dispatched).toBeLessThanOrEqual(said);
+      expect(run.code).toBe(0);
+    }
   });
 
   it("runs, prints each choice and the summary, and is closed afterwards", async () => {
