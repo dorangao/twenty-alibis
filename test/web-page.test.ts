@@ -15,7 +15,9 @@ import { bodyOf, nodeListener } from "../src/web/node";
 import { memorySessions } from "../src/web/sessions";
 import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
+import { GOSSIP_LOOK_MS, GOSSIP_LOOKS, roundSummary, type Round } from "../web/src/gossip-text";
 import { supersedes } from "../web/src/latest";
+import { SESSION_LEASE_MS } from "../src/web/redis-sessions";
 import { S, victimLine } from "../web/src/strings";
 
 const built = compilePlot("lighthouse", lighthouseSkeleton, lighthousePeople);
@@ -339,6 +341,40 @@ describe("the page", () => {
     expect(supersedes(at("a", 2), at("a", 2))).toBe(true);
     expect(supersedes(at("a", 3), at("a", 2))).toBe(false);
     expect(supersedes(at("a", 3), at("a", 1))).toBe(false);
+  });
+
+  it("says of a gossip round only what happened in it: who picked, who told nobody, and what is unconfirmed", () => {
+    const talk = (by: "code" | "model") => ({ from: "P1", to: "P2", by });
+    const round = (over: Partial<Round>): Round => ({ n: 1, after: 4, state: "done", chosenBy: "model", talks: [], asked: 0, requests: 0, nano: 0, unconfirmed: 0, ...over });
+    // Model off: code picked, and says so. With nobody told there is nothing to say.
+    expect(roundSummary("en", round({ chosenBy: "code", talks: [talk("code"), talk("code")] }))).toEqual(["Code chose who was told. Nothing was sent."]);
+    expect(roundSummary("zh", round({ chosenBy: "code", talks: [talk("code")] }))).toEqual(["由代码决定告诉谁。没有发送请求。"]);
+    expect(roundSummary("en", round({ chosenBy: "code" }))).toEqual([]);
+    // Every agent chose.
+    expect(roundSummary("en", round({ asked: 3, requests: 3, talks: [talk("model"), talk("model"), talk("model")] }))).toEqual(["3 speakers' agents chose whom to tell."]);
+    // A mixed round: one chose, one had a single candidate, two could not ask, one request unconfirmed.
+    const mixed = round({ asked: 3, requests: 2, unconfirmed: 1, talks: [talk("model"), talk("code")] });
+    expect(roundSummary("en", mixed)).toEqual([
+      "1 speaker's agent chose whom to tell.",
+      "1 had one person left to tell, and code told them.",
+      "2 were to ask their agent and told nobody: the model could not be used, or its answer could not be. Code does not pick for them.",
+      "1 request went out with its cost unconfirmed. What it cost, if anything, is counted on the server and is not in the page's total.",
+    ]);
+    expect(roundSummary("zh", mixed)).toEqual([
+      "1 位说话者的智能体自己决定了告诉谁。",
+      "1 位只剩一个人可告诉，由代码告诉了那个人。",
+      "2 位本该由智能体来选，但没能选成（模型用不了，或回复不可用），所以谁也没告诉。代码不会替它们选。",
+      "有 1 次请求已经发出，但费用未确认。它们如果产生了费用，由服务器计入，不在页面的合计里。",
+    ]);
+    // Nobody is credited with a choice when none was accepted, in either language.
+    for (const lang of ["en", "zh"] as const) {
+      for (const none of [round({ asked: 4 }), round({ asked: 2, requests: 2, unconfirmed: 2 }), round({ asked: 1, talks: [talk("code")] })]) {
+        expect(roundSummary(lang, none).join(" ")).not.toMatch(/chose whom to tell|自己决定了告诉谁/);
+      }
+    }
+    // The page looks at a round someone else is running for longer than a lost server holds the game, then stops.
+    expect(GOSSIP_LOOKS * GOSSIP_LOOK_MS).toBeGreaterThan(SESSION_LEASE_MS);
+    expect(GOSSIP_LOOKS).toBeLessThanOrEqual(30);
   });
 
   it("says where the body was found when that is not where the victim died", () => {

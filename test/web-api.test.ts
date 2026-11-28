@@ -17,6 +17,7 @@ import { memoryAllowance, redisAllowance, DEFAULT_LIMITS, type Allowance } from 
 import { redisSessions } from "../src/web/redis-sessions";
 import { memorySessions, type SessionRecord, type SessionStore } from "../src/web/sessions";
 import type { View } from "../src/web/view";
+import { roundSummary, unconfirmedSends } from "../web/src/gossip-text";
 import { compilePlot } from "../src/writer/compile";
 import { lighthousePeople, lighthouseSkeleton } from "../src/writer/fixtures/lighthouse";
 import { redisRun, redisUrl } from "./redis-run";
@@ -1639,7 +1640,7 @@ describe("gossip over HTTP", () => {
     expect(after.gossip).toEqual({
       every: 2,
       due: false,
-      rounds: [{ n: 1, after: 2, state: "done", chosenBy: "code", talks: [{ from: "P1", to: "P3", by: "code" }, { from: "P2", to: "P4", by: "code" }], requests: 0, nano: 0 }],
+      rounds: [{ n: 1, after: 2, state: "done", chosenBy: "code", talks: [{ from: "P1", to: "P3", by: "code" }, { from: "P2", to: "P4", by: "code" }], asked: 0, requests: 0, nano: 0, unconfirmed: 0 }],
     });
     expect(after.cost).toEqual({ requests: 0, nano: 0, unfinished: 0 });
     // Each listener has one more topic, marked with who told them. What was said is not in the reply.
@@ -1708,7 +1709,7 @@ describe("gossip over HTTP", () => {
     const after = round.body.view;
     // Written down as begun, then kept: two revisions.
     expect(after.revision).toBe(view.revision + 2);
-    expect(after.gossip!.rounds).toEqual([{ n: 1, after: 2, state: "done", chosenBy: "model", talks: [{ from: "P1", to: "P3", by: "model" }, { from: "P2", to: "P4", by: "model" }], requests: 2, nano: 2 * PRICE_EACH }]);
+    expect(after.gossip!.rounds).toEqual([{ n: 1, after: 2, state: "done", chosenBy: "model", talks: [{ from: "P1", to: "P3", by: "model" }, { from: "P2", to: "P4", by: "model" }], asked: 2, requests: 2, nano: 2 * PRICE_EACH, unconfirmed: 0 }]);
     expect(after.cost).toEqual({ requests: before.cost.requests + 2, nano: before.cost.nano + 2 * PRICE_EACH, unfinished: 0 });
     // The requests carried the public case and the speaker's own claim, and no id of the case's.
     for (const request of provider.requests.slice(before.sent)) {
@@ -1729,7 +1730,9 @@ describe("gossip over HTTP", () => {
     const roundA = await a.act(viewA, "gossip");
     expect(roundA.status).toBe(200);
     expect(on.provider.dispatched).toBe(sent);
-    expect(roundA.body.view.gossip).toMatchObject({ due: false, rounds: [{ n: 1, state: "done", chosenBy: "model", talks: [], requests: 0, nano: 0 }] });
+    // Two speakers were to ask their agents; neither could, nothing was sent, and nothing is unconfirmed.
+    expect(roundA.body.view.gossip).toMatchObject({ due: false, rounds: [{ n: 1, state: "done", chosenBy: "model", talks: [], asked: 2, requests: 0, nano: 0, unconfirmed: 0 }] });
+    expect(roundSummary("en", roundA.body.view.gossip!.rounds[0]!)).toEqual(["2 were to ask their agent and told nobody: the model could not be used, or its answer could not be. Code does not pick for them."]);
     expect(roundA.body.view.revision).toBe(viewA.revision + 1);
     expect(roundA.body.view.topics.some((t) => t.told)).toBe(false);
 
@@ -1755,6 +1758,39 @@ describe("gossip over HTTP", () => {
     expect(provider.dispatched - sent).toBe(1);
     expect(round.body.view.gossip!.rounds[0]).toMatchObject({ state: "done", chosenBy: "model", requests: 1, nano: PRICE_EACH });
     expect(round.body.view.gossip!.rounds[0]!.talks).toEqual([{ from: "P1", to: "P3", by: "model" }]);
+    // One agent chose; the other speaker was to ask and could not. The page says exactly that.
+    expect(round.body.view.gossip!.rounds[0]).toMatchObject({ asked: 2, unconfirmed: 0 });
+    expect(roundSummary("en", round.body.view.gossip!.rounds[0]!)).toEqual([
+      "1 speaker's agent chose whom to tell.",
+      "1 was to ask its agent and told nobody: the model could not be used, or its answer could not be. Code does not pick for them.",
+    ]);
+  });
+
+  it("says so when a round's requests went out and their cost is not confirmed: they are counted apart, and no agent is credited with a choice", async () => {
+    const { provider, metered: inner } = live();
+    // The model answers, but the answer never arrives: the request may have been billed.
+    const metered: Metered = async (request) => {
+      if (!request.attemptId.includes(":g")) return inner(request);
+      await inner(request);
+      return { ok: false, attemptId: request.attemptId, sent: true, reason: "outcome-unknown" };
+    };
+    const s = server({ metered, modelOff: false });
+    const view = await toFirstRound(s);
+    const sent = provider.dispatched;
+    const round = await s.act(view, "gossip");
+    expect(round.status).toBe(200);
+    expect(provider.dispatched - sent).toBe(2);
+    const shown = round.body.view.gossip!.rounds[0]!;
+    // Done, nobody told, two requests out, none confirmed. Not an interrupted round: the count is known.
+    expect(shown).toEqual({ n: 1, after: 2, state: "done", chosenBy: "model", talks: [], asked: 2, requests: 2, nano: 0, unconfirmed: 2 });
+    expect(round.body.view.cost).toEqual({ ...view.cost, requests: view.cost.requests + 2, unfinished: 0 });
+    expect(unconfirmedSends(round.body.view)).toBe(2);
+    for (const lang of ["en", "zh"] as const) {
+      const said = roundSummary(lang, shown).join(" ");
+      expect(said).not.toMatch(/chose whom to tell|自己决定了告诉谁/);
+      expect(said).toMatch(lang === "en" ? /2 were to ask their agent and told nobody/ : /2 位本该由智能体来选，但没能选成/);
+      expect(said).toMatch(lang === "en" ? /2 requests went out with their cost unconfirmed/ : /有 2 次请求已经发出，但费用未确认/);
+    }
   });
 
   it("writes the round down before its first request: a server lost in the middle leaves it closed, empty and counted as unfinished, and it is never sent again", async () => {
@@ -1772,7 +1808,7 @@ describe("gossip over HTTP", () => {
     const look = await s.call("GET", `/api/sessions/${view.session}`);
     const after = look.body.view;
     expect(after.revision).toBe(view.revision + 1);
-    expect(after.gossip).toEqual({ every: 2, due: false, rounds: [{ n: 1, after: 2, state: "interrupted", chosenBy: "model", talks: [], requests: 0, nano: 0 }] });
+    expect(after.gossip).toEqual({ every: 2, due: false, rounds: [{ n: 1, after: 2, state: "interrupted", chosenBy: "model", talks: [], asked: 2, requests: 0, nano: 0, unconfirmed: 0 }] });
     // What it cost, if anything, is not known here: it is one unfinished thing, not a number of requests.
     expect(after.cost).toEqual({ ...view.cost, unfinished: 1 });
     expect((await stored(s.deps, view)).session.gossip!.rounds[0]).toMatchObject({ pending: true, events: [] });

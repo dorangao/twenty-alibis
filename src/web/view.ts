@@ -85,9 +85,17 @@ export interface View {
       /** Who was to pick the listeners. */
       chosenBy: "code" | "model";
       talks: { from: string; to: string; by: "code" | "model" }[];
+      /** Speakers who were to ask their agent. Those among them with no talk told nobody. */
+      asked: number;
       /** Requests that left the server for this round, and their confirmed cost. */
       requests: number;
       nano: number;
+      /**
+       * Of those requests, the ones whose cost is not confirmed: they failed on the way or came
+       * back unsettled. Their cost, if any, is with the spend guard and not in `nano`. For an
+       * interrupted round this is 0 and means nothing: what such a round sent is not known.
+       */
+      unconfirmed: number;
     }[];
   };
   /**
@@ -233,8 +241,10 @@ export function viewOf(c: Case, record: SessionRecord, model: "on" | "off", inte
               state: r.state,
               chosenBy: r.chosenBy,
               talks: r.events.map((e) => ({ from: h.person.handle(e.from), to: h.person.handle(e.to), by: e.by })),
+              asked: r.calls,
               requests: r.requests,
               nano: r.costNano,
+              unconfirmed: r.unconfirmed,
             })),
           },
         }

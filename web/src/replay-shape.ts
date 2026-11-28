@@ -59,7 +59,7 @@ const move: Check = (x) =>
 const gossip = shape({
   every: count,
   due: bool,
-  rounds: list(shape({ n: count, after: count, state: oneOf("done"), chosenBy: oneOf("code"), talks: list(shape({ from: person, to: person, by: oneOf("code") })), requests: oneOf(0), nano: oneOf(0) })),
+  rounds: list(shape({ n: count, after: count, state: oneOf("done"), chosenBy: oneOf("code"), talks: list(shape({ from: person, to: person, by: oneOf("code") })), asked: oneOf(0), requests: oneOf(0), nano: oneOf(0), unconfirmed: oneOf(0) })),
 });
 
 const verdict = shape({ accused: person, cited: list(handle("E")), outcome: oneOf("solved"), missing: list(str), open: list(person), accusedRuledOut: bool, actions: count });

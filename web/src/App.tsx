@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, GameError, type CasesReply, type View, type ViewReply } from "./api";
+import { GOSSIP_LOOK_MS, GOSSIP_LOOKS, roundSummary, unconfirmedSends } from "./gossip-text";
 import { supersedes, type Stamp } from "./latest";
 import { listReplays, loadReplay, PREVIEW, REPLAYS, stepBy, type Listed, type Replay, type ReplayMove } from "./replay";
 import { dollars, pick, S, victimLine, type Lang, type Text } from "./strings";
@@ -227,6 +228,27 @@ export function App() {
     void run(() => api.gossip(view), view, true);
   }, [busy, dueRound, run, view]);
 
+  /**
+   * A round that someone else's request is running: another tab, or a server that may never
+   * come back. This page did not start it and must not: it only looks, with a read that
+   * changes nothing, a bounded number of times. When the round is done or is given up as
+   * interrupted, the view says so and the looking stops.
+   */
+  const runningRound = view && !playing && view.gossip?.rounds.some((r) => r.state === "running") ? `${view.session}:${view.revision}` : null;
+  const looks = useRef({ key: "", count: 0 });
+  const [, setLooked] = useState(0);
+  useEffect(() => {
+    if (!runningRound || busy || !view) return;
+    if (looks.current.key !== runningRound) looks.current = { key: runningRound, count: 0 };
+    if (looks.current.count >= GOSSIP_LOOKS) return;
+    const session = view.session;
+    const timer = window.setTimeout(() => {
+      looks.current.count++;
+      void read(session, S.notRefreshed, S.refresh).finally(() => setLooked((n) => n + 1));
+    }, GOSSIP_LOOK_MS);
+    return () => window.clearTimeout(timer);
+  }, [busy, read, runningRound, view]);
+
   return (
     <div className="app">
       <header className="top">
@@ -245,6 +267,11 @@ export function App() {
               <span className="meter" title={t(onScreen.model === "on" ? S.modelOn : S.modelOff)}>
                 <strong>{onScreen.cost.requests}</strong> {t(S.requests)} · <strong>{dollars(onScreen.cost.nano)}</strong> {t(S.confirmed)}
               </span>
+              {unconfirmedSends(onScreen) > 0 && (
+                <span className="meter" title={t(S.unconfirmedHint)}>
+                  <strong>{unconfirmedSends(onScreen)}</strong> {t(S.unconfirmed)}
+                </span>
+              )}
               {onScreen.cost.unfinished > 0 && (
                 <span className="meter" title={t(S.unfinishedHint)}>
                   <strong>{onScreen.cost.unfinished}</strong> {t(S.unfinished)}
@@ -291,6 +318,7 @@ export function App() {
           onInspect={(inspection) => run(() => api.inspect(view, inspection), view)}
           onAccuse={(person, evidence) => run(() => api.accuse(view, person, evidence), view)}
           onGossip={() => run(() => api.gossip(view), view, true)}
+          onLook={() => void read(view.session, S.notRefreshed, S.refresh)}
           onLeave={leave}
         />
       ) : (
@@ -455,6 +483,7 @@ function Watching({ replay, step, lang, onStep, onLeave }: { replay: Replay; ste
         shown={null}
         watching={{ focus: frame.move && frame.move.kind === "ask" ? frame.move.person : null }}
         onGossip={() => undefined}
+        onLook={() => undefined}
         onTopic={() => undefined}
         onOwn={() => undefined}
         onInspect={() => undefined}
@@ -476,6 +505,8 @@ interface GameProps {
   onAccuse: (person: string, evidence: string[]) => void;
   /** Run the gossip round that is due. The page asks once by itself; this is for the player to ask again. */
   onGossip: () => void;
+  /** Look at where the game stands. It changes nothing on the server. */
+  onLook: () => void;
   onLeave: () => void;
   /**
    * Set when this is a replay's frame and not a game: nothing on it can be acted on. `focus`
@@ -484,7 +515,7 @@ interface GameProps {
   watching?: { focus: string | null };
 }
 
-function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, onGossip, onLeave, watching }: GameProps) {
+function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, onGossip, onLook, onLeave, watching }: GameProps) {
   const t = (text: Text) => pick(lang, text);
   const [selected, setSelected] = useState<string | null>(null);
   const [accusing, setAccusing] = useState(false);
@@ -554,7 +585,14 @@ function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, on
                 {r.state === "interrupted" ? (
                   <p className="hint warn">{t(S.gossipInterrupted)}</p>
                 ) : r.state === "running" ? (
-                  <p className="hint">{t(S.gossipInProgress)}</p>
+                  <p className="hint">
+                    {t(S.gossipInProgress)}{" "}
+                    {!watching && (
+                      <button className="link" onClick={onLook}>
+                        {t(S.gossipLook)}
+                      </button>
+                    )}
+                  </p>
                 ) : (
                   <>
                     {r.talks.length === 0 && <p className="hint">{t(S.gossipNobody)}</p>}
@@ -573,7 +611,11 @@ function Game({ view, lang, busy, shown, onTopic, onOwn, onInspect, onAccuse, on
                         </li>
                       ))}
                     </ul>
-                    <p className="hint">{t(r.chosenBy === "model" ? S.gossipByModel : S.gossipByCode)}</p>
+                    {roundSummary(lang, r).map((line, i) => (
+                      <p className="hint" key={i}>
+                        {line}
+                      </p>
+                    ))}
                   </>
                 )}
               </li>
