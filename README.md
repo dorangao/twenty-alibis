@@ -156,7 +156,7 @@ Gossip only adds ways to reach statements the player could already reach, each f
 
 Every game started in the browser has gossip, and so has the terminal game with `--gossip`. In the browser a round runs by itself as soon as it is due, and a panel lists who has spoken with whom. On a server, a round is written down as closed and empty before its first request goes out: if the server is lost in the middle, the game stands with that round over, the page says it did not finish, and its requests are never sent again. What such a round cost, if anything, only the spend guard's own count knows; the page counts it as one unfinished thing.
 
-So far gossip has run only against a scripted stand-in for the model: how often a real reply is usable, and what a round costs, are not measured yet. The self-play detective plays without it, and a replay of one of its games is shown without it, as it was played.
+So far gossip has run only against a scripted stand-in for the model: how often a real reply is usable, and what a round costs, are not measured yet. A trial that would measure it is written and has not been run: three rounds on the lighthouse, at most 24 requests, each sent once, ever, with a cap of its own ([`src/trial/gossip-trial.ts`](src/trial/gossip-trial.ts); `npm run trial:gossip -- --plan` lists every request it would send and sends nothing). The self-play detective plays without it, and a replay of one of its games is shown without it, as it was played.
 
 开启"私下交谈"的一局里，每用掉四次行动，在场的人就会私下谈一轮，最多三轮（案件自带的话题和可查看项不到八个时，比如手写案件，改为每两次行动一轮）。真相不变，每个人自己的说法也不变；变的只是谁能转述谁的话。谁开口、转述哪一句、可以告诉哪几个人，都由代码决定：每轮最多八人依次开口，各转述自己的一句陈述，而且只能是此刻玩家本来就问得到的那一句；每人有至多四个还没听过这句话的人可选。模型开启时，由开口者的智能体从中选一个人，它只做这一件事：有两个以上的人可选时，每人一次最低推理强度的 Muse Ember 请求，同时最多四个，回复必须指明一个字母；只剩一个人可告诉时不问模型，由代码告诉那个人，不发送请求；它看到的是公开案情、自己的口吻、自己的说法和候选人的名字，看不到任何隐藏的真相。回复不是候选字母、被截断，或者请求被额度守卫拒绝，就谁也不告诉：开局时模型是开着的一局里，代码不会替它免费选人。开局时模型就关着的一局里，由代码告诉第一个候选人，不发送任何请求。玩家只会被告知谁找谁谈过，不会被告知谈了什么；听的人会多出一个话题"某某跟你说了什么？"，问它要用一次行动，不发送请求，得到的是那个人的陈述，注明出处，由代码写成。转述也只是陈述，不能证明任何事：它能打开那句陈述能打开的东西，记录可以与它矛盾，经由转述传到玩家耳中的谎言也算"听到了"，但指认仍然只凭记录。
 
@@ -164,7 +164,7 @@ So far gossip has run only against a scripted stand-in for the model: how often 
 
 在浏览器里开始的每一局都带私下交谈，终端游戏加上 `--gossip` 也是。浏览器里，一轮到点就自动进行，页面上有一栏列出谁找谁谈过。在服务器上，一轮在发出第一个请求之前，就先被记成"已结束、无人传话"：如果服务器中途丢失，这一局就停在这一轮已经结束的状态，页面会说明它没有完成，它的请求也不会再发一次。这样的一轮如果产生了费用，只有额度守卫自己的计数知道；页面把它算作一项"未完成"。
 
-目前私下交谈只对着脚本化的模型替身跑过：真实回复有多少可用、一轮要花多少，都还没有测。自我对弈的侦探不带私下交谈；它的对局做成回放时也不带，和当时玩的一样。
+目前私下交谈只对着脚本化的模型替身跑过：真实回复有多少可用、一轮要花多少，都还没有测。用来测它的试验已经写好，还没有运行：在灯塔案上跑三轮，最多 24 个请求，每个只发一次，并有它自己的上限（[`src/trial/gossip-trial.ts`](src/trial/gossip-trial.ts)；`npm run trial:gossip -- --plan` 会列出它将发送的每个请求，但不发送任何内容）。自我对弈的侦探不带私下交谈；它的对局做成回放时也不带，和当时玩的一样。
 
 ### How a new case is written · 新案件怎么写出来
 
