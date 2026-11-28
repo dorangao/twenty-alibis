@@ -323,6 +323,13 @@ export interface GossipArgs {
  * back unusable makes no event; after a wave with a refusal or a failure, no further wave is
  * sent. The events are then applied together, in the speakers' order.
  *
+ * `args.model` says who was to pick, and that is fixed by how the session began, not by
+ * whether the model can be reached now. A round whose speakers were to ask the model and
+ * could not tells nobody for them: code does not step in and pick for free.
+ *
+ * If `metered` throws (a server that has lost its hold on the session does), the throw is
+ * passed on only after every request of that wave has come back: none is left in flight.
+ *
  * The round is kept even when it has no events: the clock has moved.
  */
 export async function gossipRound(metered: Metered, c: Case, session: Session, args: GossipArgs): Promise<{ session: Session; round: GossipRound }> {
@@ -332,26 +339,37 @@ export async function gossipRound(metered: Metered, c: Case, session: Session, a
   const n = session.gossip.rounds.length + 1;
   const plans = planRound(c, session.gossip, heldBy(session), n);
   const calls = args.model ? plans.filter((p) => p.candidates.length > 1) : [];
-  const picked = new Map<string, string>();
-  for (const plan of plans) if (!calls.includes(plan)) picked.set(plan.speaker, plan.candidates[0]!);
+  const picked = new Map<string, { to: string; by: "code" | "model" }>();
+  // With one candidate there is nothing to choose, whoever was to pick.
+  for (const plan of plans) if (!calls.includes(plan)) picked.set(plan.speaker, { to: plan.candidates[0]!, by: "code" });
 
   let requests = 0;
+  let unconfirmed = 0;
+  let refused = 0;
   let costNano = 0;
   let problem: string | undefined;
   for (let i = 0; i < calls.length && problem === undefined; i += GOSSIP_WAVE) {
     const wave = calls.slice(i, i + GOSSIP_WAVE);
-    const choices = await Promise.all(
+    const outcomes = await Promise.allSettled(
       wave.map((plan) => chooseRecipient({ metered, c, plan, attemptId: `${session.id}:g${n}:${plan.index}`, ...(args.cacheKey ? { cacheKey: args.cacheKey } : {}) })),
     );
-    for (const [j, choice] of choices.entries()) {
+    const thrown = outcomes.find((o) => o.status === "rejected");
+    if (thrown) throw thrown.reason;
+    for (const [j, outcome] of outcomes.entries()) {
+      const choice = (outcome as PromiseFulfilledResult<Awaited<ReturnType<typeof chooseRecipient>>>).value;
       requests += choice.requests;
       costNano += choice.costNano;
+      if (choice.requests === 0) refused++;
+      else if (choice.problem === "failed:outcome-unknown" || choice.problem === "unconfirmed:not-settled") unconfirmed++;
       problem ??= choice.problem;
-      if (choice.to !== null) picked.set(wave[j]!.speaker, choice.to);
+      if (choice.to !== null) picked.set(wave[j]!.speaker, { to: choice.to, by: "model" });
     }
   }
 
-  const events: GossipEvent[] = plans.flatMap((plan) => (picked.has(plan.speaker) ? [{ from: plan.speaker, to: picked.get(plan.speaker)!, topic: plan.topic }] : []));
+  const events: GossipEvent[] = plans.flatMap((plan) => {
+    const pick = picked.get(plan.speaker);
+    return pick ? [{ from: plan.speaker, to: pick.to, topic: plan.topic, by: pick.by }] : [];
+  });
   const round: GossipRound = {
     n,
     at: session.actions,
@@ -360,6 +378,8 @@ export async function gossipRound(metered: Metered, c: Case, session: Session, a
     speakers: plans.length,
     calls: calls.length,
     requests,
+    unconfirmed,
+    refused,
     costNano,
     ...(problem !== undefined ? { problem } : {}),
   };

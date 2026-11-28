@@ -15,7 +15,6 @@
 /** The validator's faults, by code. */
 export const ISSUE_ZH: Record<string, string> = {
   "duplicate-id": "同一个 id 被两类不同的东西共用了。每个 id 只能用一次，请改掉其中一个。",
-  "reserved-id": "有话题的 id 以 ~g 开头。这种写法留给游戏自己生成的话题（嫌疑人私下听到的话），请换一个 id。",
   "unknown-id": "引用了一个不存在的 id，或者它不是这里要求的那一类。请检查拼写，或补上被引用的条目。",
   "missing-whereabouts": "有嫌疑人在某个时段没有写所在位置。每个人在每个时段都要有位置（whereabouts）。",
   "impossible-move": "有嫌疑人在相邻两个时段之间，从一个房间到了不相邻的房间。请改位置，或在 locations 里把这两个房间设为相邻。",

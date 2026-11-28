@@ -5,7 +5,7 @@ import { isOpen } from "../src/case/access";
 import type { Case } from "../src/case/schema";
 import { solve } from "../src/case/solver";
 import { validateCase } from "../src/case/validate";
-import { GOSSIP_CANDIDATES, GOSSIP_EVERY, GOSSIP_ROUNDS, GOSSIP_SPEAKERS, GOSSIP_WAVE, hearsayId, planRound, type GossipRound } from "../src/game/gossip";
+import { GOSSIP_CANDIDATES, GOSSIP_EVERY, GOSSIP_EVERY_SHORT, GOSSIP_ROUNDS, GOSSIP_SPEAKERS, GOSSIP_WAVE, gossipEvery, hearsayId, hearsayPrefix, planRound, type GossipRound } from "../src/game/gossip";
 import { accuse, ask, gossipDue, gossipRound, heldBy, inspect, notebook, reveal, SessionError, startSession, topicMenu, type Session } from "../src/game/session";
 import { createGame, noModel } from "../src/game/terminal";
 import { createMetered, type Metered } from "../src/metered";
@@ -55,7 +55,8 @@ async function spend(session: Session, count: number, topicsOnly = false): Promi
   }
   return s;
 }
-const round = (events: GossipRound["events"], n = 1): GossipRound => ({ n, at: GOSSIP_EVERY * n, events, chosenBy: "code", speakers: events.length, calls: 0, requests: 0, costNano: 0 });
+type Told = { from: string; to: string; topic: string };
+const round = (events: Told[], n = 1): GossipRound => ({ n, at: GOSSIP_EVERY * n, events: events.map((e) => ({ ...e, by: "code" as const })), chosenBy: "code", speakers: events.length, calls: 0, requests: 0, unconfirmed: 0, refused: 0, costNano: 0 });
 const code = (s: Session) => gossipRound(never, c, s, { model: false });
 const errorCode = async (run: () => unknown): Promise<string> => {
   try {
@@ -123,6 +124,38 @@ describe("when a gossip round is due", () => {
   });
 });
 
+describe("a case too short for a round every four actions", () => {
+  const a = archivePass;
+  const [ada, ben] = [a.suspects[0]!.id, a.suspects[1]!.id];
+
+  it("has one every two, so the handwritten case reaches gossip and can be played through it with nothing sent", async () => {
+    // Two topics and one inspection are all the case offers: three actions, never four.
+    expect(a.actions.topics.length + a.actions.inspections.length).toBe(3);
+    expect(gossipEvery(a)).toBe(GOSSIP_EVERY_SHORT);
+    expect(gossipEvery(c)).toBe(GOSSIP_EVERY);
+
+    let s = startSession(a, "short", { gossip: true });
+    s = (await ask(noModel, a, s, { suspect: ben, topic: a.actions.topics.find((t) => t.suspect === ben)!.id })).session;
+    expect(gossipDue(a, s)).toBe(false);
+    // Ada is not asked. Her statement will reach the player through someone she told.
+    s = inspect(a, s, a.actions.inspections[0]!.id).session;
+    expect(gossipDue(a, s)).toBe(true);
+    const done = await gossipRound(never, a, s, { model: false });
+    s = done.session;
+    // Only Ada and Ben have anything to pass on.
+    expect(done.round.events.map((e) => e.from).sort()).toEqual([ada, ben].sort());
+    const fromAda = done.round.events.find((e) => e.from === ada)!;
+    const heard = await ask(never, a, s, { suspect: fromAda.to, topic: hearsayId(a, 1, 0), language: "en" });
+    s = heard.session;
+    expect(heard.turn.statements).toEqual([expect.objectContaining({ source: ada, en: `${a.suspects[0]!.name.en} told me: “I was in the foyer at 21:00.”` })]);
+    // Ada's lie is caught by the door log, though she was never spoken to.
+    expect(notebook(a, s).contradictions).toEqual([expect.objectContaining({ suspect: fromAda.to, source: ada })]);
+    const end = accuse(a, s, { suspect: ada, evidence: s.evidence }).session;
+    expect(end.verdict).toMatchObject({ outcome: "solved", actions: 3 });
+    expect(reveal(a, end).lies).toEqual([expect.objectContaining({ suspect: ada, heard: true, caught: true })]);
+  });
+});
+
 describe("who speaks, what they pass on, and to whom", () => {
   const start = startSession(c, "g", { gossip: true });
 
@@ -163,12 +196,18 @@ describe("who speaks, what they pass on, and to whom", () => {
     expect(planRound(locked, after.gossip!, heldBy(after), 1).some((p) => p.speaker === ada)).toBe(true);
   });
 
+  it("never passes on a topic that states nothing", () => {
+    const quiet: Case = { ...c, actions: { ...c.actions, topics: c.actions.topics.map((t) => (t.id === "t-01" ? { ...t, yields: [] } : t)) } };
+    const s = startSession(quiet, "q", { gossip: true });
+    expect(planRound(quiet, s.gossip!, heldBy(s), 1).map((p) => p.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
   it("with the model off, tells the first candidate and sends nothing", async () => {
     const s = await spend(start, GOSSIP_EVERY);
     const plans = planRound(c, s.gossip!, heldBy(s), 1);
     const done = await code(s);
-    expect(done.round.events).toEqual(plans.map((p) => ({ from: p.speaker, to: p.candidates[0], topic: p.topic })));
-    expect(done.round).toMatchObject({ speakers: 8, calls: 0, requests: 0, costNano: 0 });
+    expect(done.round.events).toEqual(plans.map((p) => ({ from: p.speaker, to: p.candidates[0], topic: p.topic, by: "code" })));
+    expect(done.round).toMatchObject({ speakers: 8, calls: 0, requests: 0, unconfirmed: 0, refused: 0, costNano: 0 });
     expect(done.round.problem).toBeUndefined();
   });
 });
@@ -192,8 +231,8 @@ describe("what a listener can then be asked", () => {
     const s = told("h");
     expect(topicMenu(c, s, listener)).toEqual([
       { id: "t-07", label: c.actions.topics.find((t) => t.id === "t-07")!.label, heard: false },
-      { id: hearsayId(1, idx(WITNESS)), label: { en: `What did ${name(WITNESS).en} tell you?`, zh: `${name(WITNESS).zh}跟你说了什么？` }, heard: false, gossip: 1 },
-      { id: hearsayId(1, idx(LIAR)), label: { en: `What did ${name(LIAR).en} tell you?`, zh: `${name(LIAR).zh}跟你说了什么？` }, heard: false, gossip: 1 },
+      { id: hearsayId(c, 1, idx(WITNESS)), label: { en: `What did ${name(WITNESS).en} tell you?`, zh: `${name(WITNESS).zh}跟你说了什么？` }, heard: false, gossip: 1 },
+      { id: hearsayId(c, 1, idx(LIAR)), label: { en: `What did ${name(LIAR).en} tell you?`, zh: `${name(LIAR).zh}跟你说了什么？` }, heard: false, gossip: 1 },
     ]);
     expect(topicMenu(c, s, "s-08")).toHaveLength(1);
   });
@@ -201,53 +240,59 @@ describe("what a listener can then be asked", () => {
   it("costs one action, sends nothing, and gives the speaker's statement, attributed and worded by code", async () => {
     const s = told("h");
     const own = (await ask(noModel, c, startSession(c, "own"), { suspect: WITNESS, topic: "t-02" })).turn.statements[0]!;
-    const result = await ask(never, c, s, { suspect: listener, topic: hearsayId(1, idx(WITNESS)), language: "zh" });
+    const result = await ask(never, c, s, { suspect: listener, topic: hearsayId(c, 1, idx(WITNESS)), language: "zh" });
     expect(result).toMatchObject({ replayed: false, recorded: true });
     expect(result.session.actions).toBe(1);
-    expect(result.turn).toMatchObject({ suspect: listener, topic: hearsayId(1, idx(WITNESS)), topicGiven: true, language: "zh", source: "rendered", requests: 0, costNano: 0 });
+    expect(result.turn).toMatchObject({ suspect: listener, topic: hearsayId(c, 1, idx(WITNESS)), topicGiven: true, language: "zh", source: "rendered", requests: 0, costNano: 0 });
     expect(result.turn.statements).toEqual([{ assertion: "a-02-says", en: `${name(WITNESS).en} told me: “${own.en}”`, zh: `${name(WITNESS).zh}跟我说：“${own.zh}”`, source: WITNESS }]);
     expect(result.turn.line).toBe(result.turn.statements[0]!.zh);
 
     // Asked again, it is the saved turn: no action, and the other language on request.
-    const again = await ask(never, c, result.session, { suspect: listener, topic: hearsayId(1, idx(WITNESS)), language: "en" });
+    const again = await ask(never, c, result.session, { suspect: listener, topic: hearsayId(c, 1, idx(WITNESS)), language: "en" });
     expect(again).toMatchObject({ replayed: true });
     expect(again.session).toBe(result.session);
     expect(again.turn.line).toBe(result.turn.statements[0]!.en);
-    expect(topicMenu(c, result.session, listener).find((t) => t.id === hearsayId(1, idx(WITNESS)))!.heard).toBe(true);
+    expect(topicMenu(c, result.session, listener).find((t) => t.id === hearsayId(c, 1, idx(WITNESS)))!.heard).toBe(true);
   });
 
   it("gives the player the same statement ids as asking the speaker would, so it opens what they open", async () => {
     const s = told("h");
     expect(await errorCode(() => inspect(c, s, "i-01"))).toBe("not-available");
-    const heard = (await ask(never, c, s, { suspect: listener, topic: hearsayId(1, idx(WITNESS)) })).session;
+    const heard = (await ask(never, c, s, { suspect: listener, topic: hearsayId(c, 1, idx(WITNESS)) })).session;
     expect(heldBy(heard).has("a-02-says")).toBe(true);
-    expect(inspect(c, heard, "i-01").repeated).toBe(false);
+    // The record it opens is the one the direct route opens, and costs the same.
+    const direct = (await ask(noModel, c, startSession(c, "direct"), { suspect: WITNESS, topic: "t-02" })).session;
+    const byHearsay = inspect(c, heard, "i-01");
+    const byAsking = inspect(c, direct, "i-01");
+    expect(byHearsay.repeated).toBe(false);
+    expect(byHearsay.evidence).toEqual(byAsking.evidence);
+    expect(byHearsay.session.actions).toBe(byAsking.session.actions);
   });
 
   it("waits like any new question while a later round is due", async () => {
     const s: Session = { ...(await spend(told("h"), GOSSIP_EVERY * 2)) };
     expect(gossipDue(c, s)).toBe(true);
-    expect(await errorCode(() => ask(never, c, s, { suspect: listener, topic: hearsayId(1, idx(WITNESS)) }))).toBe("gossip-due");
+    expect(await errorCode(() => ask(never, c, s, { suspect: listener, topic: hearsayId(c, 1, idx(WITNESS)) }))).toBe("gossip-due");
     const after = (await code(s)).session;
-    expect((await ask(never, c, after, { suspect: listener, topic: hearsayId(1, idx(WITNESS)) })).recorded).toBe(true);
+    expect((await ask(never, c, after, { suspect: listener, topic: hearsayId(c, 1, idx(WITNESS)) })).recorded).toBe(true);
   });
 
   it("is refused for anyone it was not told to, and for an event that never happened", async () => {
     const s = told("h");
-    expect(await errorCode(() => ask(never, c, s, { suspect: "s-08", topic: hearsayId(1, idx(WITNESS)) }))).toBe("not-available");
-    expect(await errorCode(() => ask(never, c, s, { suspect: listener, topic: hearsayId(2, idx(WITNESS)) }))).toBe("not-available");
-    expect(await errorCode(() => ask(never, c, s, { suspect: listener, topic: hearsayId(1, idx("s-09")) }))).toBe("not-available");
-    expect(await errorCode(() => ask(never, c, startSession(c, "plain"), { suspect: listener, topic: hearsayId(1, idx(WITNESS)) }))).toBe("not-available");
-    for (const id of ["~g0-1", "~g1-", "~g1-01", "~g1-1x", "~g", "~g1-999999"]) expect(await errorCode(() => ask(never, c, s, { suspect: listener, topic: id })), id).toBe("not-available");
+    expect(await errorCode(() => ask(never, c, s, { suspect: "s-08", topic: hearsayId(c, 1, idx(WITNESS)) }))).toBe("not-available");
+    expect(await errorCode(() => ask(never, c, s, { suspect: listener, topic: hearsayId(c, 2, idx(WITNESS)) }))).toBe("not-available");
+    expect(await errorCode(() => ask(never, c, s, { suspect: listener, topic: hearsayId(c, 1, idx("s-09")) }))).toBe("not-available");
+    expect(await errorCode(() => ask(never, c, startSession(c, "plain"), { suspect: listener, topic: hearsayId(c, 1, idx(WITNESS)) }))).toBe("not-available");
+    for (const id of ["~g0-1", "~g1-", "~g1-01", "~g1-1x", "~g", "~g1-999999", "~~g1-1", "g1-1"]) expect(await errorCode(() => ask(never, c, s, { suspect: listener, topic: id })), id).toBe("not-available");
   });
 
   it("is still not evidence, but a record can contradict it, and the lie then counts as heard and caught", async () => {
     let s = told("h");
-    s = (await ask(never, c, s, { suspect: listener, topic: hearsayId(1, idx(LIAR)) })).session;
+    s = (await ask(never, c, s, { suspect: listener, topic: hearsayId(c, 1, idx(LIAR)) })).session;
     expect(notebook(c, s).statements).toEqual([expect.objectContaining({ suspect: listener, source: LIAR, assertion: "a-03-says" })]);
     expect(notebook(c, s).contradictions).toEqual([]);
     // The liar was never spoken to. The proof's own records are gathered; one of them places the liar elsewhere.
-    s = (await ask(never, c, s, { suspect: listener, topic: hearsayId(1, idx(WITNESS)) })).session;
+    s = (await ask(never, c, s, { suspect: listener, topic: hearsayId(c, 1, idx(WITNESS)) })).session;
     for (const id of ["i-01", "i-02", "i-05", "i-04"]) s = inspect(c, s, id).session;
     const book = notebook(c, s);
     expect(book.contradictions).toEqual([expect.objectContaining({ suspect: listener, source: LIAR, assertion: "a-03-says" })]);
@@ -304,7 +349,7 @@ describe("a round with the model on", () => {
     expect(trace.sort()).toEqual(plans.map((p) => `m:g1:${p.index} gossip.tell ${GOSSIP_PROMPT_ID} minimal ${GOSSIP_OUTPUT_TOKENS} gossip:lighthouse`).sort());
     expect(provider.dispatched).toBe(8);
     expect(done.round).toMatchObject({ n: 1, chosenBy: "model", speakers: 8, calls: 8, requests: 8, costNano: 8 * PRICE });
-    expect(done.round.events).toEqual(plans.map((p) => ({ from: p.speaker, to: p.candidates[2], topic: p.topic })));
+    expect(done.round.events).toEqual(plans.map((p) => ({ from: p.speaker, to: p.candidates[2], topic: p.topic, by: "model" })));
     for (const request of provider.requests) {
       expect(lettersOf(request)).toEqual(["a", "b", "c", "d"]);
       expect(request.tools).toBeUndefined();
@@ -380,7 +425,7 @@ describe("a round with the model on", () => {
     };
     const done = await gossipRound(shaky, c, s, { model: true });
     expect(n).toBe(GOSSIP_WAVE);
-    expect(done.round).toMatchObject({ requests: GOSSIP_WAVE, costNano: (GOSSIP_WAVE - 1) * PRICE, problem: "unconfirmed:not-settled" });
+    expect(done.round).toMatchObject({ requests: GOSSIP_WAVE, unconfirmed: 1, refused: 0, costNano: (GOSSIP_WAVE - 1) * PRICE, problem: "unconfirmed:not-settled" });
     expect(done.round.events).toHaveLength(GOSSIP_WAVE - 1);
   });
 
@@ -416,9 +461,41 @@ describe("a round with the model on", () => {
     expect(done.round.requests).toBeLessThan(GOSSIP_WAVE);
     expect(done.round.problem).toBe("refused:kill-switch");
     expect(done.round.events).toHaveLength(done.round.requests);
-    expect(done.round).toMatchObject({ speakers: 8, calls: 8, chosenBy: "model" });
+    expect(done.round).toMatchObject({ speakers: 8, calls: 8, chosenBy: "model", unconfirmed: 0, refused: GOSSIP_WAVE - done.round.requests });
+    // Code does not step in for the speakers the model could not pick for.
+    expect(done.round.events.every((e) => e.by === "model")).toBe(true);
     // The round is closed all the same: the game goes on.
     expect(gossipDue(c, done.session)).toBe(false);
+  });
+
+  it("tells nobody when the speakers were to ask the model and it cannot be reached: code does not pick for free", async () => {
+    const s = await due();
+    const done = await gossipRound(noModel, c, s, { model: true });
+    expect(done.round).toMatchObject({ chosenBy: "model", speakers: 8, calls: 8, requests: 0, unconfirmed: 0, refused: GOSSIP_WAVE, costNano: 0, problem: "refused:kill-switch", events: [] });
+    // The same session with the model off from the start would have told eight people.
+    expect((await code(s)).round.events).toHaveLength(8);
+    // The round is used up either way.
+    expect(done.session.gossip!.rounds).toHaveLength(1);
+    expect(gossipDue(c, done.session)).toBe(false);
+  });
+
+  it("passes a throw on only after every request of the wave has come back", async () => {
+    const s = await due();
+    const { metered } = fake((request) => letter(lettersOf(request)[0]!));
+    let n = 0;
+    let back = 0;
+    const failing: Metered = async (request) => {
+      const mine = ++n;
+      if (mine === 1) throw new Error("the session is no longer held");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const result = await metered(request);
+      back++;
+      return result;
+    };
+    await expect(gossipRound(failing, c, s, { model: true })).rejects.toThrow("the session is no longer held");
+    // The other three of the first wave were let finish, and the second wave never began.
+    expect(n).toBe(GOSSIP_WAVE);
+    expect(back).toBe(GOSSIP_WAVE - 1);
   });
 
   it("does not ask the model when there is only one person left to tell", async () => {
@@ -435,7 +512,9 @@ describe("a round with the model on", () => {
     expect(single.map((p) => p.speaker)).toContain(first.speaker);
     expect(done.round.calls).toBe(plans.length - single.length);
     expect(provider.dispatched).toBe(done.round.calls);
-    expect(done.round.events).toContainEqual({ from: first.speaker, to: "s-20", topic: first.topic });
+    // With one candidate there is nothing to choose: code tells them, in a round the model picks in.
+    expect(done.round.events).toContainEqual({ from: first.speaker, to: "s-20", topic: first.topic, by: "code" });
+    expect(done.round.events.filter((e) => e.by === "model")).toHaveLength(done.round.calls);
   });
 });
 
@@ -471,10 +550,18 @@ describe("gossip in the terminal game", () => {
 });
 
 describe("a case's own topics", () => {
-  it("may not use the ids the game gives to hearsay", () => {
-    const taken = { ...archivePass, actions: { ...archivePass.actions, topics: archivePass.actions.topics.map((t, i) => (i === 0 ? { ...t, id: "~g1-0" } : t)) } };
-    const result = validateCase(taken);
-    expect(result.ok).toBe(false);
-    expect(result.issues.map((i) => i.code)).toContain("reserved-id");
+  it("may be named anything: the game names hearsay around them", async () => {
+    // A case on main may already have a topic called "~g1-0". It stays valid and stays itself.
+    const taken: Case = { ...archivePass, actions: { ...archivePass.actions, topics: archivePass.actions.topics.map((t, i) => (i === 0 ? { ...t, id: "~g1-0" } : t)) } };
+    expect(validateCase(taken).ok).toBe(true);
+    expect(hearsayPrefix(archivePass)).toBe("~g");
+    expect(hearsayPrefix(taken)).toBe("~~g");
+    const [ada, ben] = [taken.suspects[0]!.id, taken.suspects[1]!.id];
+    const s: Session = { ...startSession(taken, "ids", { gossip: true }), gossip: { rounds: [round([{ from: ada, to: ben, topic: "~g1-0" }])] } };
+    // Asked of Ada, "~g1-0" is her own topic; Ben has no topic of that name, and has the hearsay under another.
+    expect((await ask(noModel, taken, s, { suspect: ada, topic: "~g1-0" })).turn.statements[0]!.source).toBeUndefined();
+    expect(await errorCode(() => ask(noModel, taken, s, { suspect: ben, topic: "~g1-0" }))).toBe("not-available");
+    expect(topicMenu(taken, s, ben).map((t) => t.id)).toContain("~~g1-0");
+    expect((await ask(noModel, taken, s, { suspect: ben, topic: "~~g1-0" })).turn.statements[0]!.source).toBe(ada);
   });
 });

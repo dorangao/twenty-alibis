@@ -1,4 +1,3 @@
-import { HEARSAY_PREFIX } from "../game/gossip";
 import { CaseSchema, type Case } from "./schema";
 import { fitsTruth, holds } from "./truth";
 
@@ -108,8 +107,6 @@ function checkReferences(c: Case): Issue[] {
     }
   };
   for (const t of c.actions.topics) {
-    // The game names the topics it makes itself (what a suspect was told in gossip) this way.
-    if (t.id.startsWith(HEARSAY_PREFIX)) bad("reserved-id", `topic ${t.id}: a topic's id may not start with "${HEARSAY_PREFIX}"`);
     need("suspect", t.suspect, `topic ${t.id}.suspect`);
     for (const a of t.yields) need("assertion", a, `topic ${t.id}.yields`);
     for (const r of t.requires ?? []) needHeld(r, `topic ${t.id}.requires`);

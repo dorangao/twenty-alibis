@@ -26,6 +26,8 @@ import type { Case, Text, Topic } from "../case/schema";
 
 /** A round is due each time this many more actions have been used. */
 export const GOSSIP_EVERY = 4;
+/** The same, in a case too short to reach that: one with fewer than eight topics and inspections of its own. */
+export const GOSSIP_EVERY_SHORT = 2;
 /** The most rounds one session has. */
 export const GOSSIP_ROUNDS = 3;
 /** The most suspects who speak in one round. */
@@ -40,8 +42,10 @@ export interface GossipEvent {
   from: string;
   /** Who heard it. */
   to: string;
-  /** Which of the speaker's own topics was passed on. */
+  /** Which of the speaker's own topics was passed on: everything the speaker states on it, as one bundle. */
   topic: string;
+  /** Who picked the listener: the speaker's agent, or code. */
+  by: "code" | "model";
 }
 
 export interface GossipRound {
@@ -50,7 +54,10 @@ export interface GossipRound {
   /** Actions used when the round ran. */
   at: number;
   events: GossipEvent[];
-  /** Who picked the listeners. */
+  /**
+   * Who was to pick the listeners. "code": the session has the model off, and code picked
+   * every one. "model": each speaker's agent was to pick, except where there was one candidate.
+   */
   chosenBy: "code" | "model";
   /** Suspects who had something to tell and someone to tell it to. */
   speakers: number;
@@ -58,6 +65,10 @@ export interface GossipRound {
   calls: number;
   /** Requests that left this machine. */
   requests: number;
+  /** Of those, the ones whose cost is not confirmed: they failed on the way, or came back unsettled. Their holds stay with the spend guard. */
+  unconfirmed: number;
+  /** Choices that were refused before anything was sent. Nothing was charged for them. */
+  refused: number;
   /** The confirmed cost of the requests that came back. */
   costNano: number;
   /** Set when a request was refused, failed, or came back with its cost unconfirmed. No further wave was sent after it. */
@@ -65,7 +76,8 @@ export interface GossipRound {
   /**
    * True while the round's requests are out. A round is written down like this before its
    * first request, so a server that is lost in the middle leaves the game with the round
-   * closed and empty, and its requests are never sent again.
+   * closed and empty, and its requests are never sent again. What such a round sent, if
+   * anything, is not known here: only the spend guard's own count says.
    */
   pending?: true;
 }
@@ -84,18 +96,27 @@ export interface GossipPlan {
   candidates: string[];
 }
 
-/** A case's own topic may not have an id that starts with this: hearsay topics do. */
-export const HEARSAY_PREFIX = "~g";
+/**
+ * How this case's hearsay topics begin: "~g", or that with more "~" in front, as many as it
+ * takes for no topic of the case's own to begin the same way. A case may name its topics
+ * anything, so the game picks a name the case has left free.
+ */
+export function hearsayPrefix(c: Case): string {
+  let prefix = "~g";
+  while (c.actions.topics.some((t) => t.id.startsWith(prefix))) prefix = `~${prefix}`;
+  return prefix;
+}
 
 /** The id of the topic "what did the speaker tell you in round n". */
-export const hearsayId = (round: number, speakerIndex: number): string => `${HEARSAY_PREFIX}${round}-${speakerIndex}`;
+export const hearsayId = (c: Case, round: number, speakerIndex: number): string => `${hearsayPrefix(c)}${round}-${speakerIndex}`;
 
-const HEARSAY_ID = /^~g([1-9]\d?)-(0|[1-9]\d{0,3})$/;
+const HEARSAY_REST = /^([1-9]\d?)-(0|[1-9]\d{0,3})$/;
 
 /** The event a hearsay topic id stands for, if there is one in this session. */
 export function hearsayEvent(c: Case, state: GossipState | undefined, id: string): { round: number; event: GossipEvent; topic: Topic } | null {
   if (!state) return null;
-  const match = HEARSAY_ID.exec(id);
+  const prefix = hearsayPrefix(c);
+  const match = id.startsWith(prefix) ? HEARSAY_REST.exec(id.slice(prefix.length)) : null;
   if (!match) return null;
   const round = Number(match[1]);
   const speaker = c.suspects[Number(match[2])];
@@ -114,10 +135,15 @@ export function hearsayTopics(c: Case, state: GossipState | undefined, suspect: 
       const index = c.suspects.findIndex((s) => s.id === event.from);
       const speaker = c.suspects[index];
       if (!speaker) continue;
-      out.push({ id: hearsayId(round.n, index), label: { en: `What did ${speaker.name.en} tell you?`, zh: `${speaker.name.zh}跟你说了什么？` }, round: round.n, from: event.from });
+      out.push({ id: hearsayId(c, round.n, index), label: { en: `What did ${speaker.name.en} tell you?`, zh: `${speaker.name.zh}跟你说了什么？` }, round: round.n, from: event.from });
     }
   }
   return out;
+}
+
+/** How many actions lie between two rounds in this case. */
+export function gossipEvery(c: Case): number {
+  return c.actions.topics.length + c.actions.inspections.length < 2 * GOSSIP_EVERY ? GOSSIP_EVERY_SHORT : GOSSIP_EVERY;
 }
 
 /**
@@ -129,7 +155,7 @@ export function roundDue(c: Case, session: { actions: number; gossip?: GossipSta
   if (!state || session.verdict !== undefined) return false;
   if (state.rounds.length >= GOSSIP_ROUNDS) return false;
   if (session.actions >= c.sessionCap) return false;
-  return session.actions >= GOSSIP_EVERY * (state.rounds.length + 1);
+  return session.actions >= gossipEvery(c) * (state.rounds.length + 1);
 }
 
 /**
@@ -137,8 +163,8 @@ export function roundDue(c: Case, session: { actions: number; gossip?: GossipSta
  *
  * Speakers are taken in the case's order, starting where the round before would have stopped,
  * so over the rounds everyone gets a turn. A suspect speaks if one of its own topics is open
- * to the player and at least one other suspect has not heard it from them. Of such topics it
- * passes on the one fewest have heard, the earlier one on a tie. The candidates are the
+ * to the player, states something, and at least one other suspect has not heard it from them.
+ * Of such topics it passes on the one fewest have heard, the earlier one on a tie. The candidates are the
  * people who have not heard it, in an order that turns with the round and the speaker.
  */
 export function planRound(c: Case, state: GossipState, held: Held, n: number): GossipPlan[] {
@@ -158,7 +184,7 @@ export function planRound(c: Case, state: GossipState, held: Held, n: number): G
     const speaker = people[index]!;
     let best: { topic: string; heard: number; fresh: string[] } | null = null;
     for (const topic of c.actions.topics) {
-      if (topic.suspect !== speaker.id || !isOpen(topic, held)) continue;
+      if (topic.suspect !== speaker.id || topic.yields.length === 0 || !isOpen(topic, held)) continue;
       const heard = told.get(`${speaker.id}\u0000${topic.id}`) ?? new Set<string>();
       const fresh = people.filter((p) => p.id !== speaker.id && !heard.has(p.id)).map((p) => p.id);
       if (fresh.length === 0) continue;
@@ -174,5 +200,5 @@ export function planRound(c: Case, state: GossipState, held: Held, n: number): G
 
 /** The round as it is written down before any request is sent: closed, empty, and marked pending. */
 export function pendingRound(n: number, at: number, plans: readonly GossipPlan[]): GossipRound {
-  return { n, at, events: [], chosenBy: "model", speakers: plans.length, calls: plans.filter((p) => p.candidates.length > 1).length, requests: 0, costNano: 0, pending: true };
+  return { n, at, events: [], chosenBy: "model", speakers: plans.length, calls: plans.filter((p) => p.candidates.length > 1).length, requests: 0, unconfirmed: 0, refused: 0, costNano: 0, pending: true };
 }
